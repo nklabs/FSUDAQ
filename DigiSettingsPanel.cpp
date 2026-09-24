@@ -2162,10 +2162,10 @@ void DigiSettingsPanel::SetUpChannel_PSD(){
     SetUpCheckBox(chkResetTimestampByTRGIN[ID][numChannel],  "TRI-IN Reset Timestamp [G]", otherLayout,  0, 2, DPP::PSD::DPPAlgorithmControl2_G, DPP::PSD::Bit_DPPAlgorithmControl2::ResetTimestampByTRGIN, -1, 2);
     
     SetUpCheckBox(chkTestPule[ID][numChannel],                       "Int. Test Pulse", otherLayout, 1, 0, DPP::DPPAlgorithmControl, DPP::Bit_DPPAlgorithmControl_PSD::InternalTestPulse);
-    if( digi[ID]->GetBoardInfo().Model == CAEN_DGTZ_V1730 ){
+    if( digi[ID]->GetBoardInfo().Model == CAEN_DGTZ_V1730 || digi[ID]->GetBoardInfo().Model == CAEN_DGTZ_DT5730 ){
       SetUpComboBoxBit(cbTestPulseRate[ID][numChannel],  "Test Pulse Rate : ", otherLayout, 1, 2, DPP::Bit_DPPAlgorithmControl_PSD::ListTestPulseRate_730, DPP::DPPAlgorithmControl, DPP::Bit_DPPAlgorithmControl_PSD::TestPulseRate);
     }
-    if( digi[ID]->GetBoardInfo().Model == CAEN_DGTZ_V1725 ){
+    if( digi[ID]->GetBoardInfo().Model == CAEN_DGTZ_V1725 || digi[ID]->GetBoardInfo().Model == CAEN_DGTZ_DT5725 ){
       SetUpComboBoxBit(cbTestPulseRate[ID][numChannel],  "Test Pulse Rate : ", otherLayout, 1, 2, DPP::Bit_DPPAlgorithmControl_PSD::ListTestPulseRate_725, DPP::DPPAlgorithmControl, DPP::Bit_DPPAlgorithmControl_PSD::TestPulseRate);
     }
 
@@ -2323,7 +2323,7 @@ void DigiSettingsPanel::SetUpChannel_PSD(){
           SetUpSpinBox(sbFixedBaseline[ID][ch],                    "", tabLayout, ch + 1, 7, DPP::PSD::FixedBaseline, ch);
 
           connect(cbBaseLineAvg[ID][ch], &RComboBox::currentIndexChanged, this, [=](){
-            for( int jj = 0; jj < 16 ; jj++ ){
+            for( int jj = 0; jj < digi[ID]->GetNumRegChannels() ; jj++ ){
               sbFixedBaseline[ID][jj]->setEnabled(  cbBaseLineAvg[ID][jj]->currentData().toInt() == 0);
             }
           });
@@ -2530,10 +2530,10 @@ void DigiSettingsPanel::SetUpChannel_PSD(){
             QLabel * lb3 = new QLabel("Test Pulse Rate", this); lb3->setAlignment(Qt::AlignHCenter); tabLayout->addWidget(lb3, 0, 3);
           }
           SetUpCheckBox(chkTestPule[ID][ch],   "Int. Test Pulse", tabLayout, ch + 1, 1, DPP::DPPAlgorithmControl, DPP::Bit_DPPAlgorithmControl_PSD::InternalTestPulse, ch);
-          if( digi[ID]->GetBoardInfo().Model == CAEN_DGTZ_V1730 ){
+          if( digi[ID]->GetBoardInfo().Model == CAEN_DGTZ_V1730 || digi[ID]->GetBoardInfo().Model == CAEN_DGTZ_DT5730 ){
             SetUpComboBoxBit(cbTestPulseRate[ID][ch],  "", tabLayout, ch + 1, 2, DPP::Bit_DPPAlgorithmControl_PSD::ListTestPulseRate_730, DPP::DPPAlgorithmControl, DPP::Bit_DPPAlgorithmControl_PSD::TestPulseRate, 1, ch);
           }
-          if( digi[ID]->GetBoardInfo().Model == CAEN_DGTZ_V1725 ){
+          if( digi[ID]->GetBoardInfo().Model == CAEN_DGTZ_V1725 || digi[ID]->GetBoardInfo().Model == CAEN_DGTZ_DT5725 ){
             SetUpComboBoxBit(cbTestPulseRate[ID][ch],  "", tabLayout, ch + 1, 2, DPP::Bit_DPPAlgorithmControl_PSD::ListTestPulseRate_725, DPP::DPPAlgorithmControl, DPP::Bit_DPPAlgorithmControl_PSD::TestPulseRate, 1, ch);
           }
         }
@@ -3618,6 +3618,7 @@ void DigiSettingsPanel::UpdateComboBox(RComboBox * & cb, Reg para, int ch){
 
 void DigiSettingsPanel::UpdateComboBoxBit(RComboBox * & cb, uint32_t fullBit, std::pair<unsigned short, unsigned short> bit){
   DebugPrint("%s", "DigiSettingsPanel");
+  if( cb == nullptr ) return;
   int temp = Digitizer::ExtractBits(fullBit, bit);
   for( int i = 0; i < cb->count(); i++){
     if( cb->itemData(i).toInt() == temp) {
@@ -3904,7 +3905,7 @@ void DigiSettingsPanel::SyncAllChannelsTab_PSD(){
   SyncComboBox(cbVetoMode);
   SyncComboBox(cbVetoStep);
 
-  for( int jj = 0; jj < 16 ; jj++ ){
+  for( int jj = 0; jj < digi[ID]->GetNumRegChannels() ; jj++ ){
     sbFixedBaseline[ID][jj]->setEnabled(  cbBaseLineAvg[ID][jj]->currentData().toInt() == 0);
   }
 
