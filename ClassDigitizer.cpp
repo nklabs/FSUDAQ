@@ -98,7 +98,7 @@ int Digitizer::OpenDigitizer(int boardID, int portID, bool program, bool verbose
   if( verbose) printf("============= Opening Digitizer at Board %d, Port %d \n", boardID, portID);
   
   ///-------- try USB first
-  if( portID < 4){
+  if( portID < MaxNPorts){
     LinkType = CAEN_DGTZ_USB;     /// Link Type
     ret = (int) CAEN_DGTZ_OpenDigitizer(LinkType, boardID, 0, VMEBaseAddress, &handle);
     if (ret != 0){ ///---------- try Optical link
