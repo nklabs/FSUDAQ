@@ -1078,8 +1078,8 @@ void Digitizer::ProgramSettingsToBoard(){
   }
 
   //set agg
-  ret = CAEN_DGTZ_SetNumEventsPerAggregate(handle, 10);
-  ret |= CAEN_DGTZ_SetDPPEventAggregation(handle, 0, 0); // Auto set
+  haha = DPP::AggregateOrganization;        WriteRegister(haha, GetSettingFromMemory(haha), -1, false);
+  haha = DPP::MaxAggregatePerBlockTransfer; WriteRegister(haha, GetSettingFromMemory(haha), -1, false);
 
 }
 
