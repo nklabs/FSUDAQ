@@ -170,6 +170,7 @@ private:
   QCheckBox * chkAutoIncrement;
   QCheckBox * chkSkipComment;
   RComboBox * cbAutoRun;
+  RSpinBox * sbFileSizeMB; // roll-over size of the per-board data files
 
   QString startComment;
   QString stopComment;

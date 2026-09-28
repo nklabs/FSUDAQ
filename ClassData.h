@@ -109,6 +109,8 @@ class Data{
     unsigned int GetFileSize() const {return outFileSize;}
     uint64_t GetTotalFileSize() const {return FinishedOutFilesSize + outFileSize;}
     void ZeroTotalFileSize() { FinishedOutFilesSize = 0; }
+    void SetMaxFileSize(uint64_t bytes) { maxFileSize = bytes; } // a file is closed and the next index opened once it exceeds this
+    uint64_t GetMaxFileSize() const { return maxFileSize; }
 
     void CalTriggerRate(); // this method is called by FSUDAQ::UpdateScalar()
     void ClearReferenceTime();
@@ -145,6 +147,7 @@ class Data{
     std::string outFilePrefix;
     std::string outFileName;
     unsigned int outFileSize; // should be max at 2 GB
+    uint64_t maxFileSize;     // roll-over size, default MaxSaveFileSize
 
     ullong t0[MaxNChannels]; // for trigger rate calculation
 
@@ -186,6 +189,7 @@ inline Data::Data(unsigned short numCh, uInt dataSize): numInputCh(numCh){
   outFile = nullptr;
   outFileSize = 0; // should be max at 2 GB
   FinishedOutFilesSize = 0; // sum of files size.
+  maxFileSize = (uint64_t) MaxSaveFileSize;
 
 }
 
@@ -455,7 +459,7 @@ inline void Data::SaveData(){
 
   if( outFile == nullptr ) return;
 
-  if( outFileSize > (unsigned int) MaxSaveFileSize){
+  if( (uint64_t) outFileSize > maxFileSize ){
     FinishedOutFilesSize += ftell(outFile);
     CloseSaveFile();
     outFileIndex ++;

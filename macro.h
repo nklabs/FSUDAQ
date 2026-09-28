@@ -9,7 +9,7 @@
 #define MaxRegChannel 16 
 #define MaxNChannels 64
 #define MaxRecordLength 0x3fff * 8 
-#define MaxSaveFileSize  1024 * 1024 * 1024 * 2
+#define MaxSaveFileSize  (2ULL * 1024 * 1024 * 1024) // default roll-over size of a data file, 2 GiB
 
 #define DefaultDataSize 10000 /// store 10k events per channels
 

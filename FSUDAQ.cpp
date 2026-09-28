@@ -238,6 +238,21 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
 
     //------------------------------------------
     rowID ++;
+    QLabel * lbFileSize = new QLabel("File size : ", this);
+    lbFileSize->setAlignment(Qt::AlignRight | Qt::AlignCenter);
+    sbFileSizeMB = new RSpinBox(this, 0);
+    sbFileSizeMB->setRange(10, 1000000);
+    sbFileSizeMB->setSingleStep(10);
+    sbFileSizeMB->setValue(MaxSaveFileSize / 1024 / 1024);
+    sbFileSizeMB->setSuffix(" MB");
+    sbFileSizeMB->setToolTip("Each board's data file is closed and the next index opened once it exceeds this size.");
+    connect(sbFileSizeMB, &RSpinBox::editingFinished, this, &FSUDAQ::SaveProgramSettings);
+
+    layout->addWidget(lbFileSize, rowID, 4);
+    layout->addWidget(sbFileSizeMB, rowID, 5);
+
+    //------------------------------------------
+    rowID ++;
     QLabel * lbComment = new QLabel("Run Comment : ", this);
     lbComment->setAlignment(Qt::AlignRight | Qt::AlignCenter);
 
@@ -262,9 +277,9 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     layout->addWidget(lbComment, rowID, 0);
     layout->addWidget(leComment, rowID, 1, 1, 4);
     layout->addWidget(chkAutoIncrement, rowID, 5);
-    layout->addWidget(chkSkipComment, rowID, 6);
+    layout->addWidget(chkSkipComment, rowID - 1, 6);
 
-    layout->addWidget(bnOpenScaler, rowID, 7);
+    layout->addWidget(bnOpenScaler, rowID - 1, 7);
 
     layout->setColumnStretch(0, 1);
     layout->setColumnStretch(1, 2);
@@ -472,6 +487,7 @@ void FSUDAQ::LoadProgramSettings(){
         QString key = line.left(eq).trimmed();
         QString value = line.mid(eq + 1).trimmed();
         if( eq > 0 && key == "autoIncrementRunID" ) chkAutoIncrement->setChecked(value.toInt() != 0);
+        if( eq > 0 && key == "maxFileSizeMB" && value.toInt() > 0 ) sbFileSizeMB->setValue(value.toInt());
       }
 
       count ++;
@@ -531,6 +547,7 @@ void FSUDAQ::SaveProgramSettings(){
   file.write((elogUser+"\n").toStdString().c_str());
   file.write((elogPWD+"\n").toStdString().c_str());
   file.write(("autoIncrementRunID=" + QString::number(chkAutoIncrement->isChecked() ? 1 : 0) + "\n").toStdString().c_str());
+  file.write(("maxFileSizeMB=" + QString::number((int) sbFileSizeMB->value()) + "\n").toStdString().c_str());
   file.write("//------------end of file.\n");
   
   file.close();
@@ -1196,6 +1213,7 @@ void FSUDAQ::StartACQ(){
       std::string runSettingName =  (rawDataPath + "/" + prefix + "_" + QString::number(runID).rightJustified(3, '0') + "_" + QString::number(digi[i]->GetSerialNumber())).toStdString();
       runSettingName += "_" + digi[i]->GetData()->DPPTypeStr + ".bin";
       digi[i]->SaveAllSettingsAsTextForRun(runSettingName);
+      digi[i]->GetData()->SetMaxFileSize((uint64_t) sbFileSizeMB->value() * 1024 * 1024);
       if( digi[i]->GetData()->OpenSaveFile((rawDataPath + "/" + prefix + "_" + QString::number(runID).rightJustified(3, '0')).toStdString()) == false ) {
         LogMsg("Cannot open save file : " + QString::fromStdString(digi[i]->GetData()->GetOutFileName() ) + ". Probably read-only?");
        continue; 
@@ -1235,6 +1253,7 @@ void FSUDAQ::StartACQ(){
   bnStopACQ->setStyleSheet("background-color: red;");
   bnOpenScope->setEnabled(false);
   cbAutoRun->setEnabled(false);
+  sbFileSizeMB->setEnabled(false);
   bnSync->setEnabled(false);
 
   if( digiSettings ) digiSettings->EnableButtons(false);
@@ -1308,6 +1327,7 @@ void FSUDAQ::StopACQ(){
   bnStopACQ->setStyleSheet("");
   bnOpenScope->setEnabled(true);
   cbAutoRun->setEnabled(true);
+  sbFileSizeMB->setEnabled(true);
   bnSync->setEnabled(true);
 
   if( scalar ){
