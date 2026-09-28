@@ -51,6 +51,8 @@ DigiSettingsPanel::DigiSettingsPanel(Digitizer ** digi, unsigned int nDigi, QStr
   }
   // setGeometry(0, 0, 1700, 850);  
 
+  for( int i = 0; i < MaxNDigitizer; i++ ) chkApplyAllBoards[i] = nullptr;
+
   tabWidget = new QTabWidget(this);
   setCentralWidget(tabWidget);
 
@@ -386,6 +388,21 @@ DigiSettingsPanel::~DigiSettingsPanel(){
 
 //*================================================================
 //*================================================================
+std::vector<unsigned int> DigiSettingsPanel::TargetBoards(int ch, int chID) const {
+  std::vector<unsigned int> boards;
+  boards.push_back(ID);
+  if( ch != -1 ) return boards; // a single-channel tab writes to this board only
+  if( chkApplyAllBoards[ID] == nullptr || !chkApplyAllBoards[ID]->isChecked() ) return boards;
+  for( unsigned int i = 0; i < nDigi; i++ ){
+    if( i == ID || digi[i]->IsBoardDisabled() ) continue;
+    if( digi[i]->GetDPPType() != digi[ID]->GetDPPType() ) continue;   // PHA / PSD / QDC registers differ
+    if( digi[i]->GetTick2ns() != digi[ID]->GetTick2ns() ) continue;   // x730 vs x725: bit codes such as the test-pulse rate differ
+    if( chID >= digi[i]->GetNumRegChannels() ) continue;              // e.g. channel 12 on an 8-channel DT5730
+    boards.push_back(i);
+  }
+  return boards;
+}
+
 void DigiSettingsPanel::SetUpInfo(QString label, std::string value, QGridLayout *gLayout, int row, int col){
   DebugPrint("%s", "DigiSettingsPanel");;
   QLabel * lab = new QLabel(label, this);
@@ -408,13 +425,15 @@ void DigiSettingsPanel::SetUpCheckBox(QCheckBox * &chkBox, QString label, QGridL
 
     int chID = ch < 0 ? chSelection[ID]->currentData().toInt() : ch;
     
-    if( para == DPP::DisableExternalTrigger ) {
-      digi[ID]->SetBits(para, bit, state ? 0 : 1, chID);
-    }else{
-      digi[ID]->SetBits(para, bit, state ? 1 : 0, chID);
-    }
+    for( unsigned int bd : TargetBoards(ch, chID) ){
+      if( para == DPP::DisableExternalTrigger ) {
+        digi[bd]->SetBits(para, bit, state ? 0 : 1, chID);
+      }else{
+        digi[bd]->SetBits(para, bit, state ? 1 : 0, chID);
+      }
 
-    if( para.IsCoupled() == true && chID >= 0 ) digi[ID]->SetBits(para, bit, state ? 1 : 0, chID%2 == 0 ? chID + 1 : chID - 1);
+      if( para.IsCoupled() == true && chID >= 0 ) digi[bd]->SetBits(para, bit, state ? 1 : 0, chID%2 == 0 ? chID + 1 : chID - 1);
+    }
     UpdatePanelFromMemory();
     emit UpdateOtherPanels();
   });
@@ -442,19 +461,16 @@ void DigiSettingsPanel::SetUpComboBoxBit(RComboBox * &cb, QString label, QGridLa
 
     int chID = ch < 0 ? chSelection[ID]->currentData().toInt() : ch;
 
-    if( ch == -1 && chID == -1) {
-
-      for(int kk = 0; kk < digi[ID]->GetNumRegChannels(); kk++){
-        digi[ID]->SetBits(para, bit, cb->currentData().toUInt(), kk);
+    for( unsigned int bd : TargetBoards(ch, chID) ){
+      if( ch == -1 && chID == -1) {
+        for(int kk = 0; kk < digi[bd]->GetNumRegChannels(); kk++){
+          digi[bd]->SetBits(para, bit, cb->currentData().toUInt(), kk);
+        }
+        continue;
       }
-
-      UpdatePanelFromMemory();
-      emit UpdateOtherPanels();
-      return;
+      digi[bd]->SetBits(para, bit, cb->currentData().toUInt(), chID);
+      if( para.IsCoupled() == true && chID >= 0  ) digi[bd]->SetBits(para, bit, cb->currentData().toUInt(), chID%2 == 0 ? chID + 1 : chID - 1);
     }
-
-    digi[ID]->SetBits(para, bit, cb->currentData().toUInt(), chID);
-    if( para.IsCoupled() == true && chID >= 0  ) digi[ID]->SetBits(para, bit, cb->currentData().toUInt(), chID%2 == 0 ? chID + 1 : chID - 1);
     UpdatePanelFromMemory();
     emit UpdateOtherPanels();
   });
@@ -482,8 +498,10 @@ void DigiSettingsPanel::SetUpComboBox(RComboBox * &cb, QString label, QGridLayou
     if( ch == -1 && cb->currentText() == ComBoxMixed ) return;
 
     int chID = ch < 0 ? chSelection[ID]->currentData().toInt() : ch;
-    digi[ID]->WriteRegister(para, cb->currentData().toUInt(), chID);
-    if( para.IsCoupled() == true && chID >= 0  ) digi[ID]->WriteRegister(para, cb->currentData().toUInt(), chID%2 == 0 ? chID + 1 : chID - 1);
+    for( unsigned int bd : TargetBoards(ch, chID) ){
+      digi[bd]->WriteRegister(para, cb->currentData().toUInt(), chID);
+      if( para.IsCoupled() == true && chID >= 0  ) digi[bd]->WriteRegister(para, cb->currentData().toUInt(), chID%2 == 0 ? chID + 1 : chID - 1);
+    }
     UpdatePanelFromMemory();
     emit UpdateOtherPanels();
   });
@@ -536,22 +554,25 @@ void DigiSettingsPanel::SetUpSpinBox(RSpinBox * &sb, QString label, QGridLayout 
     int chID = ch < 0 ? chSelection[ID]->currentData().toInt() : ch;
     if(  isBoard ) chID = -1;
 
+    // physical values (ns) are converted per board, so a board with another tick still gets the same time
+    std::vector<unsigned int> boards = TargetBoards(ch, chID);
+
     if( para == DPP::ChannelDCOffset ){
-      digi[ID]->WriteRegister(para, 0xFFFF * (1.0 - sb->value() / 100. ), chID);
+      for( unsigned int bd : boards ) digi[bd]->WriteRegister(para, 0xFFFF * (1.0 - sb->value() / 100. ), chID);
       UpdatePanelFromMemory();
       emit UpdateOtherPanels();
       return;
     }
 
     if( para == DPP::PSD::CFDSetting ){
-      digi[ID]->SetBits(para, DPP::PSD::Bit_CFDSetting::CFDDealy, sb->value()/digi[ID]->GetTick2ns(), chID);
+      for( unsigned int bd : boards ) digi[bd]->SetBits(para, DPP::PSD::Bit_CFDSetting::CFDDealy, sb->value()/digi[bd]->GetTick2ns(), chID);
       UpdatePanelFromMemory();
       emit UpdateOtherPanels();
       return;
     }
 
     if( para == DPP::DPPAlgorithmControl ){
-      digi[ID]->SetBits(para, {5,0}, sb->value(), chID);
+      for( unsigned int bd : boards ) digi[bd]->SetBits(para, {5,0}, sb->value(), chID);
       UpdatePanelFromMemory();
       emit UpdateOtherPanels();
       return;
@@ -567,12 +588,14 @@ void DigiSettingsPanel::SetUpSpinBox(RSpinBox * &sb, QString label, QGridLayout 
       }
     }
 
-    uint32_t bit = para.GetPartialStep() == -1 ? sb->value() : sb->value() / para.GetPartialStep() / digi[ID]->GetTick2ns();
+    for( unsigned int bd : boards ){
+      uint32_t bit = para.GetPartialStep() == -1 ? sb->value() : sb->value() / para.GetPartialStep() / digi[bd]->GetTick2ns();
 
-    if( para.IsCoupled() == true  && chID >= 0 ) {
-      digi[ID]->WriteRegister(para, bit, chID%2 == 0 ? chID + 1 : chID - 1);
-    }else{
-      digi[ID]->WriteRegister(para, bit, chID);
+      if( para.IsCoupled() == true  && chID >= 0 ) {
+        digi[bd]->WriteRegister(para, bit, chID%2 == 0 ? chID + 1 : chID - 1);
+      }else{
+        digi[bd]->WriteRegister(para, bit, chID);
+      }
     }
 
     UpdatePanelFromMemory();
@@ -1578,6 +1601,16 @@ void DigiSettingsPanel::SetUpChannel_PHA(){
     for( int i = 0; i < numChannel; i++) chSelection[ID]->addItem(QString::number(i), i);
     papa->addWidget(chSelection[ID]);
 
+    chkApplyAllBoards[ID] = new QCheckBox("Apply to all boards", this);
+    chkApplyAllBoards[ID]->setToolTip("Every value set on this tab is also written to the other boards with the same DPP firmware and sampling rate; a channel the other board does not have is skipped.");
+    papa->addWidget(chkApplyAllBoards[ID]);
+    connect(chkApplyAllBoards[ID], &QCheckBox::toggled, this, [=](bool checked){
+      if( !checked ) return;
+      QString list;
+      for( unsigned int bd : TargetBoards(-1, -1) ) if( bd != ID ) list += (list.isEmpty() ? "" : ", ") + QString::number(digi[bd]->GetSerialNumber());
+      SendLogMsg("Digi-" + QString::number(digi[ID]->GetSerialNumber()) + " all-channels tab: values now also go to " + (list.isEmpty() ? "no other board (none with the same firmware and sampling rate)" : "Digi-" + list) + ".");
+    });
+
     connect(chSelection[ID], &RComboBox::currentIndexChanged, this, [=](){
       SyncAllChannelsTab_PHA();
     });
@@ -2036,6 +2069,16 @@ void DigiSettingsPanel::SetUpChannel_PSD(){
     chSelection[ID]->addItem("All Ch.", -1);
     for( int i = 0; i < numChannel; i++) chSelection[ID]->addItem(QString::number(i), i);
     papa->addWidget(chSelection[ID]);
+
+    chkApplyAllBoards[ID] = new QCheckBox("Apply to all boards", this);
+    chkApplyAllBoards[ID]->setToolTip("Every value set on this tab is also written to the other boards with the same DPP firmware and sampling rate; a channel the other board does not have is skipped.");
+    papa->addWidget(chkApplyAllBoards[ID]);
+    connect(chkApplyAllBoards[ID], &QCheckBox::toggled, this, [=](bool checked){
+      if( !checked ) return;
+      QString list;
+      for( unsigned int bd : TargetBoards(-1, -1) ) if( bd != ID ) list += (list.isEmpty() ? "" : ", ") + QString::number(digi[bd]->GetSerialNumber());
+      SendLogMsg("Digi-" + QString::number(digi[ID]->GetSerialNumber()) + " all-channels tab: values now also go to " + (list.isEmpty() ? "no other board (none with the same firmware and sampling rate)" : "Digi-" + list) + ".");
+    });
 
     connect(chSelection[ID], &RComboBox::currentIndexChanged, this, [=](){
       SyncAllChannelsTab_PSD();
@@ -2630,6 +2673,16 @@ void DigiSettingsPanel::SetUpChannel_QDC(){
     chSelection[ID]->addItem("All Grp.", -1);
     for( int i = 0; i < numGroup; i++) chSelection[ID]->addItem(QString::number(i), i);
     papa->addWidget(chSelection[ID]);
+
+    chkApplyAllBoards[ID] = new QCheckBox("Apply to all boards", this);
+    chkApplyAllBoards[ID]->setToolTip("Every value set on this tab is also written to the other boards with the same DPP firmware and sampling rate; a channel the other board does not have is skipped.");
+    papa->addWidget(chkApplyAllBoards[ID]);
+    connect(chkApplyAllBoards[ID], &QCheckBox::toggled, this, [=](bool checked){
+      if( !checked ) return;
+      QString list;
+      for( unsigned int bd : TargetBoards(-1, -1) ) if( bd != ID ) list += (list.isEmpty() ? "" : ", ") + QString::number(digi[bd]->GetSerialNumber());
+      SendLogMsg("Digi-" + QString::number(digi[ID]->GetSerialNumber()) + " all-channels tab: values now also go to " + (list.isEmpty() ? "no other board (none with the same firmware and sampling rate)" : "Digi-" + list) + ".");
+    });
 
     connect(chSelection[ID], &RComboBox::currentIndexChanged, this, [=](){
       SyncAllChannelsTab_QDC();
