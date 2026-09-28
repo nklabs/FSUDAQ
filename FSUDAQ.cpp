@@ -1198,9 +1198,18 @@ void FSUDAQ::StartACQ(){
   DebugPrint("%s", "FSUDAQ");
   if( digi == nullptr ) return;
 
+  // the prefix typed in the field applies to this run (it used to take effect one run late)
+  if( chkSaveData->isChecked() && lePrefix->text() != prefix ) {
+    prefix = lePrefix->text();
+    lePrefix->setStyleSheet("");
+  }
+
   bool commentResult = true;
   if( chkSaveData->isChecked()) commentResult = CommentDialog(true);
   if( commentResult == false) return;
+
+  QString runIDStr = QString::number(runID).rightJustified(3, '0');
+  QString runDir = RunFolder();
 
   if( chkSaveData->isChecked() ) {
     // Data files are opened with overwrite, so never start a run whose number is already on disk.
@@ -1208,16 +1217,25 @@ void FSUDAQ::StartACQ(){
     // catches a stale lastRun.sh.
     QStringList existing = ExistingRunFiles();
     if( !existing.isEmpty() ){
-      QString runIDStr = QString::number(runID).rightJustified(3, '0');
-      QString msg = "Run-" + runIDStr + " with prefix \"" + prefix + "\" already has " + QString::number(existing.size()) + " file(s) in\n" + rawDataPath + "\n\n"
+      QString msg = "Run-" + runIDStr + " with prefix \"" + prefix + "\" already has " + QString::number(existing.size()) + " file(s) in\n" + runDir + "\n\n"
                     + "e.g. " + existing.first() + "\n\nChoose another run number or move those files away. The run was not started.";
       QMessageBox::warning(this, "Run number already used", msg);
-      LogMsg("<font style=\"color: red;\">Start Run-" + runIDStr + " refused: " + QString::number(existing.size()) + " file(s) for this prefix and run number already exist in " + rawDataPath + ".</font>");
+      LogMsg("<font style=\"color: red;\">Start Run-" + runIDStr + " refused: " + QString::number(existing.size()) + " file(s) for this prefix and run number already exist in " + runDir + ".</font>");
+      if( chkAutoIncrement->isChecked() ) runID --;
+      leRunID->setText(QString::number(runID));
+      return;
+    }
+    // one folder per run for the data files and the settings snapshots; the run
+    // record files (RunTimeStamp.dat/.csv, lastRun.sh) stay in the data path
+    if( !QDir().mkpath(runDir) ){
+      QMessageBox::warning(this, "Cannot create run folder", "Cannot create\n" + runDir + "\n\nAccess rights? The run was not started.");
+      LogMsg("<font style=\"color: red;\">Start Run-" + runIDStr + " refused: cannot create " + runDir + ".</font>");
       if( chkAutoIncrement->isChecked() ) runID --;
       leRunID->setText(QString::number(runID));
       return;
     }
     LogMsg("<font style=\"color: orange;\">===================== <b>Start a new Run-" + QString::number(runID) + "</b></font>");
+    LogMsg("Run folder : <b>" + runDir + "</b>");
     WriteRunTimestamp(true, QDateTime::currentDateTime().toString("yyyy.MM.dd hh:mm:ss"));
   }else{
     LogMsg("<font style=\"color: orange;\">===================== <b>Start a non-save Run</b></font>");
@@ -1227,11 +1245,11 @@ void FSUDAQ::StartACQ(){
   for( int i = (int) nDigi-1; i >= 0 ; i--){
     if( digi[i]->IsBoardDisabled() ) continue;
     if( chkSaveData->isChecked() ) {
-      std::string runSettingName =  (rawDataPath + "/" + prefix + "_" + QString::number(runID).rightJustified(3, '0') + "_" + QString::number(digi[i]->GetSerialNumber())).toStdString();
+      std::string runSettingName =  (runDir + "/" + prefix + "_" + runIDStr + "_" + QString::number(digi[i]->GetSerialNumber())).toStdString();
       runSettingName += "_" + digi[i]->GetData()->DPPTypeStr + ".bin";
       digi[i]->SaveAllSettingsAsTextForRun(runSettingName);
       digi[i]->GetData()->SetMaxFileSize((uint64_t) sbFileSizeMB->value() * 1024 * 1024);
-      if( digi[i]->GetData()->OpenSaveFile((rawDataPath + "/" + prefix + "_" + QString::number(runID).rightJustified(3, '0')).toStdString()) == false ) {
+      if( digi[i]->GetData()->OpenSaveFile((runDir + "/" + prefix + "_" + runIDStr).toStdString()) == false ) {
         LogMsg("Cannot open save file : " + QString::fromStdString(digi[i]->GetData()->GetOutFileName() ) + ". Probably read-only?");
        continue; 
       };
@@ -1804,10 +1822,15 @@ bool FSUDAQ::CommentDialog(bool isStartRun){
 
 }
 
+QString FSUDAQ::RunFolder() const {
+  return rawDataPath + "/" + prefix + "_" + QString::number(runID).rightJustified(3, '0');
+}
+
 QStringList FSUDAQ::ExistingRunFiles() const {
   // Everything StartACQ would write for this run starts with <prefix>_<run>_ :
   // the per-board settings snapshots (.bin) and the data files (.fsu).
-  QDir dir(rawDataPath);
+  QDir dir(RunFolder());
+  if( !dir.exists() ) return QStringList();
   QString pattern = prefix + "_" + QString::number(runID).rightJustified(3, '0') + "_*";
   return dir.entryList(QStringList() << pattern, QDir::Files, QDir::Name);
 }

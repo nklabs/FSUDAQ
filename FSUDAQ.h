@@ -74,6 +74,7 @@ private slots:
   void StopACQ();
   void AutoRun();
   bool CommentDialog(bool isStartRun);
+  QString RunFolder() const;            // <data path>/<prefix>_<run>, where this run's files go
   QStringList ExistingRunFiles() const; // files already carrying this prefix and run number
   void WriteRunTimestamp(bool isStartRun, const QString & timeStamp);
 
