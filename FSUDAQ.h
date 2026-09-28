@@ -10,6 +10,7 @@
 #include <QComboBox>
 #include <QCheckBox>
 #include <QGridLayout>
+#include <QElapsedTimer>
 
 #include "ClassDigitizer.h"
 #include "CustomThreads.h"

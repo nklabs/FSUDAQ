@@ -502,7 +502,12 @@ void FSUDAQ::LoadProgramSettings(){
         int eq = line.indexOf("=");
         QString key = line.left(eq).trimmed();
         QString value = line.mid(eq + 1).trimmed();
-        if( eq > 0 && key == "autoIncrementRunID" ) chkAutoIncrement->setChecked(value.toInt() != 0);
+        if( eq > 0 && key == "autoIncrementRunID" ) {
+          // the toggled slot saves the settings file, which must not happen while it is being read
+          QSignalBlocker blocker(chkAutoIncrement);
+          chkAutoIncrement->setChecked(value.toInt() != 0);
+          leRunID->setReadOnly(chkAutoIncrement->isChecked());
+        }
         if( eq > 0 && key == "maxFileSizeMB" && value.toInt() > 0 ) sbFileSizeMB->setValue(value.toInt());
         if( eq > 0 && key == "repeatPauseSec" ) sbRepeatPauseSec->setValue(value.toInt());
       }
