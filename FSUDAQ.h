@@ -166,6 +166,7 @@ private:
   QLineEdit * leRunID;
 
   QCheckBox * chkSaveData;
+  QCheckBox * chkSkipComment;
   RComboBox * cbAutoRun;
 
   QString startComment;

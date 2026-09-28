@@ -241,11 +241,15 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     leComment = new QLineEdit(this);
     leComment->setReadOnly(true);
 
+    chkSkipComment = new QCheckBox("Skip comment dialogs", this);
+    chkSkipComment->setToolTip("Start and stop runs without asking for a comment; the record gets \"no comment\".");
+
     bnOpenScaler = new QPushButton("Scalar", this);
     connect(bnOpenScaler, &QPushButton::clicked, this, &FSUDAQ::OpenScalar);
 
     layout->addWidget(lbComment, rowID, 0);
-    layout->addWidget(leComment, rowID, 1, 1, 6);
+    layout->addWidget(leComment, rowID, 1, 1, 5);
+    layout->addWidget(chkSkipComment, rowID, 6);
 
     layout->addWidget(bnOpenScaler, rowID, 7);
 
@@ -1625,7 +1629,11 @@ bool FSUDAQ::CommentDialog(bool isStartRun){
   int result = QDialog::Rejected ;
   QLineEdit *lineEdit = new QLineEdit(this);
 
-  if( needManualComment ) {
+  // needManualComment is false for the automatic start/stop of timed runs;
+  // the checkbox lets the operator skip the dialog for manual runs too.
+  bool askForComment = needManualComment && !chkSkipComment->isChecked();
+
+  if( askForComment ) {
     QDialog * dOpen = new QDialog(this);
     if( isStartRun ) {
       dOpen->setWindowTitle("Start Run Comment");
@@ -1648,26 +1656,30 @@ bool FSUDAQ::CommentDialog(bool isStartRun){
 
     connect(button1, &QPushButton::clicked, dOpen, &QDialog::accept);
     connect(button2, &QPushButton::clicked, dOpen, &QDialog::reject);
+    button1->setDefault(true); // Enter in the text field = OK, so an empty comment starts the run
+    lineEdit->setFocus();
     result = dOpen->exec();
   }else{
-    if( isStartRun ){
-      lineEdit->setText("Auto Start, repeat every " + QString::number(qAbs(cbAutoRun->currentData().toInt())) + " mins.");
-    }else{
-      lineEdit->setText("Auto Stop, after " + QString::number(qAbs(cbAutoRun->currentData().toInt())) + " mins.");
-    }
+    if( !needManualComment ){ // automatic start/stop of a timed run
+      if( isStartRun ){
+        lineEdit->setText("Auto Start, repeat every " + QString::number(qAbs(cbAutoRun->currentData().toInt())) + " mins.");
+      }else{
+        lineEdit->setText("Auto Stop, after " + QString::number(qAbs(cbAutoRun->currentData().toInt())) + " mins.");
+      }
+    } // otherwise the dialog was skipped: empty comment
     result = QDialog::Accepted;
   }
 
   if(result == QDialog::Accepted ){
     if( isStartRun ){
       startComment = lineEdit->text();
-      if( startComment == "") startComment = "No commet was typed.";
+      if( startComment == "") startComment = "no comment";
       
       if( needManualComment ){
         int minute = cbAutoRun->currentData().toInt();
         if(  minute > 0 ) {
           startComment += ", single run of " + QString::number(minute) + " mins.";
-        }else{
+        }else if( minute < 0 ){
           startComment += ", repeat run of " + QString::number(qAbs(minute)) + " mins.";
         }
       }
@@ -1676,7 +1688,7 @@ bool FSUDAQ::CommentDialog(bool isStartRun){
       leRunID->setText(QString::number(runID));
     }else{
       stopComment = lineEdit->text();
-      if( stopComment == "") stopComment = "No commet was typed.";
+      if( stopComment == "") stopComment = "no comment";
       stopComment = "Stop Comment: " + stopComment;
       leComment->setText(stopComment);
     }
