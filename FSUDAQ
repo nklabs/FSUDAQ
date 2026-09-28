@@ -1,4 +1,7 @@
 #!/bin/bash
+# Launch FSUDAQ with stdout AND stderr in a time-stamped log (Qt warnings, glibc and
+# assertion messages go to stderr and used to be lost) and with core dumps enabled,
+# so a crash leaves a core file in this directory for  gdb ./FSUDAQ_Qt6 core*
 
 timestamp=$(date +%Y%m%d_%H%M%S)
 
@@ -6,6 +9,8 @@ outFile=log/program_${timestamp}.log
 
 mkdir -p "$(dirname "$outFile")"
 
-echo "FSUDAQ, save stdout to $outFile"
+ulimit -c unlimited
 
-stdbuf -oL ./FSUDAQ_Qt6  | tee $outFile
+echo "FSUDAQ, save stdout+stderr to $outFile"
+
+stdbuf -oL -eL ./FSUDAQ_Qt6 2>&1 | tee "$outFile"

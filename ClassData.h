@@ -432,6 +432,7 @@ inline void Data::CalTriggerRate(){ // this method is called by FSUDAQ::UpdateSc
 inline bool Data::OpenSaveFile(std::string fileNamePrefix){
 
   outFilePrefix = fileNamePrefix;
+  outFileIndex = 0; // every run starts at _000; SaveData() rolls to _001, _002, ... within the run
 
   std::ostringstream oss;
   oss << outFilePrefix << "_"
