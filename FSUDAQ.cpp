@@ -1150,7 +1150,7 @@ void FSUDAQ::StartACQ(){
 
   if( chkSaveData->isChecked() ) {
     LogMsg("<font style=\"color: orange;\">===================== <b>Start a new Run-" + QString::number(runID) + "</b></font>");
-    WriteRunTimestamp(true);
+    WriteRunTimestamp(true, QDateTime::currentDateTime().toString("yyyy.MM.dd hh:mm:ss"));
   }else{
     LogMsg("<font style=\"color: orange;\">===================== <b>Start a non-save Run</b></font>");
   }
@@ -1236,16 +1236,10 @@ void FSUDAQ::StopACQ(){
 
   if( digi == nullptr ) return;
 
-  bool commentResult = true;
-  if( chkSaveData->isChecked() ) commentResult = CommentDialog(false);
-  if( commentResult == false) return;
-
-  if( chkSaveData->isChecked() ) {
-    LogMsg("===================== Stop Run-" + QString::number(runID));
-    WriteRunTimestamp(false);
-  }else{
-    LogMsg("===================== Stop a non-save Run");
-  }
+  // Stop the boards and close the files before anything else, so the recorded
+  // stop time is when acquisition ended and the files stop growing while the
+  // operator types the stop comment (the comment dialog comes further down).
+  bnStopACQ->setEnabled(false);
 
   for( unsigned int i = 0; i < nDigi; i++){
     if( digi[i]->IsBoardDisabled() ) continue;
@@ -1259,6 +1253,8 @@ void FSUDAQ::StopACQ(){
     LogMsg("Digi-" + QString::number(digi[i]->GetSerialNumber()) + " ACQ is stopped." );
     QCoreApplication::processEvents();
   }
+
+  QString stopTime = QDateTime::currentDateTime().toString("yyyy.MM.dd hh:mm:ss");
 
   if( scalarTimingThread->isRunning()){
     scalarTimingThread->Stop();
@@ -1295,6 +1291,14 @@ void FSUDAQ::StopACQ(){
   if( digiSettings ) {
     digiSettings->EnableButtons(true);
     digiSettings->ReadSettingsFromBoard();
+  }
+
+  if( chkSaveData->isChecked() ) {
+    CommentDialog(false); // acquisition has already stopped; Cancel only means "no comment"
+    LogMsg("===================== Stop Run-" + QString::number(runID));
+    WriteRunTimestamp(false, stopTime);
+  }else{
+    LogMsg("===================== Stop a non-save Run");
   }
 
   {//^=== elog and database
@@ -1700,7 +1704,10 @@ bool FSUDAQ::CommentDialog(bool isStartRun){
       runID --;
       leRunID->setText(QString::number(runID));
     }else{
-      LogMsg("Stop Run cancelled. ");
+      // the boards are already stopped when this dialog is shown, so Cancel cannot undo the stop
+      LogMsg("Stop comment cancelled; recorded as \"no comment\".");
+      stopComment = "Stop Comment: no comment";
+      leComment->setText(stopComment);
     }
     return false;
 
@@ -1710,11 +1717,11 @@ bool FSUDAQ::CommentDialog(bool isStartRun){
 
 }
 
-void FSUDAQ::WriteRunTimestamp(bool isStartRun){
+void FSUDAQ::WriteRunTimestamp(bool isStartRun, const QString & timeStamp){
   DebugPrint("%s", "FSUDAQ");
   QFile file(rawDataPath + "/RunTimeStamp.dat");
   
-  QString dateTime = QDateTime::currentDateTime().toString("yyyy.MM.dd hh:mm:ss");
+  QString dateTime = timeStamp;
   if( file.open(QIODevice::Text | QIODevice::WriteOnly | QIODevice::Append) ){
 
     if( isStartRun ){

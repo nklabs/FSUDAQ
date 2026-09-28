@@ -74,7 +74,7 @@ private slots:
   void StopACQ();
   void AutoRun();
   bool CommentDialog(bool isStartRun);
-  void WriteRunTimestamp(bool isStartRun);
+  void WriteRunTimestamp(bool isStartRun, const QString & timeStamp);
 
   void OpenScope();
 
