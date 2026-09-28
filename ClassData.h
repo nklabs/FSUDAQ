@@ -48,6 +48,8 @@ class Data{
 
     unsigned int   TotalAggCount ; 
     unsigned short AggCount ; /// reset after trig-rate calculation
+    uint64_t       EventsSinceRate;    /// events decoded on the whole board, reset after trig-rate calculation
+    uint64_t       ReadBytesSinceRate; /// bytes read from the board (Digitizer::ReadData), reset after trig-rate calculation
     unsigned int   aggTime; /// update every decode
 
     int GetLoopIndex(unsigned short ch) const {return LoopIndex[ch];}
@@ -300,6 +302,8 @@ inline void Data::ClearNumEventsDecoded(){
     countNumEventDecodeZero[i] = 0;
   }
   AggCount = 0;
+  EventsSinceRate = 0;
+  ReadBytesSinceRate = 0;
 }
 
 inline void Data::ClearData(){
@@ -395,7 +399,9 @@ inline void Data::CalTriggerRate(){ // this method is called by FSUDAQ::UpdateSc
     }else{
 
       uShort nEvent = 100;
-      dTime = Timestamp[ch][DataIndex[ch]] - Timestamp[ch][DataIndex[ch] - 100]; 
+      int prev = DataIndex[ch] - nEvent;   // circular buffer: wrap, or the read is out of bounds
+      if( prev < 0 ) prev += dataSize;
+      dTime = Timestamp[ch][DataIndex[ch]] - Timestamp[ch][prev]; 
       sec =  dTime / 1e9;
 
       TriggerRate[ch] = (nEvent)/sec;
@@ -417,6 +423,8 @@ inline void Data::CalTriggerRate(){ // this method is called by FSUDAQ::UpdateSc
   }
 
   AggCount = 0;
+  EventsSinceRate = 0;
+  ReadBytesSinceRate = 0;
 }
 
 //^###############################################
@@ -1050,6 +1058,7 @@ inline int Data::DecodePHADualChannelBlock(unsigned int ChannelMask, bool fastDe
       }
       PileUp[channel][DataIndex[channel]] = pileUp;
       NumEventsDecoded[channel] ++; 
+      EventsSinceRate ++;
 
       if( !pileUp ) {
         NumNonPileUpDecoded[channel] ++;
@@ -1259,6 +1268,7 @@ inline int Data::DecodePSDDualChannelBlock(unsigned int ChannelMask, bool fastDe
       }
 
       NumEventsDecoded[channel] ++; 
+      EventsSinceRate ++;
       if( !pileup){
         NumNonPileUpDecoded[channel] ++; 
         TotNumNonPileUpEvents[channel] ++;
@@ -1421,6 +1431,7 @@ inline int Data::DecodeQDCGroupedChannelBlock(unsigned int ChannelMask, bool fas
     Timestamp[channel][DataIndex[channel]] = timeStamp * tick2ns;
 
     NumEventsDecoded[channel] ++; 
+    EventsSinceRate ++;
     if( !pileup && !OverRange){
       NumNonPileUpDecoded[channel] ++; 
       TotNumNonPileUpEvents[channel] ++;

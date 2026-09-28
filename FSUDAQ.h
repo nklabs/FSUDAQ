@@ -195,9 +195,12 @@ private:
   QPushButton * runStatus[MaxNDigitizer];
   QLabel * lbLastUpdateTime;
   QLabel * lbScalarACQStatus;
-  QLabel * lbAggCount[MaxNDigitizer];
+  QLabel * lbRates[MaxNDigitizer];    // events/s and MB/s of the board
+  QLabel * lbAggCount[MaxNDigitizer]; // aggregates decoded / read calls, per refresh
   QLabel * lbFileSize[MaxNDigitizer];
-  QLabel * lbTotalFileSize;
+  QLabel * lbTotalFileSize;           // totals over the boards: size, events/s, MB/s
+  QElapsedTimer scalarClock;          // time between scalar refreshes, for the rates
+  static QString RateText(double perSecond); // 1234567 -> "1.23 M", 12345 -> "12.3 k"
 
   //@----- Run Record
   QMainWindow * runRecord;

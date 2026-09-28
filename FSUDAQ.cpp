@@ -15,6 +15,7 @@
 #include <QProcess>
 #include <QMessageBox>
 #include <QIntValidator>
+#include <QElapsedTimer>
 
 #include "analyzers/CoincidentAnalyzer.h"
 #include "analyzers/SplitPoleAnalyzer.h"
@@ -958,7 +959,7 @@ void FSUDAQ::SetupScalar(){
     if( digi[k]->GetNumInputCh() > maxNChannel ) maxNChannel = digi[k]->GetNumInputCh();
   }
 
-  scalar->setGeometry(0, 0, 50 + nDigi * 240, 160 + maxNChannel * 25);
+  scalar->setGeometry(0, 0, 50 + nDigi * 240, 190 + maxNChannel * 25);
 
   if( lbLastUpdateTime == nullptr ){
     lbLastUpdateTime = new QLabel("Last update : NA", scalar);
@@ -979,7 +980,7 @@ void FSUDAQ::SetupScalar(){
   scalarLayout->addWidget(lbTotalFileSize, 1, 0, 1, 1 + 2*nDigi);
 
   ///==== create the header row
-  int rowID = 4;
+  int rowID = 5;
   for( int ch = 0; ch < maxNChannel; ch++){
 
     if( ch == 0 ){
@@ -1018,20 +1019,34 @@ void FSUDAQ::SetupScalar(){
     runStatus[iDigi]->setToolTipDuration(-1);
     hBoxLayout->addWidget(runStatus[iDigi]);
 
-    rowID = 3;
+    rowID = 3; // the numbers that matter while running: events/s and MB/s of the board
+    lbRates[iDigi] = new QLabel("- evt/s | - MB/s", scalar);
+    lbRates[iDigi]->setAlignment(Qt::AlignCenter);
+    lbRates[iDigi]->setToolTip("Events decoded per second (all channels) | bytes read from the board per second, which is the write rate when saving.");
+    scalarLayout->addWidget(lbRates[iDigi], rowID, 2*iDigi+1, 1, 2);
+
+    rowID = 4; // link diagnostics and file size, smaller
     QWidget * hBox2 = new QWidget(scalar);
     QHBoxLayout * hBoxLayout2 = new QHBoxLayout(hBox2);
+    hBoxLayout2->setContentsMargins(4, 0, 4, 0);
     scalarLayout->addWidget(hBox2, rowID, 2*iDigi+1, 1, 2);
 
-    lbAggCount[iDigi] = new QLabel("AggCount/ReadCount", scalar);
+    QFont smallFont = scalar->font();
+    smallFont.setPointSizeF(smallFont.pointSizeF() * 0.85);
+
+    lbAggCount[iDigi] = new QLabel("agg/read", scalar);
+    lbAggCount[iDigi]->setFont(smallFont);
     lbAggCount[iDigi]->setAlignment(Qt::AlignLeft | Qt::AlignCenter);
+    lbAggCount[iDigi]->setToolTip("aggregates decoded / read calls, in the last refresh interval");
     hBoxLayout2->addWidget(lbAggCount[iDigi]);
     
     lbFileSize[iDigi] = new QLabel("File Size", scalar);
-    lbFileSize[iDigi]->setAlignment(Qt::AlignLeft | Qt::AlignCenter);
+    lbFileSize[iDigi]->setFont(smallFont);
+    lbFileSize[iDigi]->setAlignment(Qt::AlignRight | Qt::AlignCenter);
+    lbFileSize[iDigi]->setToolTip("data written for this run by this board");
     hBoxLayout2->addWidget(lbFileSize[iDigi]);
 
-    rowID = 4;
+    rowID = 5;
     QLabel * lbA = new QLabel("Trig. [Hz]", scalar);
     lbA->setAlignment(Qt::AlignCenter);
     scalarLayout->addWidget(lbA, rowID, 2*iDigi+1);
@@ -1090,7 +1105,12 @@ void FSUDAQ::UpdateScalar(){
   lbLastUpdateTime->setText(QDateTime::currentDateTime().toString("MM/dd hh:mm:ss"));
   scalarCount ++;
 
+  // interval since the previous refresh; the first refresh after a start has no interval
+  qint64 dtMs = scalarClock.isValid() ? scalarClock.restart() : -1;
+  if( !scalarClock.isValid() ) scalarClock.start();
+
   uint64_t totalFileSize = 0;
+  double totalEventRate = 0, totalBytesRate = 0;
   for( unsigned int iDigi = 0; iDigi < nDigi; iDigi++){
     // printf("======== digi-%d\n", iDigi);
     if( digi[iDigi]->IsBoardDisabled() ) continue;
@@ -1107,13 +1127,23 @@ void FSUDAQ::UpdateScalar(){
 
     // digiMTX[iDigi].lock();
 
-    QString blockCountStr = QString::number(digi[iDigi]->GetData()->AggCount);
-    blockCountStr += "/" + QString::number(readDataThread[iDigi]->GetReadCount());
+    QString blockCountStr = "agg " + QString::number(digi[iDigi]->GetData()->AggCount);
+    blockCountStr += " / read " + QString::number(readDataThread[iDigi]->GetReadCount());
     readDataThread[iDigi]->SetReadCountZero();
     lbAggCount[iDigi]->setText(blockCountStr);
-    lbFileSize[iDigi]->setText(QString::number(digi[iDigi]->GetData()->GetTotalFileSize()/1024./1024., 'f', 3) + " MB");
+    lbFileSize[iDigi]->setText(QString::number(digi[iDigi]->GetData()->GetTotalFileSize()/1024./1024., 'f', 1) + " MB");
 
-    digi[iDigi]->GetData()->CalTriggerRate(); //this will reset NumEventDecode & AggCount
+    if( dtMs > 0 ){
+      double eventRate = digi[iDigi]->GetData()->EventsSinceRate * 1000. / dtMs;
+      double bytesRate = digi[iDigi]->GetData()->ReadBytesSinceRate * 1000. / dtMs;
+      totalEventRate += eventRate;
+      totalBytesRate += bytesRate;
+      lbRates[iDigi]->setText("<b>" + RateText(eventRate) + "</b> evt/s | <b>" + QString::number(bytesRate / 1e6, 'f', 1) + "</b> MB/s");
+    }else{
+      lbRates[iDigi]->setText("- evt/s | - MB/s");
+    }
+
+    digi[iDigi]->GetData()->CalTriggerRate(); //this will reset NumEventDecode, AggCount, EventsSinceRate, ReadBytesSinceRate
     if( chkSaveData->isChecked() ) totalFileSize += digi[iDigi]->GetData()->GetTotalFileSize();
     for( int i = 0; i < digi[iDigi]->GetNumInputCh(); i++){
       QString a = "";
@@ -1138,7 +1168,9 @@ void FSUDAQ::UpdateScalar(){
 
   }
 
-  lbTotalFileSize->setText("Total Data Size : " + QString::number(totalFileSize/1024./1024., 'f', 3) + " MB");
+  QString totalStr = "Total : " + QString::number(totalFileSize/1024./1024., 'f', 1) + " MB";
+  if( dtMs > 0 ) totalStr += "   |   <b>" + RateText(totalEventRate) + "</b> evt/s   |   <b>" + QString::number(totalBytesRate / 1e6, 'f', 1) + "</b> MB/s";
+  lbTotalFileSize->setText(totalStr);
 
   // repaint();
   // scalar->repaint();
@@ -1156,6 +1188,12 @@ void FSUDAQ::UpdateScalar(){
 
   // printf("end of %s\n", __func__);
   
+}
+
+QString FSUDAQ::RateText(double perSecond){
+  if( perSecond >= 1e6 ) return QString::number(perSecond / 1e6, 'f', 2) + " M";
+  if( perSecond >= 1e3 ) return QString::number(perSecond / 1e3, 'f', 1) + " k";
+  return QString::number(perSecond, 'f', 0);
 }
 
 void FSUDAQ::CleanUpScalar(){
@@ -1349,6 +1387,7 @@ void FSUDAQ::StopACQ(){
     scalarTimingThread->quit();
     scalarTimingThread->wait();
   }
+  scalarClock.invalidate(); // the next run's first refresh has no interval to rate over
 
   // if( scalar ) scalarTimer->stop();
   if( singleHistograms ) singleHistograms->stopTimer();
