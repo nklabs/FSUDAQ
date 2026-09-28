@@ -197,20 +197,17 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
 
     chkSaveData = new QCheckBox("Save Data", this);
     connect( chkSaveData, &QCheckBox::stateChanged, this, [=](int state){
-      cbAutoRun->setEnabled(state);
-      if( state == 0 ) cbAutoRun->setCurrentIndex(0);
+      EnableRunLengthControls(state); // timed runs only make sense for saved runs
     });
 
-    cbAutoRun = new RComboBox(this);
-    cbAutoRun->addItem("Single Infinite", 0);
-    cbAutoRun->addItem("Single 1 min", 1);
-    cbAutoRun->addItem("Single 30 mins", 30);
-    cbAutoRun->addItem("Single 60 mins", 60);
-    cbAutoRun->addItem("Single 120 mins", 120);
-    cbAutoRun->addItem("Repeat 1 mins", -1);
-    cbAutoRun->addItem("Repeat 60 mins", -60);
-    cbAutoRun->addItem("Repeat 120 mins", -120);
-    cbAutoRun->setEnabled(false);
+    chkAutoIncrement = new QCheckBox("Auto-increment run no.", this);
+    chkAutoIncrement->setChecked(true);
+    chkAutoIncrement->setToolTip("Checked: each saved run takes the next number. Unchecked: the run number field is editable and a run refuses to start if files for that number already exist.");
+    connect(chkAutoIncrement, &QCheckBox::toggled, this, [=](bool checked){
+      leRunID->setReadOnly(checked);
+      if( checked ) leRunID->setText(QString::number(runID));
+      SaveProgramSettings();
+    });
 
     bnStartACQ = new QPushButton("Start ACQ", this);
     connect( bnStartACQ, &QPushButton::clicked, this, &FSUDAQ::AutoRun);
@@ -232,12 +229,40 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     layout->addWidget(lbRunID, rowID, 2);
     layout->addWidget(leRunID, rowID, 3);
     layout->addWidget(chkSaveData, rowID, 4);
-    layout->addWidget(cbAutoRun, rowID, 5);
+    layout->addWidget(chkAutoIncrement, rowID, 5);
     layout->addWidget(bnStartACQ, rowID, 6);
     layout->addWidget(bnStopACQ, rowID, 7);
 
     //------------------------------------------
     rowID ++;
+    QLabel * lbRunTime = new QLabel("Run length : ", this);
+    lbRunTime->setAlignment(Qt::AlignRight | Qt::AlignCenter);
+    sbRunTimeMin = new RSpinBox(this, 1);
+    sbRunTimeMin->setRange(0, 100000);
+    sbRunTimeMin->setSingleStep(1);
+    sbRunTimeMin->setValue(0);
+    sbRunTimeMin->setSuffix(" min");
+    sbRunTimeMin->setSpecialValueText("until Stop");
+    sbRunTimeMin->setToolTip("The run stops by itself after this many minutes (decimals allowed). 0 = run until Stop is pressed.");
+
+    chkRepeatRun = new QCheckBox("Repeat", this);
+    chkRepeatRun->setToolTip("When the time is up, wait the pause and start the next run, until Stop is pressed.");
+
+    sbRepeatPauseSec = new RSpinBox(this, 0);
+    sbRepeatPauseSec->setRange(0, 3600);
+    sbRepeatPauseSec->setSingleStep(1);
+    sbRepeatPauseSec->setValue(10);
+    sbRepeatPauseSec->setSuffix(" s pause");
+    sbRepeatPauseSec->setToolTip("Pause between repeated runs.");
+    connect(sbRepeatPauseSec, &RSpinBox::editingFinished, this, &FSUDAQ::SaveProgramSettings);
+
+    EnableRunLengthControls(false);
+
+    layout->addWidget(lbRunTime, rowID, 0);
+    layout->addWidget(sbRunTimeMin, rowID, 1);
+    layout->addWidget(chkRepeatRun, rowID, 2);
+    layout->addWidget(sbRepeatPauseSec, rowID, 3);
+
     QLabel * lbFileSize = new QLabel("File size : ", this);
     lbFileSize->setAlignment(Qt::AlignRight | Qt::AlignCenter);
     sbFileSizeMB = new RSpinBox(this, 0);
@@ -259,15 +284,6 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     leComment = new QLineEdit(this);
     leComment->setReadOnly(true);
 
-    chkAutoIncrement = new QCheckBox("Auto-increment run no.", this);
-    chkAutoIncrement->setChecked(true);
-    chkAutoIncrement->setToolTip("Checked: each saved run takes the next number. Unchecked: the run number field is editable and a run refuses to start if files for that number already exist.");
-    connect(chkAutoIncrement, &QCheckBox::toggled, this, [=](bool checked){
-      leRunID->setReadOnly(checked);
-      if( checked ) leRunID->setText(QString::number(runID));
-      SaveProgramSettings();
-    });
-
     chkSkipComment = new QCheckBox("Skip comment dialogs", this);
     chkSkipComment->setToolTip("Start and stop runs without asking for a comment; the record gets \"no comment\".");
 
@@ -275,8 +291,7 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     connect(bnOpenScaler, &QPushButton::clicked, this, &FSUDAQ::OpenScalar);
 
     layout->addWidget(lbComment, rowID, 0);
-    layout->addWidget(leComment, rowID, 1, 1, 4);
-    layout->addWidget(chkAutoIncrement, rowID, 5);
+    layout->addWidget(leComment, rowID, 1, 1, 7);
     layout->addWidget(chkSkipComment, rowID - 1, 6);
 
     layout->addWidget(bnOpenScaler, rowID - 1, 7);
@@ -488,6 +503,7 @@ void FSUDAQ::LoadProgramSettings(){
         QString value = line.mid(eq + 1).trimmed();
         if( eq > 0 && key == "autoIncrementRunID" ) chkAutoIncrement->setChecked(value.toInt() != 0);
         if( eq > 0 && key == "maxFileSizeMB" && value.toInt() > 0 ) sbFileSizeMB->setValue(value.toInt());
+        if( eq > 0 && key == "repeatPauseSec" ) sbRepeatPauseSec->setValue(value.toInt());
       }
 
       count ++;
@@ -548,6 +564,7 @@ void FSUDAQ::SaveProgramSettings(){
   file.write((elogPWD+"\n").toStdString().c_str());
   file.write(("autoIncrementRunID=" + QString::number(chkAutoIncrement->isChecked() ? 1 : 0) + "\n").toStdString().c_str());
   file.write(("maxFileSizeMB=" + QString::number((int) sbFileSizeMB->value()) + "\n").toStdString().c_str());
+  file.write(("repeatPauseSec=" + QString::number((int) sbRepeatPauseSec->value()) + "\n").toStdString().c_str());
   file.write("//------------end of file.\n");
   
   file.close();
@@ -890,7 +907,7 @@ void FSUDAQ::WaitForDigitizersOpen(bool onOff){
   bnCanvas->setEnabled(!onOff);
   cbAnalyzer->setEnabled(!onOff);
 
-  cbAutoRun->setEnabled(chkSaveData->isChecked());
+  EnableRunLengthControls(chkSaveData->isChecked());
   bnSync->setEnabled(false);
 
 }
@@ -1252,7 +1269,7 @@ void FSUDAQ::StartACQ(){
   bnStopACQ->setEnabled(true);
   bnStopACQ->setStyleSheet("background-color: red;");
   bnOpenScope->setEnabled(false);
-  cbAutoRun->setEnabled(false);
+  EnableRunLengthControls(false);
   sbFileSizeMB->setEnabled(false);
   bnSync->setEnabled(false);
 
@@ -1326,7 +1343,7 @@ void FSUDAQ::StopACQ(){
   bnStopACQ->setEnabled(false);
   bnStopACQ->setStyleSheet("");
   bnOpenScope->setEnabled(true);
-  cbAutoRun->setEnabled(true);
+  EnableRunLengthControls(chkSaveData->isChecked());
   sbFileSizeMB->setEnabled(true);
   bnSync->setEnabled(true);
 
@@ -1386,6 +1403,16 @@ void FSUDAQ::StopACQ(){
 
 }
 
+void FSUDAQ::EnableRunLengthControls(bool enable){
+  sbRunTimeMin->setEnabled(enable);
+  chkRepeatRun->setEnabled(enable);
+  sbRepeatPauseSec->setEnabled(enable);
+}
+
+QString FSUDAQ::RunLengthText() const {
+  return QString::number(sbRunTimeMin->value(), 'g', 6) + " min";
+}
+
 void FSUDAQ::AutoRun(){
   DebugPrint("%s", "FSUDAQ");
   runTimer->disconnect(runTimerConnection);
@@ -1393,68 +1420,67 @@ void FSUDAQ::AutoRun(){
     StartACQ();
     return;
   }
-  if( cbAutoRun->currentData().toInt() == 0 ){
+
+  const qint64 runTimeMs = qRound64(sbRunTimeMin->value() * 60. * 1000.);
+  if( runTimeMs <= 0 ){ // until Stop
     StartACQ();
-    //disconnect(runTimer, runTimerConnection);
-    //runTimer->disconnect(runTimerConnection);
     return;
-  }else{ // auto run
-    needManualComment = true;
-    StartACQ();    
-
-    runTimerConnection =  connect( runTimer, &QTimer::timeout, this, [=](){
-      needManualComment = false;
-      LogMsg("Time Up, Stopping ACQ...");
-      StopACQ();
-      if( cbAutoRun->currentData().toInt() < 0 ){
-
-        bnStartACQ->setEnabled(false);
-        bnStartACQ->setStyleSheet("");
-        bnStopACQ->setEnabled(true);
-        bnStopACQ->setStyleSheet("background-color : red;");
-
-        LogMsg("Wait for 10 sec for next Run ...." );
-        QElapsedTimer elapsedTimer;
-        elapsedTimer.invalidate();
-        elapsedTimer.start();
-        while( elapsedTimer.elapsed() < 10000) {
-          
-          if( breakAutoRepeat ) {
-            LogMsg("Break Auto repeat.");
-            bnStartACQ->setEnabled(true);
-            bnStartACQ->setStyleSheet("background-color : green");
-            bnStopACQ->setEnabled(false);
-            bnStopACQ->setStyleSheet("");
-            return;
-          }
-          QCoreApplication::processEvents();
-        }
-        
-        needManualComment = false;
-        StartACQ();
-        runTimer->setSingleShot(true);
-        runTimer->start(qAbs( cbAutoRun->currentData().toInt() * 60 * 1000));
-      }
-    });
   }
 
-  int timeMiliSec = cbAutoRun->currentData().toInt() * 60 * 1000;
+  //---- timed run, optionally repeated
+  const bool repeat = chkRepeatRun->isChecked();
+  const qint64 pauseMs = qRound64(sbRepeatPauseSec->value() * 1000.);
+
+  needManualComment = true;
+  StartACQ();
+  if( !isACQStarted ) return; // start was cancelled or refused; nothing to time
+
+  runTimerConnection =  connect( runTimer, &QTimer::timeout, this, [=](){
+    needManualComment = false;
+    LogMsg("Time Up, Stopping ACQ...");
+    StopACQ();
+    if( repeat ){
+
+      bnStartACQ->setEnabled(false);
+      bnStartACQ->setStyleSheet("");
+      bnStopACQ->setEnabled(true);
+      bnStopACQ->setStyleSheet("background-color : red;");
+
+      LogMsg("Wait for " + QString::number(pauseMs / 1000.) + " sec for next Run ...." );
+      QElapsedTimer elapsedTimer;
+      elapsedTimer.invalidate();
+      elapsedTimer.start();
+      while( elapsedTimer.elapsed() < pauseMs) {
+        
+        if( breakAutoRepeat ) {
+          LogMsg("Break Auto repeat.");
+          bnStartACQ->setEnabled(true);
+          bnStartACQ->setStyleSheet("background-color : green");
+          bnStopACQ->setEnabled(false);
+          bnStopACQ->setStyleSheet("");
+          return;
+        }
+        QCoreApplication::processEvents();
+      }
+      
+      needManualComment = false;
+      StartACQ();
+      if( !isACQStarted ) { // e.g. files for the next run number already exist
+        LogMsg("Auto repeat stopped: the next run could not be started.");
+        bnStartACQ->setEnabled(true);
+        bnStartACQ->setStyleSheet("background-color : green");
+        bnStopACQ->setEnabled(false);
+        bnStopACQ->setStyleSheet("");
+        return;
+      }
+      runTimer->setSingleShot(true);
+      runTimer->start(runTimeMs);
+    }
+  });
+
   runTimer->setSingleShot(true);
-  runTimer->start(qAbs(timeMiliSec));
-
-  if( timeMiliSec ) breakAutoRepeat = false;
-
-  // ///=========== single run
-  // if ( timeMiliSec > 0 ){
-  //   runTimer->setSingleShot(true);
-  //   runTimer->start(timeMiliSec);
-  // }
-
-  // ///=========== infinite repeat run
-  // if ( timeMiliSec < 0 ){
-  //   runTimer->setSingleShot(false);
-  //   runTimer->start(qAbs(timeMiliSec));
-  // }
+  runTimer->start(runTimeMs);
+  breakAutoRepeat = false;
 
 }
 
@@ -1728,9 +1754,9 @@ bool FSUDAQ::CommentDialog(bool isStartRun){
   }else{
     if( !needManualComment ){ // automatic start/stop of a timed run
       if( isStartRun ){
-        lineEdit->setText("Auto Start, repeat every " + QString::number(qAbs(cbAutoRun->currentData().toInt())) + " mins.");
+        lineEdit->setText("Auto Start, repeat every " + RunLengthText() + ".");
       }else{
-        lineEdit->setText("Auto Stop, after " + QString::number(qAbs(cbAutoRun->currentData().toInt())) + " mins.");
+        lineEdit->setText("Auto Stop, after " + RunLengthText() + ".");
       }
     } // otherwise the dialog was skipped: empty comment
     result = QDialog::Accepted;
@@ -1741,12 +1767,11 @@ bool FSUDAQ::CommentDialog(bool isStartRun){
       startComment = lineEdit->text();
       if( startComment == "") startComment = "no comment";
       
-      if( needManualComment ){
-        int minute = cbAutoRun->currentData().toInt();
-        if(  minute > 0 ) {
-          startComment += ", single run of " + QString::number(minute) + " mins.";
-        }else if( minute < 0 ){
-          startComment += ", repeat run of " + QString::number(qAbs(minute)) + " mins.";
+      if( needManualComment && sbRunTimeMin->value() > 0 ){
+        if( chkRepeatRun->isChecked() ) {
+          startComment += ", repeat run of " + RunLengthText() + ", " + QString::number((int) sbRepeatPauseSec->value()) + " s pause.";
+        }else{
+          startComment += ", single run of " + RunLengthText() + ".";
         }
       }
       startComment = "Start Comment: " + startComment;

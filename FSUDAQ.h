@@ -169,8 +169,12 @@ private:
   QCheckBox * chkSaveData;
   QCheckBox * chkAutoIncrement;
   QCheckBox * chkSkipComment;
-  RComboBox * cbAutoRun;
-  RSpinBox * sbFileSizeMB; // roll-over size of the per-board data files
+  RSpinBox  * sbRunTimeMin;      // run length in minutes, 0 = until Stop
+  QCheckBox * chkRepeatRun;      // start the next run when the time is up
+  RSpinBox  * sbRepeatPauseSec;  // pause between repeated runs
+  RSpinBox  * sbFileSizeMB;      // roll-over size of the per-board data files
+  void EnableRunLengthControls(bool enable);
+  QString RunLengthText() const; // e.g. "30 min" or "0.5 min"
 
   QString startComment;
   QString stopComment;
