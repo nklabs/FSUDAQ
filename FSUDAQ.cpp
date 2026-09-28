@@ -14,6 +14,7 @@
 #include <QScrollArea>
 #include <QProcess>
 #include <QMessageBox>
+#include <QIntValidator>
 
 #include "analyzers/CoincidentAnalyzer.h"
 #include "analyzers/SplitPoleAnalyzer.h"
@@ -191,6 +192,8 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     leRunID = new QLineEdit(this);
     leRunID->setReadOnly(true);
     leRunID->setAlignment(Qt::AlignHCenter);
+    leRunID->setValidator(new QIntValidator(0, 999999, this));
+    leRunID->setToolTip("Next run number. Editable when auto-increment is off.");
 
     chkSaveData = new QCheckBox("Save Data", this);
     connect( chkSaveData, &QCheckBox::stateChanged, this, [=](int state){
@@ -241,6 +244,15 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     leComment = new QLineEdit(this);
     leComment->setReadOnly(true);
 
+    chkAutoIncrement = new QCheckBox("Auto-increment run no.", this);
+    chkAutoIncrement->setChecked(true);
+    chkAutoIncrement->setToolTip("Checked: each saved run takes the next number. Unchecked: the run number field is editable and a run refuses to start if files for that number already exist.");
+    connect(chkAutoIncrement, &QCheckBox::toggled, this, [=](bool checked){
+      leRunID->setReadOnly(checked);
+      if( checked ) leRunID->setText(QString::number(runID));
+      SaveProgramSettings();
+    });
+
     chkSkipComment = new QCheckBox("Skip comment dialogs", this);
     chkSkipComment->setToolTip("Start and stop runs without asking for a comment; the record gets \"no comment\".");
 
@@ -248,7 +260,8 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     connect(bnOpenScaler, &QPushButton::clicked, this, &FSUDAQ::OpenScalar);
 
     layout->addWidget(lbComment, rowID, 0);
-    layout->addWidget(leComment, rowID, 1, 1, 5);
+    layout->addWidget(leComment, rowID, 1, 1, 4);
+    layout->addWidget(chkAutoIncrement, rowID, 5);
     layout->addWidget(chkSkipComment, rowID, 6);
 
     layout->addWidget(bnOpenScaler, rowID, 7);
@@ -454,6 +467,12 @@ void FSUDAQ::LoadProgramSettings(){
       if( count == 6 ) elogName = line;
       if( count == 7 ) elogUser = line;
       if( count == 8 ) elogPWD = line;
+      if( count >= 9 ) { // key=value lines, order free, absent in files written by older versions
+        int eq = line.indexOf("=");
+        QString key = line.left(eq).trimmed();
+        QString value = line.mid(eq + 1).trimmed();
+        if( eq > 0 && key == "autoIncrementRunID" ) chkAutoIncrement->setChecked(value.toInt() != 0);
+      }
 
       count ++;
       line = in.readLine();
@@ -511,6 +530,7 @@ void FSUDAQ::SaveProgramSettings(){
   file.write((elogName+"\n").toStdString().c_str());
   file.write((elogUser+"\n").toStdString().c_str());
   file.write((elogPWD+"\n").toStdString().c_str());
+  file.write(("autoIncrementRunID=" + QString::number(chkAutoIncrement->isChecked() ? 1 : 0) + "\n").toStdString().c_str());
   file.write("//------------end of file.\n");
   
   file.close();
@@ -1149,6 +1169,20 @@ void FSUDAQ::StartACQ(){
   if( commentResult == false) return;
 
   if( chkSaveData->isChecked() ) {
+    // Data files are opened with overwrite, so never start a run whose number is already on disk.
+    // This matters when auto-increment is off and a number is typed in by hand, but it also
+    // catches a stale lastRun.sh.
+    QStringList existing = ExistingRunFiles();
+    if( !existing.isEmpty() ){
+      QString runIDStr = QString::number(runID).rightJustified(3, '0');
+      QString msg = "Run-" + runIDStr + " with prefix \"" + prefix + "\" already has " + QString::number(existing.size()) + " file(s) in\n" + rawDataPath + "\n\n"
+                    + "e.g. " + existing.first() + "\n\nChoose another run number or move those files away. The run was not started.";
+      QMessageBox::warning(this, "Run number already used", msg);
+      LogMsg("<font style=\"color: red;\">Start Run-" + runIDStr + " refused: " + QString::number(existing.size()) + " file(s) for this prefix and run number already exist in " + rawDataPath + ".</font>");
+      if( chkAutoIncrement->isChecked() ) runID --;
+      leRunID->setText(QString::number(runID));
+      return;
+    }
     LogMsg("<font style=\"color: orange;\">===================== <b>Start a new Run-" + QString::number(runID) + "</b></font>");
     WriteRunTimestamp(true, QDateTime::currentDateTime().toString("yyyy.MM.dd hh:mm:ss"));
   }else{
@@ -1627,7 +1661,15 @@ void FSUDAQ::SetAndLockInfluxElog(){
 
 bool FSUDAQ::CommentDialog(bool isStartRun){
   DebugPrint("%s", "FSUDAQ");
-  if( isStartRun ) runID ++;
+  bool incremented = false;
+  if( isStartRun ) {
+    if( chkAutoIncrement->isChecked() ){
+      runID ++;
+      incremented = true;
+    }else{
+      runID = leRunID->text().toUInt(); // the operator chose the number
+    }
+  }
   QString runIDStr = QString::number(runID).rightJustified(3, '0');
 
   int result = QDialog::Rejected ;
@@ -1701,7 +1743,7 @@ bool FSUDAQ::CommentDialog(bool isStartRun){
 
     if( isStartRun ){
       LogMsg("Start Run aborted. ");
-      runID --;
+      if( incremented ) runID --;
       leRunID->setText(QString::number(runID));
     }else{
       // the boards are already stopped when this dialog is shown, so Cancel cannot undo the stop
@@ -1715,6 +1757,14 @@ bool FSUDAQ::CommentDialog(bool isStartRun){
 
   return true;
 
+}
+
+QStringList FSUDAQ::ExistingRunFiles() const {
+  // Everything StartACQ would write for this run starts with <prefix>_<run>_ :
+  // the per-board settings snapshots (.bin) and the data files (.fsu).
+  QDir dir(rawDataPath);
+  QString pattern = prefix + "_" + QString::number(runID).rightJustified(3, '0') + "_*";
+  return dir.entryList(QStringList() << pattern, QDir::Files, QDir::Name);
 }
 
 void FSUDAQ::WriteRunTimestamp(bool isStartRun, const QString & timeStamp){

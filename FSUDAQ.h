@@ -74,6 +74,7 @@ private slots:
   void StopACQ();
   void AutoRun();
   bool CommentDialog(bool isStartRun);
+  QStringList ExistingRunFiles() const; // files already carrying this prefix and run number
   void WriteRunTimestamp(bool isStartRun, const QString & timeStamp);
 
   void OpenScope();
@@ -166,6 +167,7 @@ private:
   QLineEdit * leRunID;
 
   QCheckBox * chkSaveData;
+  QCheckBox * chkAutoIncrement;
   QCheckBox * chkSkipComment;
   RComboBox * cbAutoRun;
 
