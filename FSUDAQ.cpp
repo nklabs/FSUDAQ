@@ -41,6 +41,7 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
   singleHistograms = nullptr;
   onlineAnalyzer = nullptr;
   runTimer = new QTimer();
+  runTimer->setTimerType(Qt::PreciseTimer); // the default coarse timer may fire up to 5 % early or late (3 s on a 60 s run)
   runClockTimer = new QTimer(this);
   runClockTimer->setInterval(100);
   connect(runClockTimer, &QTimer::timeout, this, [=](){
