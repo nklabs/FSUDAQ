@@ -472,6 +472,7 @@ def main(argv=None):
           f"files={'inotify' if HAVE_INOTIFY and not a.replay else 'polling'}  "
           f"{'replay of ' + a.run if a.replay else ('run ' + a.run if a.run else 'following ' + a.data_path)}", flush=True)
     last_report = 0.0
+    last_seen = None                     # (status, processed_s, hits): report only when this changes
 
     def _term(signum, frame):            # SIGTERM from FSUDAQ (or kill): leave like Ctrl-C
         raise KeyboardInterrupt
@@ -486,9 +487,12 @@ def main(argv=None):
                 print(f"step failed: {ex!r}", flush=True)
             if t0 - last_report > 10:
                 s = online.state()
-                print(f"{time.strftime('%H:%M:%S')} {s['status']}: processed {s['processed_s'] or 0:.1f} s of beam, "
-                      f"{s['hits']:,} hits, {s['events']:,} events, {s['proc_s']:.1f} s worker CPU, "
-                      f"{s['in_flight']} steps in flight", flush=True)
+                seen = (s['status'], round(s['processed_s'] or 0, 1), s['hits'])
+                if seen != last_seen:    # quiet while nothing happens (between runs, page closed)
+                    print(f"{time.strftime('%H:%M:%S')} {s['status']}: processed {s['processed_s'] or 0:.1f} s of beam, "
+                          f"{s['hits']:,} hits, {s['events']:,} events, {s['proc_s']:.1f} s worker CPU, "
+                          f"{s['in_flight']} steps in flight", flush=True)
+                    last_seen = seen
                 last_report = t0
             online.wake.wait(max(0.0, a.interval - (time.time() - t0)))
             online.wake.clear()
