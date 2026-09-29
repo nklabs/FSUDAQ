@@ -131,6 +131,7 @@ Scope::Scope(Digitizer ** digi, unsigned int nDigi, ReadDataThread ** readDataTh
 
     bool saveACQStartStatus = isACQStarted;
     if( isACQStarted) StopScope();
+    ClearTraces();
 
     ID = index;
     tick2ns = digi[ID]->GetTick2ns();
@@ -185,6 +186,7 @@ Scope::Scope(Digitizer ** digi, unsigned int nDigi, ReadDataThread ** readDataTh
 
     bool saveACQStartStatus = isACQStarted;
     if( isACQStarted) StopScope();
+    ClearTraces();
 
     ReadSettingsFromBoard();
 
@@ -560,7 +562,7 @@ void Scope::UpdateScope(){
 
   int ch = cbScopeCh->currentIndex();
 
-  if( digi[ID]->GetInputChannelOnOff(ch) == false) return;
+  if( digi[ID]->GetInputChannelOnOff(ch) == false) { ClearTraces(); return; }
 
   //printf("### %d %d \n", ch, digi[ID]->GetData()->DataIndex[ch]);
 
@@ -579,8 +581,11 @@ void Scope::UpdateScope(){
   // snapshot after each decode (CustomThreads.h). Draw from that copy: taking digiMTX
   // here blocks the GUI thread for a whole board read, which the readout thread does
   // with the mutex held (up to ~100 ms per 8 MB read at the link limit).
+  // A trace older than ScopeTraceStaleMiliSec means nothing has been decoded for this
+  // channel since then: show an empty plot rather than the last pulse for ever.
   ReadDataThread::ScopeTrace trace;
-  const bool haveTrace = readDataThread[ID]->GetScopeTrace(ch, trace);
+  const bool haveTrace = readDataThread[ID]->GetScopeTrace(ch, trace) && trace.AgeMs() < ScopeTraceStaleMiliSec;
+  if( !haveTrace ) ClearTraces();
   const std::vector<short> & wf1  = trace.wf1;
   const std::vector<short> & wf2  = trace.wf2;
   const std::vector<bool>  & dwf1 = trace.dwf1;
@@ -635,8 +640,14 @@ void Scope::UpdateScope(){
     }
   }
 
-  plot->axes(Qt::Horizontal).first()->setRange(0, tick2ns * traceLength * factor);
+  if( haveTrace ) plot->axes(Qt::Horizontal).first()->setRange(0, tick2ns * traceLength * factor);
 
+}
+
+void Scope::ClearTraces(){
+  for( int i = 0; i < MaxNumberOfTrace; i++){
+    if( dataTrace[i] && dataTrace[i]->count() > 0 ) dataTrace[i]->clear();
+  }
 }
 
 //*=======================================================
