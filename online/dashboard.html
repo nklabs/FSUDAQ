@@ -75,7 +75,7 @@ function hist(id, edges, counts, color, log){ const {g,w,h}=setup(id); const n=c
 function legend(id, items){ document.getElementById(id).innerHTML = items.map(it=>`<span><i style="background:${it.color}"></i>${it.name}</span>`).join(''); }
 function rateSeries(hist, key, sub){ // per-second rates from history deltas in beam time
   const x=[], y=[]; for(let i=1;i<hist.length;i++){ const dt=hist[i].beam_s-hist[i-1].beam_s; if(dt<=0) continue;
-    const v = sub ? (hist[i][key][sub]||0) : hist[i][key]; x.push(hist[i].beam_s); y.push(v/dt); } return {x,y}; }
+    const v = sub !== undefined ? (hist[i][key][sub]||0) : hist[i][key]; x.push(hist[i].beam_s); y.push(v/dt); } return {x,y}; }
 async function tick(){
   let s; try { s = await (await fetch('/state')).json(); } catch(e){ document.getElementById('status').textContent='no connection to the analysis'; return; }
   document.getElementById('folder').textContent = s.folder ? s.folder.split('/').slice(-1)[0] : '';

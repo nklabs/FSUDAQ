@@ -415,7 +415,12 @@ class Handler(BaseHTTPRequestHandler):
             body = json.dumps(self.online.state()).encode()
             ctype = "application/json"
         elif self.path == "/" or self.path.startswith("/index"):
-            body = self.page; ctype = "text/html; charset=utf-8"
+            try:                                   # re-read so a page update needs no restart
+                with open(os.path.join(HERE, "dashboard.html"), "rb") as fh:
+                    body = fh.read()
+            except OSError:
+                body = self.page
+            ctype = "text/html; charset=utf-8"
         else:
             self.send_response(404); self.end_headers(); return
         self.send_response(200)
