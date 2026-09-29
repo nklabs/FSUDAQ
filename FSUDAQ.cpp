@@ -1392,6 +1392,7 @@ void FSUDAQ::StartACQ(){
   bnOpenScope->setEnabled(false);
   EnableRunLengthControls(false);
   sbFileSizeMB->setEnabled(false);
+  bnDashboard->setEnabled(dashboardProc && dashboardProc->state() != QProcess::NotRunning); // only re-open during a run
   bnSync->setEnabled(false);
 
   if( digiSettings ) digiSettings->EnableButtons(false);
@@ -1469,6 +1470,7 @@ void FSUDAQ::StopACQ(){
   bnOpenScope->setEnabled(true);
   EnableRunLengthControls(true);
   sbFileSizeMB->setEnabled(true);
+  bnDashboard->setEnabled(true);
   bnSync->setEnabled(true);
 
   if( scalar ){
@@ -1982,7 +1984,15 @@ void FSUDAQ::OpenDashboard(){
   const QString url = "http://localhost:8050/";
 
   if( dashboardProc && dashboardProc->state() != QProcess::NotRunning ){
-    QDesktopServices::openUrl(QUrl(url));
+    QDesktopServices::openUrl(QUrl(url));   // already running: just show the page, no new process
+    return;
+  }
+  if( isACQStarted ){
+    // Starting a child process forks this process while the readout threads and the
+    // optical-link DMA are busy; do it before Start ACQ. The dashboard keeps following
+    // the data path across runs, so it only has to be started once.
+    LogMsg("<font style=\"color: red;\">The dashboard cannot be started while acquisition is running. Stop the run, start the dashboard, then start the next run; it keeps following the data path.</font>");
+    QMessageBox::warning(this, "Online Dashboard", "Start the dashboard before starting acquisition.\nIt keeps following the data path across runs, so once started it stays up.");
     return;
   }
   if( rawDataPath.isEmpty() ){
@@ -2000,6 +2010,12 @@ void FSUDAQ::OpenDashboard(){
   if( dashboardProc == nullptr ){
     dashboardProc = new QProcess(this);
     dashboardProc->setProcessChannelMode(QProcess::MergedChannels);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+    // vfork: no copy of this process's page tables (a fork() during a run stalls the
+    // optical-link DMA copies into our buffers and overruns the driver); and the child
+    // must not inherit the CAEN device descriptors or anything else of ours
+    dashboardProc->setUnixProcessParameters(QProcess::UnixProcessFlag::UseVFork | QProcess::UnixProcessFlag::CloseFileDescriptors);
+#endif
     connect(dashboardProc, &QProcess::readyReadStandardOutput, this, [=](){
       for( const QByteArray & line : dashboardProc->readAllStandardOutput().split('\n') ){
         if( !line.trimmed().isEmpty() ) LogMsg("[dashboard] " + QString::fromUtf8(line.trimmed()));
