@@ -14,16 +14,36 @@
 
 #include <csignal>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
+#include <execinfo.h>
+#include <unistd.h>
 
-void abortHandler(int signal) {
-    std::cerr << "Signal received: " << signal << ", aborting..." << std::endl;
-    std::abort();  // Calls abort to generate core dump
+// On SIGSEGV: say where it happened and dump this thread's stack to stderr (the
+// launcher script logs stderr), then let the default action run so the kernel logs
+// the fault and a real core file is written (ulimit -c is raised by the launcher).
+static void crashHandler(int sig, siginfo_t * info, void *) {
+    char line[128];
+    int n = snprintf(line, sizeof(line), "\nSignal received: %d (fault address %p), backtrace:\n", sig, info ? info->si_addr : nullptr);
+    if( write(STDERR_FILENO, line, n) < 0 ) {}
+    void * frames[64];
+    int nFrames = backtrace(frames, 64);
+    backtrace_symbols_fd(frames, nFrames, STDERR_FILENO);
+    signal(sig, SIG_DFL);
+    raise(sig);
 }
 
 int main(int argc, char *argv[]){
 
-    std::signal(SIGSEGV, abortHandler);
+    {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_sigaction = crashHandler;
+        sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+        sigaction(SIGSEGV, &sa, nullptr);
+        sigaction(SIGBUS, &sa, nullptr);
+        sigaction(SIGFPE, &sa, nullptr);
+    }
 
     setpriority(PRIO_PROCESS, 0, -20);
 
