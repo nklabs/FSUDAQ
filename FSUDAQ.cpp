@@ -203,9 +203,6 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     leRunID->setToolTip("Next run number. Editable when auto-increment is off.");
 
     chkSaveData = new QCheckBox("Save Data", this);
-    connect( chkSaveData, &QCheckBox::stateChanged, this, [=](int state){
-      EnableRunLengthControls(state); // timed runs only make sense for saved runs
-    });
 
     chkAutoIncrement = new QCheckBox("Auto-increment run no.", this);
     chkAutoIncrement->setChecked(true);
@@ -242,8 +239,8 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
 
     //------------------------------------------
     rowID ++;
-    QLabel * lbRunTime = new QLabel("Run length : ", this);
-    lbRunTime->setAlignment(Qt::AlignRight | Qt::AlignCenter);
+    QLabel * lbRunLength = new QLabel("Run length : ", this);
+    lbRunLength->setAlignment(Qt::AlignRight | Qt::AlignCenter);
     sbRunTimeMin = new RSpinBox(this, 1);
     sbRunTimeMin->setRange(0, 100000);
     sbRunTimeMin->setSingleStep(1);
@@ -263,9 +260,9 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     sbRepeatPauseSec->setToolTip("Pause between repeated runs.");
     connect(sbRepeatPauseSec, &RSpinBox::editingFinished, this, &FSUDAQ::SaveProgramSettings);
 
-    EnableRunLengthControls(false);
+    EnableRunLengthControls(false); // enabled once the digitizers are open, locked while a run is going
 
-    layout->addWidget(lbRunTime, rowID, 0);
+    layout->addWidget(lbRunLength, rowID, 0);
     layout->addWidget(sbRunTimeMin, rowID, 1);
     layout->addWidget(chkRepeatRun, rowID, 2);
     layout->addWidget(sbRepeatPauseSec, rowID, 3);
@@ -294,7 +291,8 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     chkSkipComment = new QCheckBox("Skip comment dialogs", this);
     chkSkipComment->setToolTip("Start and stop runs without asking for a comment; the record gets \"no comment\".");
 
-    bnOpenScaler = new QPushButton("Scalar", this);
+    bnOpenScaler = new QPushButton("Run Monitor", this);
+    bnOpenScaler->setToolTip("Rates, elapsed time and file sizes per board (upstream calls this window the Scalar).");
     connect(bnOpenScaler, &QPushButton::clicked, this, &FSUDAQ::OpenScalar);
 
     layout->addWidget(lbComment, rowID, 0);
@@ -919,7 +917,7 @@ void FSUDAQ::WaitForDigitizersOpen(bool onOff){
   bnCanvas->setEnabled(!onOff);
   cbAnalyzer->setEnabled(!onOff);
 
-  EnableRunLengthControls(chkSaveData->isChecked());
+  EnableRunLengthControls(!onOff);
   bnSync->setEnabled(false);
 
 }
@@ -1447,7 +1445,7 @@ void FSUDAQ::StopACQ(){
   bnStopACQ->setEnabled(false);
   bnStopACQ->setStyleSheet("");
   bnOpenScope->setEnabled(true);
-  EnableRunLengthControls(chkSaveData->isChecked());
+  EnableRunLengthControls(true);
   sbFileSizeMB->setEnabled(true);
   bnSync->setEnabled(true);
 
@@ -1522,10 +1520,6 @@ QString FSUDAQ::RunLengthText() const {
 void FSUDAQ::AutoRun(){
   DebugPrint("%s", "FSUDAQ");
   runTimer->disconnect(runTimerConnection);
-  if( chkSaveData->isChecked() == false){
-    StartACQ();
-    return;
-  }
 
   const qint64 runTimeMs = qRound64(sbRunTimeMin->value() * 60. * 1000.);
   if( runTimeMs <= 0 ){ // until Stop
