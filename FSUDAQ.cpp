@@ -1392,7 +1392,7 @@ void FSUDAQ::StartACQ(){
   bnOpenScope->setEnabled(false);
   EnableRunLengthControls(false);
   sbFileSizeMB->setEnabled(false);
-  bnDashboard->setEnabled(dashboardProc && dashboardProc->state() != QProcess::NotRunning); // only re-open during a run
+  bnDashboard->setEnabled(true); // during a run: re-opens a running dashboard, or asks before starting one
   bnSync->setEnabled(false);
 
   if( digiSettings ) digiSettings->EnableButtons(false);
@@ -1988,12 +1988,16 @@ void FSUDAQ::OpenDashboard(){
     return;
   }
   if( isACQStarted ){
-    // Starting a child process forks this process while the readout threads and the
-    // optical-link DMA are busy; do it before Start ACQ. The dashboard keeps following
-    // the data path across runs, so it only has to be started once.
-    LogMsg("<font style=\"color: red;\">The dashboard cannot be started while acquisition is running. Stop the run, start the dashboard, then start the next run; it keeps following the data path.</font>");
-    QMessageBox::warning(this, "Online Dashboard", "Start the dashboard before starting acquisition.\nIt keeps following the data path across runs, so once started it stays up.");
-    return;
+    // Starting a child process during a run twice coincided with a kernel panic in the
+    // a3818 driver (a driver defect, patched on odin 29 Sep 2026: it now logs
+    // "a3818: dispatch_pkt: link 4 does not exist" instead). Ask, and say what to check.
+    int r = QMessageBox::question(this, "Online Dashboard",
+              "Acquisition is running. Starting the dashboard now spawns a process while the optical links are busy, "
+              "which on an unpatched a3818 driver crashed the host.\n\nThe dashboard keeps following the data path "
+              "across runs, so the safe way is to start it before a run.\n\nStart it now anyway? (afterwards check "
+              "dmesg for 'a3818: dispatch_pkt')", QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if( r != QMessageBox::Yes ) return;
+    LogMsg("<font style=\"color: orange;\">Dashboard started during acquisition on request; check dmesg for 'a3818: dispatch_pkt' afterwards.</font>");
   }
   if( rawDataPath.isEmpty() ){
     LogMsg("<font style=\"color: red;\">Set the data path first; the dashboard follows the newest run folder in it.</font>");
