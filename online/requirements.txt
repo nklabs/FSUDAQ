@@ -1,0 +1,3 @@
+numpy>=1.26
+numba>=0.60      # 10x faster decode and event building; the numpy path works without it
+inotify          # optional: wake on new/closed files instead of polling
