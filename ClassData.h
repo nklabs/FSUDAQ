@@ -13,6 +13,7 @@
 #include <bitset>
 #include <vector>
 #include <sys/stat.h>
+#include <cerrno>
 
 #include "macro.h"
 
@@ -51,6 +52,7 @@ class Data{
     uint64_t       EventsSinceRate;    /// events decoded on the whole board, reset after trig-rate calculation
     uint64_t       ReadBytesSinceRate; /// bytes read from the board (Digitizer::ReadData), reset after trig-rate calculation
     uint64_t       DecodeTruncated;    /// buffers whose last aggregate was cut off (decode stopped there, the file still has the raw bytes)
+    uint64_t       SaveFailed;         /// buffers not written because the next data file could not be opened
     uint64_t       DecodeBadChannel;   /// events skipped because the channel number is not one this board has
     bool           decodeOverrun;      /// set by ReadBuffer() when a read goes past nByte
     unsigned int   aggTime; /// update every decode
@@ -190,6 +192,7 @@ inline Data::Data(unsigned short numCh, uInt dataSize): numInputCh(numCh){
 
   DecodeTruncated = 0;
   DecodeBadChannel = 0;
+  SaveFailed = 0;
   decodeOverrun = false;
 
   outFileIndex = 0;
@@ -493,7 +496,17 @@ inline void Data::SaveData(){
 
     outFileName = saveFileName;
     outFile = fopen(outFileName.c_str(), "wb"); //overwrite binary
+    if( outFile == nullptr ){
+      // Never write through a null FILE*: that is a segfault in the readout thread.
+      // The board keeps running; its data is lost from here on, and the message says so.
+      printf("\033[31mDigi-%d: cannot open the next data file %s (%s). Saving stops for this board!\033[0m\n",
+             boardSN, outFileName.c_str(), strerror(errno));
+      SaveFailed ++;
+      return;
+    }
   }
+
+  if( outFile == nullptr ) return;
 
   if( decimation == 0){
     fwrite(buffer, nByte, 1, outFile);

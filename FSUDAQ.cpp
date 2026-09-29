@@ -1152,6 +1152,7 @@ void FSUDAQ::UpdateScalar(){
     blockCountStr += " / read " + QString::number(readDataThread[iDigi]->GetReadCount());
     if( digi[iDigi]->GetData()->DecodeTruncated  > 0 ) blockCountStr += " | cut " + QString::number(digi[iDigi]->GetData()->DecodeTruncated);   // reads that ended inside an aggregate (online decode only; the file is complete)
     if( digi[iDigi]->GetData()->DecodeBadChannel > 0 ) blockCountStr += " | bad-ch " + QString::number(digi[iDigi]->GetData()->DecodeBadChannel);
+    if( digi[iDigi]->GetData()->SaveFailed > 0 ) blockCountStr += " | <font color=red><b>NOT SAVED " + QString::number(digi[iDigi]->GetData()->SaveFailed) + "</b></font>";
     readDataThread[iDigi]->SetReadCountZero();
     lbAggCount[iDigi]->setText(blockCountStr);
     lbFileSize[iDigi]->setText(QString::number(digi[iDigi]->GetData()->GetTotalFileSize()/1024./1024., 'f', 1) + " MB");
