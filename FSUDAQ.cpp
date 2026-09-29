@@ -251,6 +251,9 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
 
     chkRepeatRun = new QCheckBox("Repeat", this);
     chkRepeatRun->setToolTip("When the time is up, wait the pause and start the next run, until Stop is pressed.");
+    connect(chkRepeatRun, &QCheckBox::toggled, this, [=](bool checked){
+      sbRepeatPauseSec->setEnabled(checked && chkRepeatRun->isEnabled()); // the pause only matters when repeating
+    });
 
     sbRepeatPauseSec = new RSpinBox(this, 0);
     sbRepeatPauseSec->setRange(0, 3600);
@@ -1510,7 +1513,7 @@ void FSUDAQ::StopACQ(){
 void FSUDAQ::EnableRunLengthControls(bool enable){
   sbRunTimeMin->setEnabled(enable);
   chkRepeatRun->setEnabled(enable);
-  sbRepeatPauseSec->setEnabled(enable);
+  sbRepeatPauseSec->setEnabled(enable && chkRepeatRun->isChecked());
 }
 
 QString FSUDAQ::RunLengthText() const {
