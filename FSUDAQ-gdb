@@ -1,14 +1,9 @@
 #!/bin/bash
-# Launch FSUDAQ with stdout AND stderr in a time-stamped log (Qt warnings, glibc and
-# assertion messages go to stderr and used to be lost) and with core dumps enabled,
-# so a crash leaves a core file in this directory for  gdb ./FSUDAQ_Qt6 core*
-
+# Launch FSUDAQ under gdb: the program runs at full speed; if it crashes, every thread's
+# backtrace is written to log/gdb_<time>.log (and shown), then gdb exits.
+cd "$(dirname "$0")" || exit 1
 timestamp=$(date +%Y%m%d_%H%M%S)
-
-outFile=log/program_${timestamp}.log
-
-mkdir -p "$(dirname "$outFile")"
-
+mkdir -p log
 ulimit -c unlimited
 
 # CAEN's library keeps per-link locks as plain mutexes in /dev/shm (CAENV_LCK_*). A DAQ
@@ -18,6 +13,5 @@ if ! pgrep -x FSUDAQ_Qt6 >/dev/null && ! pgrep -x CoMPASS >/dev/null && ! pgrep 
   rm -f /dev/shm/CAENV_LCK_*
 fi
 
-echo "FSUDAQ, save stdout+stderr to $outFile"
-
-stdbuf -oL -eL ./FSUDAQ_Qt6 2>&1 | tee "$outFile"
+echo "FSUDAQ under gdb, log in log/gdb_${timestamp}.log"
+gdb -q -batch -ex run -ex "thread apply all bt" --args ./FSUDAQ_Qt6 2>&1 | tee "log/gdb_${timestamp}.log"

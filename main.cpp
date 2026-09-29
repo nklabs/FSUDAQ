@@ -35,6 +35,8 @@ static void crashHandler(int sig, siginfo_t * info, void *) {
 
 int main(int argc, char *argv[]){
 
+    setvbuf(stdout, nullptr, _IOLBF, 0);   // line-buffered even into a pipe (launcher, gdb), so the log is live
+
     {
         struct sigaction sa;
         memset(&sa, 0, sizeof(sa));
