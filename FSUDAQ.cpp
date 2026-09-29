@@ -15,6 +15,8 @@
 #include <QProcess>
 #include <QMessageBox>
 #include <QIntValidator>
+#include <QDesktopServices>
+#include <QUrl>
 #include <QElapsedTimer>
 
 #include "analyzers/CoincidentAnalyzer.h"
@@ -110,6 +112,12 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     bnSync = new QPushButton("Sync Boards", this);
     layout->addWidget(bnSync,  2, 1);
     connect(bnSync, &QPushButton::clicked, this, &FSUDAQ::SetSyncMode);
+
+    bnDashboard = new QPushButton("Online Dashboard", this);
+    bnDashboard->setToolTip("Start the Python online analysis on the data path (online/online_dashboard.py) and open it in the browser.");
+    layout->addWidget(bnDashboard, 0, 3);
+    connect(bnDashboard, &QPushButton::clicked, this, &FSUDAQ::OpenDashboard);
+    dashboardProc = nullptr;
 
   }
 
@@ -383,6 +391,11 @@ FSUDAQ::~FSUDAQ(){
 
   if( digi ) CloseDigitizers();
   SaveProgramSettings();
+
+  if( dashboardProc && dashboardProc->state() != QProcess::NotRunning ){
+    dashboardProc->terminate();
+    if( !dashboardProc->waitForFinished(3000) ) dashboardProc->kill();
+  }
 
   if( scope ) delete scope;
 
@@ -1964,6 +1977,48 @@ void FSUDAQ::WriteRunTimestamp(bool isStartRun, const QString & timeStamp){
 
 //***************************************************************
 //***************************************************************
+void FSUDAQ::OpenDashboard(){
+  DebugPrint("%s", "FSUDAQ");
+  const QString url = "http://localhost:8050/";
+
+  if( dashboardProc && dashboardProc->state() != QProcess::NotRunning ){
+    QDesktopServices::openUrl(QUrl(url));
+    return;
+  }
+  if( rawDataPath.isEmpty() ){
+    LogMsg("<font style=\"color: red;\">Set the data path first; the dashboard follows the newest run folder in it.</font>");
+    return;
+  }
+  QString dir = QDir::current().absolutePath() + "/online";
+  QString script = dir + "/online_dashboard.py";
+  if( !QFile::exists(script) ){
+    LogMsg("<font style=\"color: red;\">" + script + " not found.</font>");
+    return;
+  }
+  QString python = QFile::exists(dir + "/venv/bin/python") ? dir + "/venv/bin/python" : "python3";
+
+  if( dashboardProc == nullptr ){
+    dashboardProc = new QProcess(this);
+    dashboardProc->setProcessChannelMode(QProcess::MergedChannels);
+    connect(dashboardProc, &QProcess::readyReadStandardOutput, this, [=](){
+      for( const QByteArray & line : dashboardProc->readAllStandardOutput().split('\n') ){
+        if( !line.trimmed().isEmpty() ) LogMsg("[dashboard] " + QString::fromUtf8(line.trimmed()));
+      }
+    });
+    connect(dashboardProc, &QProcess::finished, this, [=](int code, QProcess::ExitStatus){
+      LogMsg("[dashboard] stopped (exit code " + QString::number(code) + ").");
+    });
+  }
+  dashboardProc->setWorkingDirectory(dir);
+  dashboardProc->start(python, QStringList() << script << "--data-path" << rawDataPath << "--port" << "8050");
+  if( !dashboardProc->waitForStarted(3000) ){
+    LogMsg("<font style=\"color: red;\">Cannot start " + python + " " + script + ".</font>");
+    return;
+  }
+  LogMsg("[dashboard] started with " + python + " on " + rawDataPath + "; opening " + url);
+  QTimer::singleShot(1500, this, [=](){ QDesktopServices::openUrl(QUrl(url)); });
+}
+
 void FSUDAQ::OpenScope(){
   DebugPrint("%s", "FSUDAQ");
   QCoreApplication::processEvents();

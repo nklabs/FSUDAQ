@@ -87,6 +87,8 @@ private slots:
 
   void OpenAnalyzer();
 
+  void OpenDashboard();   // start online/online_dashboard.py on the data path and open the browser
+
   void UpdateAllPanels(int panelID);
 
   void SetUpInflux();
@@ -128,6 +130,8 @@ private:
   QPushButton * bnSync;
 
   QPushButton * bnCanvas;
+  QPushButton * bnDashboard;
+  QProcess * dashboardProc;
 
   QTimer * runTimer;
   bool breakAutoRepeat;

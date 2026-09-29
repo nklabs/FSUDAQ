@@ -1,0 +1,93 @@
+{
+  "what": "Momentum map for the pion spectrometer online analysis. Maps a tracker channel triplet (ch0, ch1, ch2) to the momentum that produced it.",
+  "built_utc": "2026-08-31T17:34:54+00:00",
+  "source_map": "momentum_map_wta.csv (this stage, ../data)",
+  "map_built_utc": "2026-08-31T17:27:08+00:00",
+  "readout": "wta",
+  "readout_note": "winner-takes-all: the online decoder takes the largest amplifier, so a channel number IS an amplifier number. Channel numbering is 1-BASED; 0 means the plane did not fire.",
+  "n_rows": 1865,
+  "settings": [
+    "high",
+    "low"
+  ],
+  "setting_note": "the two physical T1/T2 positions. One is installed for a whole run; this is NOT a per-event quantity, and the wrong setting returns confidently wrong momenta.",
+  "n_amplifiers": {
+    "t0": 8,
+    "t1": 35,
+    "t2": 51
+  },
+  "geometry_cm": {
+    "coll_L_cm": 40.0,
+    "coll_to_t0_cm": 21.3473,
+    "t0_to_mag_cm": 24.0825,
+    "mag_to_t1_cm": 7.5003,
+    "t1_to_t2_cm": 15.006,
+    "mag_offset_cm": 6.5801,
+    "t0_offset_cm": -1.0541,
+    "t1_offset_cm": 1.3423,
+    "t2_offset_cm": 2.4797,
+    "t1_shift_cm": 12.3562,
+    "t2_shift_cm": 22.384
+  },
+  "channel_widths_base": [
+    1,
+    2,
+    4,
+    8
+  ],
+  "t0_pattern": [
+    8,
+    0,
+    0,
+    0
+  ],
+  "t1_pattern": [
+    16,
+    8,
+    4,
+    7
+  ],
+  "t2_pattern": [
+    24,
+    12,
+    10,
+    5
+  ],
+  "pattern_note": "channels per ganging group, one entry per channel_widths_base value. [16, 8, 4, 7] with widths [1, 2, 4, 8] is 16 single bars, 8 pairs, 4 quads and 7 octets = 35 amplifiers.",
+  "hardware": {
+    "B_T": 0.5,
+    "mag_length_cm": 50.0,
+    "mag_half_width_cm": 21.0,
+    "coll_length_cm": 15.0,
+    "coll_r_over_L": 0.0077659133810769046,
+    "strip_base_cm": 0.45,
+    "strip_depth_cm": 0.465,
+    "strips_max_per_plane": 128
+  },
+  "beam": {
+    "spot_fwhm_mm": 23.548,
+    "divergence_fwhm_mrad": 50.0,
+    "p_window_mev": [
+      60.0,
+      1000.0
+    ],
+    "pion_fit": "04_beamline_simulation_initial/data/pionMinus_master_distribution.json",
+    "real_beam_production_angle_deg": 20.0
+  },
+  "columns": {
+    "setting": "which T1/T2 position this row applies to",
+    "ch0": "T0 channel, 1-based (0 = plane did not fire)",
+    "ch1": "T1 channel, 1-based",
+    "ch2": "T2 channel, 1-based",
+    "p_mev": "momentum for this triplet, MeV/c",
+    "sigma_mev": "1-sigma width of the momenta that produce this triplet",
+    "ok": "1 if enough SIMULATED tracks landed on this triplet to trust sigma_mev, else 0. This is Monte-Carlo statistics from the map build, NOT detector calibration. When ok=0 the MOMENTUM is still good (its error goes as sigma/sqrt(n)); it is sigma_mev that is unreliable, and sigma_mev=0 means a single track landed here."
+  },
+  "calibration": "p_mev and sigma_mev come from a beam FLAT in momentum, so they are properties of the instrument and carry no assumption about the beam spectrum being measured.",
+  "absent_triplets": "A triplet NOT in this file is one no single track can produce. Treat its absence as a veto, not as a lookup failure: it is an accidental coincidence, a hard scatter, a decay kink, or two tracks in one bunch.",
+  "model_provenance": {
+    "model_source": "06_beam_parameters_optimization/scripts/optimize_parameters.py",
+    "model_source_sha": "bb17c89b2d20bb46a1ec384531f4bf353cd9c6ad1193131f6c23ec69b13007f5",
+    "optimization_run": "20260817_133858_staged"
+  }
+}
