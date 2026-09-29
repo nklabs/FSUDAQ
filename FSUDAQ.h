@@ -201,6 +201,13 @@ private:
   QLabel * lbFileSize[MaxNDigitizer];
   QLabel * lbTotalFileSize;           // totals over the boards: size, events/s, MB/s
   QElapsedTimer scalarClock;          // time between scalar refreshes, for the rates
+  QLabel * lbRunTime;                 // run number and elapsed acquisition time
+  QElapsedTimer runClock;             // started when the boards start
+  QTimer * runClockTimer;             // refreshes lbRunTime every 100 ms
+  QString runClockLabel;              // "Run 7" / "Run (not saved)" / "Scope"
+  void StartRunClock(const QString & what);
+  void StopRunClock();
+  static QString ElapsedText(qint64 ms); // h:mm:ss.mmm
   static QString RateText(double perSecond); // 1234567 -> "1.23 M", 12345 -> "12.3 k"
 
   //@----- Run Record

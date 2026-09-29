@@ -41,6 +41,12 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
   singleHistograms = nullptr;
   onlineAnalyzer = nullptr;
   runTimer = new QTimer();
+  runClockTimer = new QTimer(this);
+  runClockTimer->setInterval(100);
+  connect(runClockTimer, &QTimer::timeout, this, [=](){
+    if( lbRunTime ) lbRunTime->setText(runClockLabel + "   <b>" + ElapsedText(runClock.elapsed()) + "</b>");
+  });
+  lbRunTime = nullptr;
   breakAutoRepeat = true;
   needManualComment = true;
   runRecord = nullptr;
@@ -925,7 +931,7 @@ void FSUDAQ::SetupScalar(){
   // printf("%s\n", __func__);
 
   scalar = new QMainWindow(this);
-  scalar->setWindowTitle("Scalar");
+  scalar->setWindowTitle("Run Monitor (Scalar)");
 
   QScrollArea * scopeScroll = new QScrollArea(scalar);
   scalar->setCentralWidget(scopeScroll);
@@ -970,7 +976,16 @@ void FSUDAQ::SetupScalar(){
     lbLastUpdateTime = new QLabel("Last update : NA", scalar);
     lbScalarACQStatus = new QLabel("ACQ status", scalar);
     lbTotalFileSize = new QLabel("Total File Size", scalar);
+    lbRunTime = new QLabel("no run yet", scalar);
+    QFont clockFont = lbRunTime->font();
+    clockFont.setPointSizeF(clockFont.pointSizeF() * 1.3);
+    lbRunTime->setFont(clockFont);
+    lbRunTime->setToolTip("Elapsed acquisition time, h:mm:ss.ms, from the moment the boards were started; frozen at the value when the run stopped.");
   }
+
+  lbRunTime->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+  scalarLayout->removeWidget(lbRunTime);
+  scalarLayout->addWidget(lbRunTime, 1, 0, 1, 1 + nDigi);
   
   lbLastUpdateTime->setAlignment(Qt::AlignRight);
   scalarLayout->removeWidget(lbLastUpdateTime);
@@ -980,9 +995,9 @@ void FSUDAQ::SetupScalar(){
   scalarLayout->removeWidget(lbScalarACQStatus);
   scalarLayout->addWidget(lbScalarACQStatus, 0, 1 + nDigi);
 
-  lbTotalFileSize->setAlignment(Qt::AlignCenter);
+  lbTotalFileSize->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
   scalarLayout->removeWidget(lbTotalFileSize);
-  scalarLayout->addWidget(lbTotalFileSize, 1, 0, 1, 1 + 2*nDigi);
+  scalarLayout->addWidget(lbTotalFileSize, 1, 1 + nDigi, 1, nDigi);
 
   ///==== create the header row
   int rowID = 5;
@@ -1195,6 +1210,29 @@ void FSUDAQ::UpdateScalar(){
   
 }
 
+QString FSUDAQ::ElapsedText(qint64 ms){
+  if( ms < 0 ) ms = 0;
+  qint64 h = ms / 3600000; ms -= h * 3600000;
+  qint64 m = ms / 60000;   ms -= m * 60000;
+  qint64 s = ms / 1000;    ms -= s * 1000;
+  return QString("%1:%2:%3.%4").arg(h).arg(m, 2, 10, QChar('0')).arg(s, 2, 10, QChar('0')).arg(ms, 3, 10, QChar('0'));
+}
+
+void FSUDAQ::StartRunClock(const QString & what){
+  runClockLabel = what + " started " + QDateTime::currentDateTime().toString("hh:mm:ss") + ", elapsed";
+  runClock.start();
+  if( lbRunTime ) lbRunTime->setText(runClockLabel + "   <b>0:00:00.000</b>");
+  runClockTimer->start();
+}
+
+void FSUDAQ::StopRunClock(){
+  if( !runClockTimer->isActive() ) return;
+  runClockTimer->stop();
+  qint64 ms = runClock.elapsed();
+  if( lbRunTime ) lbRunTime->setText(runClockLabel.replace(", elapsed", "") + ", stopped after   <b>" + ElapsedText(ms) + "</b>");
+  LogMsg("Acquisition time " + ElapsedText(ms) + " (h:mm:ss.ms)");
+}
+
 QString FSUDAQ::RateText(double perSecond){
   if( perSecond >= 1e6 ) return QString::number(perSecond / 1e6, 'f', 2) + " M";
   if( perSecond >= 1e3 ) return QString::number(perSecond / 1e3, 'f', 1) + " k";
@@ -1358,6 +1396,8 @@ void FSUDAQ::StartACQ(){
   chkSaveData->setEnabled(false);
   // bnDigiSettings->setEnabled(false);
 
+  StartRunClock(chkSaveData->isChecked() ? "Run " + QString::number(runID) : "Run (not saved)");
+
 }
 
 void FSUDAQ::StopACQ(){
@@ -1459,6 +1499,8 @@ void FSUDAQ::StopACQ(){
   chkSaveData->setEnabled(true);
   // bnDigiSettings->setEnabled(true);
   isACQStarted = false;
+
+  StopRunClock();
 
   repaint();
   // printf("================ end of %s \n", __func__);
@@ -1943,6 +1985,7 @@ void FSUDAQ::OpenScope(){
           // scalarTimer->start(ScalarUpdateinMiliSec); 
           scalarTimingThread->start();
         }
+        StartRunClock("Scope");
 
         if( singleHistograms ) singleHistograms->startTimer();
         if( onlineAnalyzer ) onlineAnalyzer->startTimer();
@@ -1957,6 +2000,7 @@ void FSUDAQ::OpenScope(){
           scalarTimingThread->quit();
           scalarTimingThread->wait();
         }
+        StopRunClock();
 
         if( singleHistograms ) singleHistograms->stopTimer();
         if( onlineAnalyzer ) onlineAnalyzer->stopTimer();
