@@ -10,7 +10,10 @@
 #include "macro.h"
 #include "ClassDigitizer.h"
 
-static QMutex digiMTX[MaxNBoards * MaxNPorts];
+// One mutex per board, shared by every translation unit. This used to be `static`,
+// which gave each .cpp file its own private copy, so the readout thread and the
+// GUI code were never actually locking the same mutex.
+inline QMutex digiMTX[MaxNBoards * MaxNPorts];
 
 //^#===================================================== ReadData Thread
 class ReadDataThread : public QThread {

@@ -23,8 +23,6 @@
 #include "CustomThreads.h"
 #include "CustomWidgets.h"
 
-class ScopeWorker; //Forward declaration
-
 //^====================================================
 //^====================================================
 class Scope : public QMainWindow{
@@ -148,29 +146,8 @@ private:
   //sbGateOffset -> GateOffset
   //sbTriggerHoldOff ->Trigger Hold Off
 
-  QThread * workerThread;
-  ScopeWorker * scopeWorker;
-  QTimer * scopeTimer;
+  QTimer * scopeTimer; // drives UpdateScope() in the GUI thread
 
-};
-
-//^#======================================================== ScopeWorker
-class ScopeWorker : public QObject{
-  Q_OBJECT
-public:
-  ScopeWorker(Scope * parent): SS(parent){}
-
-public slots:
-  void UpdateScope(){
-    SS->UpdateScope();
-    emit workDone();
-  }
-
-signals:
-  void workDone();
-
-private:
-  Scope * SS;
 };
 
 #endif 
