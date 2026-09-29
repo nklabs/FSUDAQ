@@ -27,6 +27,7 @@ import json
 import multiprocessing as mp
 import os
 import re
+import signal
 import sys
 import threading
 import time
@@ -463,6 +464,10 @@ def main(argv=None):
           f"files={'inotify' if HAVE_INOTIFY and not a.replay else 'polling'}  "
           f"{'replay of ' + a.run if a.replay else ('run ' + a.run if a.run else 'following ' + a.data_path)}", flush=True)
     last_report = 0.0
+
+    def _term(signum, frame):            # SIGTERM from FSUDAQ (or kill): leave like Ctrl-C
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, _term)
     try:
         while True:
             t0 = time.time()
@@ -483,6 +488,9 @@ def main(argv=None):
         pass
     finally:
         srv.shutdown()
+        if online.pool is not None:
+            online.pool.terminate(); online.pool.join()
+        print("online dashboard stopped", flush=True)
 
 
 if __name__ == "__main__":
