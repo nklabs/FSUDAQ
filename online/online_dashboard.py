@@ -450,6 +450,7 @@ def main(argv=None):
     p.add_argument("--from-start", action="store_true", help="live mode: process the run from its first file instead of from now")
     p.add_argument("--port", type=int, default=8050)
     p.add_argument("--workers", type=int, default=4, help="processes for sort/build/classify (0 = in the main loop)")
+    p.add_argument("--open-browser", action="store_true", help="open the page in the default browser once the server is up")
     a = p.parse_args(argv)
     if not a.run and not a.data_path:
         sys.exit("give --data-path or --run")
@@ -460,6 +461,9 @@ def main(argv=None):
         Handler.page = fh.read()
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
+    if a.open_browser:
+        import webbrowser
+        threading.Thread(target=lambda: webbrowser.open(f"http://localhost:{a.port}/"), daemon=True).start()
     print(f"online dashboard: http://localhost:{a.port}/   kernels={'numba' if FAST else 'numpy'}  "
           f"files={'inotify' if HAVE_INOTIFY and not a.replay else 'polling'}  "
           f"{'replay of ' + a.run if a.replay else ('run ' + a.run if a.run else 'following ' + a.data_path)}", flush=True)

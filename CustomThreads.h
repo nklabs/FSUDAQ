@@ -3,6 +3,8 @@
 
 #include <QThread>
 #include <QMutex>
+#include <signal.h>
+#include <pthread.h>
 #include <QWaitCondition>
 #include <QMessageBox>
 #include <QCoreApplication>
@@ -35,6 +37,20 @@ public:
   unsigned long GetReadCount() const {return readCount;}
 
   void run(){
+
+    // Keep asynchronous signals away from this thread. A process-directed signal (SIGCHLD
+    // when a child such as the browser opener exits, SIGPIPE, ...) is delivered to any
+    // thread that does not block it; if that thread is inside a blocking CAEN driver call
+    // the wait is interrupted and both drivers mishandle it (a5818 aborts the DMA, a3818
+    // leaves the packet buffered), so every board read fails at once (29 Sep 2026).
+    {
+      sigset_t set;
+      sigemptyset(&set);
+      sigaddset(&set, SIGCHLD); sigaddset(&set, SIGPIPE); sigaddset(&set, SIGHUP);
+      sigaddset(&set, SIGUSR1); sigaddset(&set, SIGUSR2); sigaddset(&set, SIGALRM);
+      sigaddset(&set, SIGINT);  sigaddset(&set, SIGTERM);   // the main thread still gets these
+      pthread_sigmask(SIG_BLOCK, &set, nullptr);
+    }
 
     stop = false;
     readCount = 0;

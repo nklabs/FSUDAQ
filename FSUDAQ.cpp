@@ -1555,10 +1555,7 @@ void FSUDAQ::AutoRun(){
 
   // the dashboard is started before the boards, never while they run
   if( chkAutoDashboard->isChecked() && !rawDataPath.isEmpty() && digi != nullptr ){
-    bool wasRunning = dashboardProc && dashboardProc->state() != QProcess::NotRunning;
-    if( !wasRunning && StartDashboardProcess() ){
-      QTimer::singleShot(1500, this, [=](){ QDesktopServices::openUrl(QUrl("http://localhost:8050/")); });
-    }
+    StartDashboardProcess();   // the dashboard opens the browser itself once its server is up
   }
 
   const qint64 runTimeMs = qRound64(sbRunTimeMin->value() * 60. * 1000.);
@@ -2015,9 +2012,7 @@ void FSUDAQ::OpenDashboard(){
     if( r != QMessageBox::Yes ) return;
     LogMsg("<font style=\"color: orange;\">Dashboard started during acquisition on request; check dmesg for 'a3818: dispatch_pkt' afterwards.</font>");
   }
-  if( StartDashboardProcess() ){
-    QTimer::singleShot(1500, this, [=](){ QDesktopServices::openUrl(QUrl(url)); });
-  }
+  StartDashboardProcess();     // it opens the browser itself once its server is up
 }
 
 bool FSUDAQ::StartDashboardProcess(){
@@ -2053,7 +2048,7 @@ bool FSUDAQ::StartDashboardProcess(){
     });
   }
   dashboardProc->setWorkingDirectory(dir);
-  dashboardProc->start(python, QStringList() << script << "--data-path" << rawDataPath << "--port" << "8050");
+  dashboardProc->start(python, QStringList() << script << "--data-path" << rawDataPath << "--port" << "8050" << "--open-browser");
   if( !dashboardProc->waitForStarted(3000) ){
     LogMsg("<font style=\"color: red;\">Cannot start " + python + " " + script + ".</font>");
     return false;
