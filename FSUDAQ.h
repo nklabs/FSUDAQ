@@ -87,7 +87,8 @@ private slots:
 
   void OpenAnalyzer();
 
-  void OpenDashboard();   // start online/online_dashboard.py on the data path and open the browser
+  void OpenDashboard();         // button: start the dashboard (asks during a run) and open the browser
+  bool StartDashboardProcess(); // start online/online_dashboard.py if it is not running; true if it runs
 
   void UpdateAllPanels(int panelID);
 
@@ -131,6 +132,7 @@ private:
 
   QPushButton * bnCanvas;
   QPushButton * bnDashboard;
+  QCheckBox * chkAutoDashboard; // start the dashboard before a run if it is not up yet
   QProcess * dashboardProc;
 
   QTimer * runTimer;

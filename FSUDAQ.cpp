@@ -119,6 +119,12 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     connect(bnDashboard, &QPushButton::clicked, this, &FSUDAQ::OpenDashboard);
     dashboardProc = nullptr;
 
+    chkAutoDashboard = new QCheckBox("Start dashboard with run", this);
+    chkAutoDashboard->setChecked(true);
+    chkAutoDashboard->setToolTip("Before a run starts, start the online dashboard if it is not running yet (a running one is left as it is). Off: runs start without it.");
+    connect(chkAutoDashboard, &QCheckBox::toggled, this, &FSUDAQ::SaveProgramSettings);
+    layout->addWidget(chkAutoDashboard, 1, 3);
+
   }
 
   {//^====================== influx and Elog
@@ -538,6 +544,7 @@ void FSUDAQ::LoadProgramSettings(){
         }
         if( eq > 0 && key == "maxFileSizeMB" && value.toInt() > 0 ) sbFileSizeMB->setValue(value.toInt());
         if( eq > 0 && key == "repeatPauseSec" ) sbRepeatPauseSec->setValue(value.toInt());
+        if( eq > 0 && key == "autoDashboard" ) { QSignalBlocker blocker(chkAutoDashboard); chkAutoDashboard->setChecked(value.toInt() != 0); }
       }
 
       count ++;
@@ -599,6 +606,7 @@ void FSUDAQ::SaveProgramSettings(){
   file.write(("autoIncrementRunID=" + QString::number(chkAutoIncrement->isChecked() ? 1 : 0) + "\n").toStdString().c_str());
   file.write(("maxFileSizeMB=" + QString::number((int) sbFileSizeMB->value()) + "\n").toStdString().c_str());
   file.write(("repeatPauseSec=" + QString::number((int) sbRepeatPauseSec->value()) + "\n").toStdString().c_str());
+  file.write(("autoDashboard=" + QString::number(chkAutoDashboard->isChecked() ? 1 : 0) + "\n").toStdString().c_str());
   file.write("//------------end of file.\n");
   
   file.close();
@@ -1545,6 +1553,14 @@ void FSUDAQ::AutoRun(){
   DebugPrint("%s", "FSUDAQ");
   runTimer->disconnect(runTimerConnection);
 
+  // the dashboard is started before the boards, never while they run
+  if( chkAutoDashboard->isChecked() && !rawDataPath.isEmpty() && digi != nullptr ){
+    bool wasRunning = dashboardProc && dashboardProc->state() != QProcess::NotRunning;
+    if( !wasRunning && StartDashboardProcess() ){
+      QTimer::singleShot(1500, this, [=](){ QDesktopServices::openUrl(QUrl("http://localhost:8050/")); });
+    }
+  }
+
   const qint64 runTimeMs = qRound64(sbRunTimeMin->value() * 60. * 1000.);
   if( runTimeMs <= 0 ){ // until Stop
     StartACQ();
@@ -1999,15 +2015,22 @@ void FSUDAQ::OpenDashboard(){
     if( r != QMessageBox::Yes ) return;
     LogMsg("<font style=\"color: orange;\">Dashboard started during acquisition on request; check dmesg for 'a3818: dispatch_pkt' afterwards.</font>");
   }
+  if( StartDashboardProcess() ){
+    QTimer::singleShot(1500, this, [=](){ QDesktopServices::openUrl(QUrl(url)); });
+  }
+}
+
+bool FSUDAQ::StartDashboardProcess(){
+  if( dashboardProc && dashboardProc->state() != QProcess::NotRunning ) return true;
   if( rawDataPath.isEmpty() ){
     LogMsg("<font style=\"color: red;\">Set the data path first; the dashboard follows the newest run folder in it.</font>");
-    return;
+    return false;
   }
   QString dir = QDir::current().absolutePath() + "/online";
   QString script = dir + "/online_dashboard.py";
   if( !QFile::exists(script) ){
     LogMsg("<font style=\"color: red;\">" + script + " not found.</font>");
-    return;
+    return false;
   }
   QString python = QFile::exists(dir + "/venv/bin/python") ? dir + "/venv/bin/python" : "python3";
 
@@ -2033,10 +2056,10 @@ void FSUDAQ::OpenDashboard(){
   dashboardProc->start(python, QStringList() << script << "--data-path" << rawDataPath << "--port" << "8050");
   if( !dashboardProc->waitForStarted(3000) ){
     LogMsg("<font style=\"color: red;\">Cannot start " + python + " " + script + ".</font>");
-    return;
+    return false;
   }
-  LogMsg("[dashboard] started with " + python + " on " + rawDataPath + "; opening " + url);
-  QTimer::singleShot(1500, this, [=](){ QDesktopServices::openUrl(QUrl(url)); });
+  LogMsg("[dashboard] started with " + python + " on " + rawDataPath + " (http://localhost:8050/)");
+  return true;
 }
 
 void FSUDAQ::OpenScope(){
