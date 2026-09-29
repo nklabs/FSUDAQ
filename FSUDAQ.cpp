@@ -75,6 +75,7 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     cbOpenMethod->addItem("w/o settings", 0);
     cbOpenMethod->addItem("w/ settings", 1);
     cbOpenMethod->addItem("default Program", 2);
+    cbOpenMethod->setCurrentIndex(1); // open with the settings files of the data path by default
     layout->addWidget(cbOpenMethod, 1, 0);
 
     bnCloseDigitizers = new QPushButton("Close Digitizers", this);
@@ -744,8 +745,8 @@ void FSUDAQ::OpenDigitizers(){
     return;
   }else{
     if( cbOpenMethod->currentData().toInt() == 0 ) LogMsg(QString("Done seraching. Found %1 digitizer(s). Opening digitizer(s)....").arg(nDigi));
-    if( cbOpenMethod->currentData().toInt() == 1 ) LogMsg(QString("Done seraching. Found %1 digitizer(s). Opening digitizer(s) and program default....").arg(nDigi));
-    if( cbOpenMethod->currentData().toInt() == 2 ) LogMsg(QString("Done seraching. Found %1 digitizer(s). Opening digitizer(s) and load settings....").arg(nDigi));    
+    if( cbOpenMethod->currentData().toInt() == 1 ) LogMsg(QString("Done searching. Found %1 digitizer(s). Opening digitizer(s) and loading settings files....").arg(nDigi));
+    if( cbOpenMethod->currentData().toInt() == 2 ) LogMsg(QString("Done searching. Found %1 digitizer(s). Opening digitizer(s) and programming defaults....").arg(nDigi));    
   }
   
   digi = new Digitizer * [nDigi];
