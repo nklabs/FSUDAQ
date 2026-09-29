@@ -6,7 +6,7 @@ TEMPLATE = app
 TARGET = FSUDAQ_Qt6
 INCLUDEPATH += .
 
-QT += core widgets charts printsupport
+QT += core widgets charts printsupport network
 
 LIBS += -lCAENDigitizer -lcurl
 

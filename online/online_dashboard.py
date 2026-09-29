@@ -412,6 +412,10 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if self.path.startswith("/open"):        # FSUDAQ asks us to show the page (it must not spawn anything itself)
+            import webbrowser
+            threading.Thread(target=lambda: webbrowser.open(f"http://localhost:{self.server.server_address[1]}/"), daemon=True).start()
+            self.send_response(204); self.end_headers(); return
         if self.path.startswith("/state"):
             body = json.dumps(self.online.state()).encode()
             ctype = "application/json"

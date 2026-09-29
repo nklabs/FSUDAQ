@@ -11,6 +11,7 @@
 #include <QCheckBox>
 #include <QGridLayout>
 #include <QElapsedTimer>
+#include <QNetworkAccessManager>
 
 #include "ClassDigitizer.h"
 #include "CustomThreads.h"
@@ -89,6 +90,7 @@ private slots:
 
   void OpenDashboard();         // button: start the dashboard (asks during a run) and open the browser
   bool StartDashboardProcess(); // start online/online_dashboard.py if it is not running; true if it runs
+  void AskDashboardToOpenPage(); // HTTP GET /open on the running dashboard: it opens the browser from its own process
 
   void UpdateAllPanels(int panelID);
 
@@ -134,6 +136,7 @@ private:
   QPushButton * bnDashboard;
   QCheckBox * chkAutoDashboard; // start the dashboard before a run if it is not up yet
   QProcess * dashboardProc;
+  QNetworkAccessManager * net;
 
   QTimer * runTimer;
   bool breakAutoRepeat;

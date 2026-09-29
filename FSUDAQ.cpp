@@ -15,8 +15,9 @@
 #include <QProcess>
 #include <QMessageBox>
 #include <QIntValidator>
-#include <QDesktopServices>
 #include <QUrl>
+#include <QNetworkRequest>
+#include <QNetworkReply>
 #include <QElapsedTimer>
 
 #include "analyzers/CoincidentAnalyzer.h"
@@ -118,6 +119,7 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     layout->addWidget(bnDashboard, 0, 3);
     connect(bnDashboard, &QPushButton::clicked, this, &FSUDAQ::OpenDashboard);
     dashboardProc = nullptr;
+    net = new QNetworkAccessManager(this);
 
     chkAutoDashboard = new QCheckBox("Start dashboard with run", this);
     chkAutoDashboard->setChecked(true);
@@ -1555,7 +1557,8 @@ void FSUDAQ::AutoRun(){
 
   // the dashboard is started before the boards, never while they run
   if( chkAutoDashboard->isChecked() && !rawDataPath.isEmpty() && digi != nullptr ){
-    StartDashboardProcess();   // the dashboard opens the browser itself once its server is up
+    if( dashboardProc && dashboardProc->state() != QProcess::NotRunning ) AskDashboardToOpenPage();
+    else StartDashboardProcess();   // it opens the browser itself once its server is up
   }
 
   const qint64 runTimeMs = qRound64(sbRunTimeMin->value() * 60. * 1000.);
@@ -1994,10 +1997,9 @@ void FSUDAQ::WriteRunTimestamp(bool isStartRun, const QString & timeStamp){
 //***************************************************************
 void FSUDAQ::OpenDashboard(){
   DebugPrint("%s", "FSUDAQ");
-  const QString url = "http://localhost:8050/";
 
   if( dashboardProc && dashboardProc->state() != QProcess::NotRunning ){
-    QDesktopServices::openUrl(QUrl(url));   // already running: just show the page, no new process
+    AskDashboardToOpenPage();   // already running: it shows the page; FSUDAQ spawns nothing
     return;
   }
   if( isACQStarted ){
@@ -2013,6 +2015,13 @@ void FSUDAQ::OpenDashboard(){
     LogMsg("<font style=\"color: orange;\">Dashboard started during acquisition on request; check dmesg for 'a3818: dispatch_pkt' afterwards.</font>");
   }
   StartDashboardProcess();     // it opens the browser itself once its server is up
+}
+
+void FSUDAQ::AskDashboardToOpenPage(){
+  // Starting any child process from FSUDAQ while the boards stream breaks the board reads
+  // (29 Sep 2026), so the browser is opened by the dashboard process on request.
+  QNetworkReply * r = net->get(QNetworkRequest(QUrl("http://localhost:8050/open")));
+  connect(r, &QNetworkReply::finished, r, &QNetworkReply::deleteLater);
 }
 
 bool FSUDAQ::StartDashboardProcess(){

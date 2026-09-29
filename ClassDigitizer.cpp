@@ -595,6 +595,10 @@ void Digitizer::StartACQ(){
   // ret |= CAEN_DGTZ_SetDPPEventAggregation(handle, 0, 0); // Auto set
 
   unsigned int bufferSize = CalByteForBufferCAEN();
+  if( bufferSize == 0 ){
+    printf("\033[31mDigi-%d: not started, no readout buffer (board not ready; reopen the digitizers).\033[0m\n", GetSerialNumber());
+    return;
+  }
   // unsigned int bufferSize = 200 * 1024 * 1024;
   // if( DPPType == DPPTypeCode::DPP_QDC_CODE ) bufferSize = 500 * 1024 * 1024;
   // if( bufferSize  > 160 * 1024 * 1024 ) printf("============= buffer size bigger than 160 MB (%u)\n", bufferSize );
@@ -730,11 +734,16 @@ unsigned int Digitizer::CalByteForBuffer(bool verbose){
 
 unsigned int Digitizer::CalByteForBufferCAEN(){
   DebugPrint("%s", "Digitizer");
-  char * BufferCAEN;
-  uint32_t AllocatedSize;
+  char * BufferCAEN = nullptr;
+  uint32_t AllocatedSize = 0;
   ret = CAEN_DGTZ_MallocReadoutBuffer(handle, &BufferCAEN, &AllocatedSize);
-
-  if( BufferCAEN) CAEN_DGTZ_FreeReadoutBuffer(&BufferCAEN); // was `delete` on the library's malloc'ed block
+  if( ret != CAEN_DGTZ_Success ){
+    // the board did not answer (e.g. left in error after failed reads): the pointer is unset,
+    // freeing it aborted the program on 29 Sep 2026; report and let the caller refuse to start
+    printf("\033[31mDigi-%d: CAEN_DGTZ_MallocReadoutBuffer failed (ret %d); the board is not ready.\033[0m\n", GetSerialNumber(), ret);
+    return 0;
+  }
+  if( BufferCAEN ) CAEN_DGTZ_FreeReadoutBuffer(&BufferCAEN); // was `delete` on the library's malloc'ed block
   return AllocatedSize;
 
 }
