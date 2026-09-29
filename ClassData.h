@@ -50,6 +50,9 @@ class Data{
     unsigned short AggCount ; /// reset after trig-rate calculation
     uint64_t       EventsSinceRate;    /// events decoded on the whole board, reset after trig-rate calculation
     uint64_t       ReadBytesSinceRate; /// bytes read from the board (Digitizer::ReadData), reset after trig-rate calculation
+    uint64_t       DecodeTruncated;    /// buffers whose last aggregate was cut off (decode stopped there, the file still has the raw bytes)
+    uint64_t       DecodeBadChannel;   /// events skipped because the channel number is not one this board has
+    bool           decodeOverrun;      /// set by ReadBuffer() when a read goes past nByte
     unsigned int   aggTime; /// update every decode
 
     int GetLoopIndex(unsigned short ch) const {return LoopIndex[ch];}
@@ -185,6 +188,10 @@ inline Data::Data(unsigned short numCh, uInt dataSize): numInputCh(numCh){
 
   decimation = 0;
 
+  DecodeTruncated = 0;
+  DecodeBadChannel = 0;
+  decodeOverrun = false;
+
   outFileIndex = 0;
   outFilePrefix = "";
   outFileName = "";
@@ -196,7 +203,7 @@ inline Data::Data(unsigned short numCh, uInt dataSize): numInputCh(numCh){
 }
 
 inline Data::~Data(){
-  if( buffer != NULL ) delete buffer;
+  if( buffer != NULL ) free(buffer); // allocated with malloc in AllocateMemory / CopyBuffer
 
   ClearDataPointer();
 }
@@ -351,14 +358,14 @@ inline void Data::ClearData(){
 
 inline void Data::ClearBuffer(){
   //printf("==== Data::%s \n", __func__);
-  delete buffer;
+  free(buffer); // allocated with malloc
   buffer = nullptr;
   AllocatedSize = 0;
   nByte = 0;
 }
 
 inline void Data::CopyBuffer(const char * buffer, const unsigned int size){
-  if( this->buffer ) delete this->buffer;
+  if( this->buffer ) free(this->buffer);
   this->buffer = (char*) malloc(size);
   std::memcpy(this->buffer, buffer, size);
   this->nByte = size;
@@ -726,6 +733,10 @@ inline void Data::PrintBuffer(){
 
 inline unsigned int Data::ReadBuffer(unsigned int nWord, int verbose){
   if( buffer == NULL ) return 0;
+  if( 4 * (uint64_t) nWord + 4 > nByte ) { // past the data of this read: the last aggregate was cut off
+    decodeOverrun = true;
+    return 0;
+  }
   
   unsigned int word = 0;
   // for( int i = 0 ; i < 4 ; i++) word += ((buffer[i + 4 * nWord] & 0xFF) << 8*i);
@@ -757,6 +768,7 @@ inline void Data::DecodeBuffer(bool fastDecode, int verbose){
 
   if( nByte == 0 ) return;
   nw = 0;
+  decodeOverrun = false;
 
   //printf("############################# agg\n");
   
@@ -766,6 +778,10 @@ inline void Data::DecodeBuffer(bool fastDecode, int verbose){
     if( ( (word >> 28) & 0xF ) == 0xA ) { /// start of Board Agg
       unsigned int nWord = word & 0x0FFFFFFF ;
       if( verbose >= 1 ) printf("Number of words in this Agg : %u = %u Byte\n", nWord, nWord * 4);
+      if( 4 * ((uint64_t) nw + nWord) > nByte ) { // the read ended inside this aggregate; the rest arrives with the next read
+        DecodeTruncated ++;
+        break;
+      }
       AggCount ++;
       TotalAggCount ++;
 
@@ -808,7 +824,9 @@ inline void Data::DecodeBuffer(bool fastDecode, int verbose){
         if( DPPType == DPPTypeCode::DPP_QDC_CODE ) {
           if ( DecodeQDCGroupedChannelBlock(chMask, fastDecode, verbose) < 0 ) break;
         }
+        if( decodeOverrun ) break;
       }
+      if( decodeOverrun ) { DecodeTruncated ++; break; }
     }else{
       if( verbose >= 1 ) printf("nw : %d, incorrect buffer header. \n", nw);
       break;
@@ -942,6 +960,13 @@ inline int Data::DecodePHADualChannelBlock(unsigned int ChannelMask, bool fastDe
     bool channelTag = ((word >> 31) & 0x1);
     unsigned int timeStamp0 = (word & 0x7FFFFFFF);
     int channel = ChannelMask*2 + channelTag;
+    if( channel >= numInputCh ) { // e.g. couple 4-7 on an 8-channel DT5730: the arrays only have numInputCh entries
+      DecodeBadChannel ++;
+      if( fastDecode ) nw += nSample/2;   // skip the samples the way the normal path does
+      else if( hasWaveForm ) nw += nSample/2;
+      nw += 1 + (hasExtra2 ? 1 : 0);      // extras2 word (if any) and the energy word
+      continue;
+    }
     if( verbose >= 2 ) printf("ch : %d, timeStamp0 %u \n", channel, timeStamp0);
     
     ///===== read waveform
@@ -1188,6 +1213,13 @@ inline int Data::DecodePSDDualChannelBlock(unsigned int ChannelMask, bool fastDe
     bool channelTag = ((word >> 31) & 0x1);
     unsigned int timeStamp0 = (word & 0x7FFFFFFF);
     int channel = ChannelMask*2 + channelTag;
+    if( channel >= numInputCh ) { // e.g. couple 4-7 on an 8-channel DT5730: the arrays only have numInputCh entries
+      DecodeBadChannel ++;
+      if( fastDecode ) nw += nSample/2;   // skip the samples the way the normal path does
+      else if( hasWaveForm ) nw += nSample/2;
+      nw += 1 + (hasExtra ? 1 : 0);       // extra word (if any) and the energy word
+      continue;
+    }
     if( verbose >= 2 ) printf("ch : %d, timeStamp %u \n", channel, timeStamp0);
     
     ///===== read waveform
@@ -1421,6 +1453,7 @@ inline int Data::DecodeQDCGroupedChannelBlock(unsigned int ChannelMask, bool fas
     unsigned short subCh = ((word >> 28)& 0xF);
 
     unsigned short channel = ChannelMask*8 + subCh;
+    if( channel >= numInputCh ) { DecodeBadChannel ++; continue; } // group beyond this board's channels
     
     DataIndex[channel] ++; 
     if( DataIndex[channel] >= dataSize ) {

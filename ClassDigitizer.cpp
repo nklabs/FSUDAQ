@@ -734,7 +734,7 @@ unsigned int Digitizer::CalByteForBufferCAEN(){
   uint32_t AllocatedSize;
   ret = CAEN_DGTZ_MallocReadoutBuffer(handle, &BufferCAEN, &AllocatedSize);
 
-  if( BufferCAEN) delete BufferCAEN;
+  if( BufferCAEN) CAEN_DGTZ_FreeReadoutBuffer(&BufferCAEN); // was `delete` on the library's malloc'ed block
   return AllocatedSize;
 
 }
