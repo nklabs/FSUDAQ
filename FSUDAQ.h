@@ -114,7 +114,7 @@ private:
   RComboBox * cbOpenDigitizers;
   RComboBox * cbOpenMethod;
 
-  //QPushButton * bnOpenDigitizers;
+  QPushButton * bnOpenDigitizers;
   QPushButton * bnCloseDigitizers;
   QPushButton * bnOpenScope;
   QPushButton * bnDigiSettings;

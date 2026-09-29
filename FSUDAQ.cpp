@@ -64,22 +64,28 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     layoutMain->addWidget(box);
     QGridLayout * layout = new QGridLayout(box);
 
+    // link type and settings handling are chosen first; the button does the opening
     cbOpenDigitizers = new RComboBox(this);
-    cbOpenDigitizers->addItem("Open Digitizers ... ", 0);
-    cbOpenDigitizers->addItem("Open Digitizers via Optical/USB", 1);
-    cbOpenDigitizers->addItem("Open Digitizers via A4818(s)", 4);
+    cbOpenDigitizers->addItem("via Optical link / USB", 1);
+    cbOpenDigitizers->addItem("via A4818(s) (a4818_list.txt)", 4);
+    cbOpenDigitizers->setToolTip("How the boards are connected. A4818 needs the PIDs in a4818_list.txt next to the program.");
     layout->addWidget(cbOpenDigitizers, 0, 0);
-    connect(cbOpenDigitizers, &RComboBox::currentIndexChanged, this, &FSUDAQ::OpenDigitizers);
     
     cbOpenMethod = new RComboBox(this);
     cbOpenMethod->addItem("w/o settings", 0);
     cbOpenMethod->addItem("w/ settings", 1);
     cbOpenMethod->addItem("default Program", 2);
     cbOpenMethod->setCurrentIndex(1); // open with the settings files of the data path by default
+    cbOpenMethod->setToolTip("w/ settings: load Digi-<serial>_<DPP>.bin from the data path and program the boards with it (default). w/o settings: open and read the boards as they are. default Program: write the built-in defaults.");
     layout->addWidget(cbOpenMethod, 1, 0);
 
+    bnOpenDigitizers = new QPushButton("Open Digitizers", this);
+    bnOpenDigitizers->setStyleSheet("background-color: green;");
+    layout->addWidget(bnOpenDigitizers, 2, 0);
+    connect(bnOpenDigitizers, &QPushButton::clicked, this, &FSUDAQ::OpenDigitizers);
+
     bnCloseDigitizers = new QPushButton("Close Digitizers", this);
-    layout->addWidget(bnCloseDigitizers, 2, 0);
+    layout->addWidget(bnCloseDigitizers, 2, 2);
     connect(bnCloseDigitizers, &QPushButton::clicked, this, &FSUDAQ::CloseDigitizers);
 
     bnDigiSettings = new QPushButton("Digitizers Settings", this);
@@ -649,7 +655,7 @@ void FSUDAQ::SaveLastRunFile(){
 //***************************************************************
 void FSUDAQ::OpenDigitizers(){
   DebugPrint("%s", "FSUDAQ");
-  if( cbOpenDigitizers->currentIndex() == 0 ) return;
+  if( digi != nullptr ) return; // already open
 
   // placeholder for USB
   // if( cbOpenDigitizers->currentData().toInt() == 3 ) {
@@ -667,7 +673,6 @@ void FSUDAQ::OpenDigitizers(){
     if( !file.open(QIODevice::Text | QIODevice::ReadOnly) ) {
       LogMsg("<b>" + a4818Path + "</b> not found.");
       LogMsg("Please create such file and put the a4818 PIDs inseperate lines.");
-      cbOpenDigitizers->setCurrentIndex(0);
       return;
     }else{
       QTextStream in(&file);
@@ -681,7 +686,6 @@ void FSUDAQ::OpenDigitizers(){
 
     if( a4818PIDs.isEmpty()){
       LogMsg("<b>" + a4818Path + "</b> is empty.");
-      cbOpenDigitizers->setCurrentIndex(0);
       return;
     }else{
 
@@ -740,8 +744,7 @@ void FSUDAQ::OpenDigitizers(){
   logMsgHTMLMode = true;
 
   if( nDigi == 0 ) {
-    LogMsg(QString("Done seraching. No digitizer found from port 0 to ") +  QString::number(MaxNPorts) + " and board 0 to " + QString::number(MaxNBoards) + ".");
-    cbOpenDigitizers->setCurrentIndex(0);
+    LogMsg(QString("Done searching. No digitizer found from port 0 to ") +  QString::number(MaxNPorts) + " and board 0 to " + QString::number(MaxNBoards) + ".");
     return;
   }else{
     if( cbOpenMethod->currentData().toInt() == 0 ) LogMsg(QString("Done seraching. Found %1 digitizer(s). Opening digitizer(s)....").arg(nDigi));
@@ -828,8 +831,6 @@ void FSUDAQ::OpenDigitizers(){
 
   SetupScalar();
 
-  cbOpenDigitizers->setCurrentIndex(0);
-
 }
 
 void FSUDAQ::CloseDigitizers(){
@@ -908,6 +909,8 @@ void FSUDAQ::WaitForDigitizersOpen(bool onOff){
   // bnOpenDigitizers->setEnabled(onOff);
 
   cbOpenDigitizers->setEnabled(onOff);
+  bnOpenDigitizers->setEnabled(onOff);
+  bnOpenDigitizers->setStyleSheet(onOff ? "background-color: green;" : "");
   cbOpenMethod->setEnabled(onOff);
 
   bnCloseDigitizers->setEnabled(!onOff);
