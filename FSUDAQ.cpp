@@ -1330,13 +1330,28 @@ void FSUDAQ::StartACQ(){
     // catches a stale lastRun.sh.
     QStringList existing = ExistingRunFiles();
     if( !existing.isEmpty() ){
-      QString msg = "Run-" + runIDStr + " with prefix \"" + prefix + "\" already has " + QString::number(existing.size()) + " file(s) in\n" + runDir + "\n\n"
-                    + "e.g. " + existing.first() + "\n\nChoose another run number or move those files away. The run was not started.";
-      QMessageBox::warning(this, "Run number already used", msg);
-      LogMsg("<font style=\"color: red;\">Start Run-" + runIDStr + " refused: " + QString::number(existing.size()) + " file(s) for this prefix and run number already exist in " + runDir + ".</font>");
-      if( chkAutoIncrement->isChecked() ) runID --;
-      leRunID->setText(QString::number(runID));
-      return;
+      QMessageBox box(this);
+      box.setIcon(QMessageBox::Warning);
+      box.setWindowTitle("Run number already used");
+      box.setText("Run-" + runIDStr + " with prefix \"" + prefix + "\" already has " + QString::number(existing.size()) + " file(s) in\n" + runDir + "\n\ne.g. " + existing.first());
+      box.setInformativeText("Go back to choose another run number, or delete those files and record this run under the same number.");
+      QPushButton * back = box.addButton("Go back", QMessageBox::RejectRole);
+      QPushButton * over = box.addButton("Overwrite files and continue", QMessageBox::DestructiveRole);
+      box.setDefaultButton(back);
+      box.exec();
+      if( box.clickedButton() != over ){
+        LogMsg("<font style=\"color: red;\">Start Run-" + runIDStr + " not started: " + QString::number(existing.size()) + " file(s) for this prefix and run number already exist in " + runDir + ".</font>");
+        if( chkAutoIncrement->isChecked() ) runID --;
+        leRunID->setText(QString::number(runID));
+        return;
+      }
+      // remove everything of that run, including files with indices a new run would not reach
+      int removed = 0;
+      for( const QString & f : existing ){
+        if( QFile::remove(runDir + "/" + f) ) removed ++;
+        else LogMsg("<font style=\"color: red;\">Cannot remove " + runDir + "/" + f + "</font>");
+      }
+      LogMsg("<font style=\"color: orange;\">Run-" + runIDStr + ": " + QString::number(removed) + " existing file(s) removed on request; the run is recorded under the same number.</font>");
     }
     // one folder per run for the data files and the settings snapshots; the run
     // record files (RunTimeStamp.dat/.csv, lastRun.sh) stay in the data path
