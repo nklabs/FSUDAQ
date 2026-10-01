@@ -1016,10 +1016,21 @@ void FSUDAQ::SetupScalar(){
   QWidget * layoutWidget = new QWidget(scalar);
   scopeScroll->setWidget(layoutWidget);
 
-  scalarLayout = new QGridLayout(layoutWidget);
+  // the status lines sit above the board grid, not in its columns, so their text cannot widen
+  // a board column; both are as wide as the grid and kept at the top left
+  QVBoxLayout * outerLayout = new QVBoxLayout(layoutWidget);
+  QWidget * block = new QWidget(layoutWidget);
+  outerLayout->addWidget(block, 0, Qt::AlignTop | Qt::AlignLeft);
+  QVBoxLayout * blockLayout = new QVBoxLayout(block);
+  blockLayout->setContentsMargins(0, 0, 0, 0);
+  QGridLayout * topLayout = new QGridLayout();
+  topLayout->setColumnStretch(0, 1);
+  blockLayout->addLayout(topLayout);
+
+  scalarLayout = new QGridLayout();
   scalarLayout->setSpacing(0);
   scalarLayout->setHorizontalSpacing(3);
-  scalarLayout->setAlignment(Qt::AlignTop | Qt::AlignLeft);
+  blockLayout->addLayout(scalarLayout);
 
   leTrigger = nullptr;
   leAccept = nullptr;
@@ -1056,8 +1067,6 @@ void FSUDAQ::SetupScalar(){
   const int gapW = 18;                      // empty column between boards
 
   scalar->setGeometry(0, 0, 60 + nDigi * (boardW + gapW + 6), 160 + (headRow + maxNChannel) * 25);
-  const int nCols = 4 * nDigi;              // channel numbers, then three columns and a gap per board
-  const int half = nCols / 2;
 
   if( lbLastUpdateTime == nullptr ){
     lbLastUpdateTime = new QLabel("Last update : NA", scalar);
@@ -1070,21 +1079,15 @@ void FSUDAQ::SetupScalar(){
     lbRunTime->setToolTip("Elapsed acquisition time, h:mm:ss.ms, from the moment the boards were started; frozen at the value when the run stopped.");
   }
 
+  // run clock and ACQ status on the left; last update and the totals on the right
   lbRunTime->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-  scalarLayout->removeWidget(lbRunTime);
-  scalarLayout->addWidget(lbRunTime, 1, 0, 1, half);
-  
-  lbLastUpdateTime->setAlignment(Qt::AlignRight);
-  scalarLayout->removeWidget(lbLastUpdateTime);
-  scalarLayout->addWidget(lbLastUpdateTime, 0, 0, 1, half);
-
-  lbScalarACQStatus->setAlignment(Qt::AlignCenter);
-  scalarLayout->removeWidget(lbScalarACQStatus);
-  scalarLayout->addWidget(lbScalarACQStatus, 0, half);
-
+  topLayout->addWidget(lbRunTime, 0, 0);
+  lbScalarACQStatus->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+  topLayout->addWidget(lbScalarACQStatus, 1, 0);
+  lbLastUpdateTime->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+  topLayout->addWidget(lbLastUpdateTime, 0, 1);
   lbTotalFileSize->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-  scalarLayout->removeWidget(lbTotalFileSize);
-  scalarLayout->addWidget(lbTotalFileSize, 1, half, 1, nCols - half);
+  topLayout->addWidget(lbTotalFileSize, 1, 1);
 
   ///==== create the header row
   int rowID = headRow;
