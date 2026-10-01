@@ -131,6 +131,7 @@ Scope::Scope(Digitizer ** digi, unsigned int nDigi, ReadDataThread ** readDataTh
 
     bool saveACQStartStatus = isACQStarted;
     if( isACQStarted) StopScope();
+    ClearTraces();
 
     ID = index;
     tick2ns = digi[ID]->GetTick2ns();
@@ -185,6 +186,7 @@ Scope::Scope(Digitizer ** digi, unsigned int nDigi, ReadDataThread ** readDataTh
 
     bool saveACQStartStatus = isACQStarted;
     if( isACQStarted) StopScope();
+    ClearTraces();
 
     ReadSettingsFromBoard();
 
@@ -560,7 +562,7 @@ void Scope::UpdateScope(){
 
   int ch = cbScopeCh->currentIndex();
 
-  if( digi[ID]->GetInputChannelOnOff(ch) == false) return;
+  if( digi[ID]->GetInputChannelOnOff(ch) == false) { ClearTraces(); return; }
 
   //printf("### %d %d \n", ch, digi[ID]->GetData()->DataIndex[ch]);
 
@@ -575,34 +577,24 @@ void Scope::UpdateScope(){
 
   const int dppType = digi[ID]->GetDPPType();
 
-  // Copy the newest trace out of the Data buffers while the readout thread is not
-  // decoding into them (ReadDataThread holds digiMTX[ID] while it decodes), then
-  // build the plot from the copies without holding the lock.
-  Data * data = digi[ID]->GetData();
-  int index = -1;
-  float trigRate = 0;
-  std::vector<short> wf1, wf2;
-  std::vector<bool>  dwf1, dwf2, dwf3, dwf4;
-  {
-    QMutexLocker locker(&digiMTX[ID]);
-    index = data->GetDataIndex(ch);
-    trigRate = data->TriggerRate[ch];
-    if( index >= 0 ){
-      wf1  = data->Waveform1[ch][index];
-      wf2  = data->Waveform2[ch][index];
-      dwf1 = data->DigiWaveform1[ch][index];
-      dwf2 = data->DigiWaveform2[ch][index];
-      if( dppType == V1740_DPP_QDC_CODE ){
-        dwf3 = data->DigiWaveform3[ch][index];
-        dwf4 = data->DigiWaveform4[ch][index];
-      }
-    }
-  }
+  // The readout thread copies the newest trace of each channel after every decode
+  // (ReadDataThread::CopyScopeTraces); draw from that copy. No trace for 2 s: empty plot.
+  ReadDataThread::ScopeTrace trace;
+  const bool haveTrace = readDataThread[ID]->GetScopeTrace(ch, trace)
+                         && std::chrono::steady_clock::now() - trace.when < std::chrono::milliseconds(ScopeTraceStaleMiliSec);
+  if( !haveTrace ) ClearTraces();
+  const std::vector<short> & wf1  = trace.wf1;
+  const std::vector<short> & wf2  = trace.wf2;
+  const std::vector<bool>  & dwf1 = trace.dwf1;
+  const std::vector<bool>  & dwf2 = trace.dwf2;
+  const std::vector<bool>  & dwf3 = trace.dwf3;
+  const std::vector<bool>  & dwf4 = trace.dwf4;
+  const float trigRate = trace.trigRate;
 
   int traceLength = (int) wf1.size();
   if( dppType == V1730_DPP_PSD_CODE ) traceLength = (int) dwf1.size();
 
-  if( index < 0 || trigRate == 0){
+  if( !haveTrace || trigRate == 0){
     leTriggerRate->setStyleSheet("font-weight : bold; color : red;");
     leTriggerRate->setText("No Trigger");
   }else{
@@ -612,7 +604,7 @@ void Scope::UpdateScope(){
 
   if( traceLength * tick2ns * factor > MaxDisplayTraceTimeLength) traceLength = MaxDisplayTraceTimeLength / tick2ns/ factor;
 
-  if( index >= 0 ){
+  if( haveTrace ){
 
     QVector<QPointF> points[5];
     if( dppType == V1730_DPP_PHA_CODE || dppType == V1730_DPP_PSD_CODE ) {
@@ -645,8 +637,14 @@ void Scope::UpdateScope(){
     }
   }
 
-  plot->axes(Qt::Horizontal).first()->setRange(0, tick2ns * traceLength * factor);
+  if( haveTrace ) plot->axes(Qt::Horizontal).first()->setRange(0, tick2ns * traceLength * factor);
 
+}
+
+void Scope::ClearTraces(){
+  for( int i = 0; i < MaxNumberOfTrace; i++){
+    if( dataTrace[i] && dataTrace[i]->count() > 0 ) dataTrace[i]->clear();
+  }
 }
 
 //*=======================================================

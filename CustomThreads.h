@@ -3,6 +3,10 @@
 
 #include <QThread>
 #include <QMutex>
+#include <QMutexLocker>
+#include <vector>
+#include <algorithm>
+#include <chrono>
 #include <signal.h>
 #include <pthread.h>
 #include <QWaitCondition>
@@ -12,10 +16,7 @@
 #include "macro.h"
 #include "ClassDigitizer.h"
 
-// One mutex per board, shared by every translation unit. This used to be `static`,
-// which gave each .cpp file its own private copy, so the readout thread and the
-// GUI code were never actually locking the same mutex.
-inline QMutex digiMTX[MaxNBoards * MaxNPorts];
+static QMutex digiMTX[MaxNBoards * MaxNPorts];
 
 //^#===================================================== ReadData Thread
 class ReadDataThread : public QThread {
@@ -36,6 +37,24 @@ public:
   void SetReadCountZero() {readCount = 0;}
   unsigned long GetReadCount() const {return readCount;}
 
+  // Newest trace of each channel, copied by this thread right after each decode in scope mode,
+  // while it holds the board's data anyway. The scope draws from this copy and never reads
+  // the Data ring the decoder writes (that race corrupted the heap, 29 Sep 2026).
+  struct ScopeTrace {
+    bool valid = false;
+    long absIndex = -1;        // ring position of the copied event (LoopIndex * size + DataIndex)
+    float trigRate = 0;
+    std::chrono::steady_clock::time_point when{};
+    std::vector<short> wf1, wf2;
+    std::vector<bool>  dwf1, dwf2, dwf3, dwf4;
+  };
+  bool GetScopeTrace(int ch, ScopeTrace & out){
+    if( ch < 0 || ch >= MaxNChannels ) return false;
+    QMutexLocker locker(&scopeMTX);
+    out = scopeTrace[ch];
+    return out.valid;
+  }
+
   void run(){
 
     // Keep asynchronous signals away from this thread. A process-directed signal (SIGCHLD
@@ -54,6 +73,7 @@ public:
 
     stop = false;
     readCount = 0;
+    if( isScope ){ QMutexLocker locker(&scopeMTX); for( auto & t : scopeTrace ) t = ScopeTrace(); }
     clock_gettime(CLOCK_REALTIME, &t0);
     // ta = t0;
     t1 = t0;
@@ -78,6 +98,7 @@ public:
         digiMTX[ID].lock();
         digi->GetData()->DecodeBuffer(!isScope, 0);
         if( isSaveData ) digi->GetData()->SaveData();
+        if( isScope ) CopyScopeTraces(digi->GetData());
         digiMTX[ID].unlock();
 
       }else{
@@ -120,6 +141,31 @@ public:
 signals:
   void sendMsg(const QString &msg);
 private:
+  void CopyScopeTraces(Data * data){
+    QMutexLocker locker(&scopeMTX);
+    const auto now = std::chrono::steady_clock::now();
+    const int nCh = std::min(digi->GetNumInputCh(), (int) MaxNChannels);
+    for( int ch = 0; ch < nCh; ch++){
+      ScopeTrace & t = scopeTrace[ch];
+      t.trigRate = data->TriggerRate[ch];
+      const int index = data->GetDataIndex(ch);
+      if( index < 0 ) continue;
+      const long absIndex = data->GetAbsDataIndex(ch);
+      if( t.valid && absIndex == t.absIndex ) continue;   // no new event on this channel
+      t.valid = true;
+      t.absIndex = absIndex;
+      t.when = now;
+      t.wf1  = data->Waveform1[ch][index];
+      t.wf2  = data->Waveform2[ch][index];
+      t.dwf1 = data->DigiWaveform1[ch][index];
+      t.dwf2 = data->DigiWaveform2[ch][index];
+      t.dwf3 = data->DigiWaveform3[ch][index];
+      t.dwf4 = data->DigiWaveform4[ch][index];
+    }
+  }
+  QMutex scopeMTX;
+  ScopeTrace scopeTrace[MaxNChannels];
+
   Digitizer * digi; 
   bool stop;
   int ID;
