@@ -21,14 +21,6 @@
 #include <QNetworkReply>
 #include <QElapsedTimer>
 
-#include "analyzers/CoincidentAnalyzer.h"
-#include "analyzers/SplitPoleAnalyzer.h"
-#include "analyzers/EncoreAnalyzer.h"
-#include "analyzers/MUSICAnalyzer.h"
-#include "analyzers/NeutronGamma.h"
-#include "analyzers/Cross.h"
-
-std::vector<std::string> onlineAnalyzerList = {"Coincident","Splie-Pole", "Encore", "MUSICS", "Neutron-Gamma", "Cross"};
 
 FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
   DebugPrint("%s", "FSUDAQ");
@@ -121,11 +113,8 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     layout->addWidget(bnOpenScope, 2, 1);
     connect(bnOpenScope, &QPushButton::clicked, this, &FSUDAQ::OpenScope);
 
-    cbAnalyzer = new RComboBox(this);
-    layout->addWidget(cbAnalyzer, 1, 2);
-    cbAnalyzer->addItem("Choose Online Analyzer", -1);
-    for( int i = 0; i < (int) onlineAnalyzerList.size() ; i++) cbAnalyzer->addItem(onlineAnalyzerList[i].c_str(), i);
-    connect(cbAnalyzer, &RComboBox::currentIndexChanged, this, &FSUDAQ::OpenAnalyzer);
+    // no "Choose Online Analyzer": the analyzers fill their plots from a worker thread while the
+    // GUI thread draws them, the race that crashed the Online Histograms window (1 Oct 2026)
 
     // no "Online Histograms" window: it fills its plots from a worker thread while the GUI thread
     // draws them, and that race corrupted the heap mid-run (abort in Histogram1D::Fill, 1 Oct 2026).
@@ -989,7 +978,6 @@ void FSUDAQ::WaitForDigitizersOpen(bool onOff){
   bnStopACQ->setEnabled(!onOff);
   bnStopACQ->setStyleSheet("");
   chkSaveData->setEnabled(!onOff);
-  cbAnalyzer->setEnabled(!onOff);
 
   EnableRunLengthControls(!onOff);
   bnSync->setEnabled(false);
@@ -2340,48 +2328,6 @@ void FSUDAQ::OpenDigiSettings(){
 //***************************************************************
 //***************************************************************
 //***************************************************************
-void FSUDAQ::OpenAnalyzer(){
-  DebugPrint("%s", "FSUDAQ");
-
-  int id = cbAnalyzer->currentData().toInt();
-
-  if( id < 0 ) return;
-
-  if( onlineAnalyzer == nullptr ) {
-    if( id == 0 ) onlineAnalyzer = new CoincidentAnalyzer(digi, nDigi, rawDataPath);
-    if( id == 1 ) onlineAnalyzer = new SplitPole(digi, nDigi);
-    if( id == 2 ) onlineAnalyzer = new Encore(digi, nDigi);
-    if( id == 3 ) onlineAnalyzer = new MUSIC(digi, nDigi);
-    if( id == 4 ) onlineAnalyzer = new NeutronGamma(digi, nDigi, rawDataPath);
-
-    if( id == 5 ) onlineAnalyzer = new Cross(digi, nDigi);
-
-    if( id >=  0 ) onlineAnalyzer->show();
-
-    if( isACQStarted ) onlineAnalyzer->startTimer();
-
-  }else{
-
-    delete onlineAnalyzer;
-  
-    if( id == 0 ) onlineAnalyzer = new CoincidentAnalyzer(digi, nDigi, rawDataPath);
-    if( id == 1 ) onlineAnalyzer = new SplitPole(digi, nDigi);
-    if( id == 2 ) onlineAnalyzer = new Encore(digi, nDigi);
-    if( id == 3 ) onlineAnalyzer = new MUSIC(digi, nDigi);
-    if( id == 4 ) onlineAnalyzer = new NeutronGamma(digi, nDigi, rawDataPath);
-    
-    if( id == 5 ) onlineAnalyzer = new Cross(digi, nDigi);
-
-    if( id >= 0 ){
-      onlineAnalyzer->show();
-      onlineAnalyzer->activateWindow();
-      if( isACQStarted ) onlineAnalyzer->stopTimer();
-    }
-  }
-
-  cbAnalyzer->setCurrentIndex(0);
-
-}
 
 //***************************************************************
 //***************************************************************

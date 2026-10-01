@@ -86,8 +86,6 @@ private slots:
 
   void OpenDigiSettings();
 
-  void OpenAnalyzer();
-
   void OpenDashboard();         // button: start the dashboard (asks during a run) and open the browser
   bool StartDashboardProcess(); // start online/online_dashboard.py if it is not running; true if it runs
   void AskDashboardToOpenPage(); // HTTP GET /open on the running dashboard: it opens the browser from its own process
@@ -126,7 +124,6 @@ private:
   QPushButton * bnDigiSettings;
   //QPushButton * bnAnalyzer;
 
-  RComboBox * cbAnalyzer;
 
   QPushButton * bnOpenScaler;
   QPushButton * bnStartACQ;
