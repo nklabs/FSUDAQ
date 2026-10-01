@@ -1020,6 +1020,7 @@ void FSUDAQ::SetupScalar(){
 
   leTrigger = nullptr;
   leAccept = nullptr;
+  leDead = nullptr;
 
   lbLastUpdateTime = nullptr;
   lbScalarACQStatus = nullptr;
@@ -1043,7 +1044,9 @@ void FSUDAQ::SetupScalar(){
     if( digi[k]->GetNumInputCh() > maxNChannel ) maxNChannel = digi[k]->GetNumInputCh();
   }
 
-  scalar->setGeometry(0, 0, 50 + nDigi * 240, 190 + maxNChannel * 25);
+  scalar->setGeometry(0, 0, 50 + nDigi * 300, 200 + maxNChannel * 25);
+  const int nCols = 1 + 3 * nDigi;          // channel numbers, then three columns per board
+  const int half = nCols / 2;
 
   if( lbLastUpdateTime == nullptr ){
     lbLastUpdateTime = new QLabel("Last update : NA", scalar);
@@ -1058,19 +1061,19 @@ void FSUDAQ::SetupScalar(){
 
   lbRunTime->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
   scalarLayout->removeWidget(lbRunTime);
-  scalarLayout->addWidget(lbRunTime, 1, 0, 1, 1 + nDigi);
+  scalarLayout->addWidget(lbRunTime, 1, 0, 1, half);
   
   lbLastUpdateTime->setAlignment(Qt::AlignRight);
   scalarLayout->removeWidget(lbLastUpdateTime);
-  scalarLayout->addWidget(lbLastUpdateTime, 0, 0, 1, 1 + nDigi);
+  scalarLayout->addWidget(lbLastUpdateTime, 0, 0, 1, half);
 
   lbScalarACQStatus->setAlignment(Qt::AlignCenter);
   scalarLayout->removeWidget(lbScalarACQStatus);
-  scalarLayout->addWidget(lbScalarACQStatus, 0, 1 + nDigi);
+  scalarLayout->addWidget(lbScalarACQStatus, 0, half);
 
   lbTotalFileSize->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
   scalarLayout->removeWidget(lbTotalFileSize);
-  scalarLayout->addWidget(lbTotalFileSize, 1, 1 + nDigi, 1, nDigi);
+  scalarLayout->addWidget(lbTotalFileSize, 1, half, 1, nCols - half);
 
   ///==== create the header row
   int rowID = 5;
@@ -1088,20 +1091,24 @@ void FSUDAQ::SetupScalar(){
     scalarLayout->addWidget(lbCH, rowID, 0);
   }
 
-  ///===== create the trigger and accept
+  ///===== per board: name and run status, headline rates, diagnostics, then Counts/s, Input/s, Dead % per channel
   leTrigger = new QLineEdit**[nDigi];
   leAccept = new QLineEdit**[nDigi];
+  leDead = new QLineEdit**[nDigi];
+  deadWin.assign(nDigi, std::vector<DeadTimeWindow>());
+  QFont smallFont = scalar->font();
+  smallFont.setPointSizeF(smallFont.pointSizeF() * 0.85);
   for( unsigned int iDigi = 0; iDigi < nDigi; iDigi++){
     rowID = 2;
+    const int col = 3 * iDigi + 1;
     uint32_t chMask =  digi[iDigi]->GetRegChannelMask();
+    deadWin[iDigi].assign(digi[iDigi]->GetNumInputCh(), DeadTimeWindow());
 
     QWidget * hBox = new QWidget(scalar);
     QHBoxLayout * hBoxLayout = new QHBoxLayout(hBox);
-    scalarLayout->addWidget(hBox, rowID, 2*iDigi+1, 1, 2);
+    scalarLayout->addWidget(hBox, rowID, col, 1, 3);
 
     QLabel * lbDigi = new QLabel("Digi-" + QString::number(digi[iDigi]->GetSerialNumber()), scalar); 
-    // QLabel * lbDigi = new QLabel(QString::number(digi[iDigi]->GetSerialNumber()), scalar); 
-    // lbDigi->setAlignment(Qt::AlignRight | Qt::AlignCenter);
     lbDigi->setAlignment(Qt::AlignCenter);
     hBoxLayout->addWidget(lbDigi);
 
@@ -1112,69 +1119,68 @@ void FSUDAQ::SetupScalar(){
     runStatus[iDigi]->setToolTipDuration(-1);
     hBoxLayout->addWidget(runStatus[iDigi]);
 
-    rowID = 3; // the numbers that matter while running: events/s and MB/s of the board
-    lbRates[iDigi] = new QLabel("- evt/s | - MB/s", scalar);
+    rowID = 3; // the numbers that matter while running
+    lbRates[iDigi] = new QLabel("-", scalar);
     lbRates[iDigi]->setAlignment(Qt::AlignCenter);
-    lbRates[iDigi]->setToolTip("Events decoded per second (all channels) | bytes read from the board per second, which is the write rate when saving.");
-    scalarLayout->addWidget(lbRates[iDigi], rowID, 2*iDigi+1, 1, 2);
+    lbRates[iDigi]->setToolTip("Counts/s: events recorded per second (all channels, pile-up included).\n"
+                               "Input/s: triggers the channels saw, recorded or not (from the board's 1024-trigger flags).\n"
+                               "Dead: share of the input that was not recorded (trigger hold-off, full memory).\n"
+                               "MB/s: bytes read from the board, which is the write rate when saving.");
+    scalarLayout->addWidget(lbRates[iDigi], rowID, col, 1, 3);
 
-    rowID = 4; // link diagnostics and file size, smaller
+    rowID = 4; // readout diagnostics and file size: small and grey, red only for problems
     QWidget * hBox2 = new QWidget(scalar);
     QHBoxLayout * hBoxLayout2 = new QHBoxLayout(hBox2);
     hBoxLayout2->setContentsMargins(4, 0, 4, 0);
-    scalarLayout->addWidget(hBox2, rowID, 2*iDigi+1, 1, 2);
+    scalarLayout->addWidget(hBox2, rowID, col, 1, 3);
 
-    QFont smallFont = scalar->font();
-    smallFont.setPointSizeF(smallFont.pointSizeF() * 0.85);
-
-    lbAggCount[iDigi] = new QLabel("agg/read", scalar);
+    lbAggCount[iDigi] = new QLabel("", scalar);
     lbAggCount[iDigi]->setFont(smallFont);
+    lbAggCount[iDigi]->setStyleSheet("color: gray;");
     lbAggCount[iDigi]->setAlignment(Qt::AlignLeft | Qt::AlignCenter);
-    lbAggCount[iDigi]->setToolTip("aggregates decoded / read calls, in the last refresh interval");
+    lbAggCount[iDigi]->setToolTip("Board aggregates decoded and read calls in the last second; problems (cut reads, bad channels, NOT SAVED) appear here in red");
     hBoxLayout2->addWidget(lbAggCount[iDigi]);
-    
-    lbFileSize[iDigi] = new QLabel("File Size", scalar);
+
+    lbFileSize[iDigi] = new QLabel("", scalar);
     lbFileSize[iDigi]->setFont(smallFont);
+    lbFileSize[iDigi]->setStyleSheet("color: gray;");
     lbFileSize[iDigi]->setAlignment(Qt::AlignRight | Qt::AlignCenter);
     lbFileSize[iDigi]->setToolTip("data written for this run by this board");
     hBoxLayout2->addWidget(lbFileSize[iDigi]);
 
     rowID = 5;
-    QLabel * lbA = new QLabel("Trig. [Hz]", scalar);
-    lbA->setAlignment(Qt::AlignCenter);
-    scalarLayout->addWidget(lbA, rowID, 2*iDigi+1);
-    QLabel * lbB = new QLabel("Accp. [Hz]", scalar);
-    lbB->setAlignment(Qt::AlignCenter);
-    scalarLayout->addWidget(lbB, rowID, 2*iDigi+2);
+    const char * heads[3] = {"Counts/s", "Input/s", "Dead %"};
+    for( int k = 0; k < 3; k++ ){
+      QLabel * lb = new QLabel(heads[k], scalar);
+      lb->setAlignment(Qt::AlignCenter);
+      scalarLayout->addWidget(lb, rowID, col + k);
+    }
 
     leTrigger[iDigi] = new QLineEdit *[digi[iDigi]->GetNumInputCh()];
     leAccept[iDigi] = new QLineEdit *[digi[iDigi]->GetNumInputCh()];
+    leDead[iDigi] = new QLineEdit *[digi[iDigi]->GetNumInputCh()];
 
     for( int ch = 0; ch < digi[iDigi]->GetNumInputCh(); ch++){
-    
       rowID ++;
-      leTrigger[iDigi][ch] = new QLineEdit(scalar);
-      leTrigger[iDigi][ch]->setReadOnly(true);
-      leTrigger[iDigi][ch]->setFixedSize(120, 25);
-      leTrigger[iDigi][ch]->setAlignment(Qt::AlignRight);
-      scalarLayout->addWidget(leTrigger[iDigi][ch], rowID, 2*iDigi+1);
-
-      leAccept[iDigi][ch] = new QLineEdit(scalar);
-      leAccept[iDigi][ch]->setReadOnly(true);
-      leAccept[iDigi][ch]->setFixedSize(120, 25);
-      leAccept[iDigi][ch]->setAlignment(Qt::AlignRight);
-      leAccept[iDigi][ch]->setStyleSheet("background-color: #F0F0F0;");
-
-      if( digi[iDigi]->IsInputChEqRegCh() ){
-        leTrigger[iDigi][ch]->setEnabled( (chMask >> ch) & 0x1 );
-        leAccept[iDigi][ch]->setEnabled( (chMask >> ch) & 0x1 );
-      }else{
-        int grpID = ch/digi[iDigi]->GetNumRegChannels();
-        leTrigger[iDigi][ch]->setEnabled( (chMask >> grpID) & 0x1 );
-        leAccept[iDigi][ch]->setEnabled( (chMask >> grpID) & 0x1 );
+      QLineEdit ** cells[3] = { &leTrigger[iDigi][ch], &leAccept[iDigi][ch], &leDead[iDigi][ch] };
+      for( int k = 0; k < 3; k++ ){
+        QLineEdit * le = new QLineEdit(scalar);
+        le->setReadOnly(true);
+        le->setFixedSize(k == 2 ? 80 : 95, 25);
+        le->setAlignment(Qt::AlignRight);
+        if( k == 1 ) le->setStyleSheet("background-color: #F0F0F0;");
+        *cells[k] = le;
+        scalarLayout->addWidget(le, rowID, col + k);
       }
-      
-      scalarLayout->addWidget(leAccept[iDigi][ch], rowID, 2*iDigi+2);
+      bool on;
+      if( digi[iDigi]->IsInputChEqRegCh() ){
+        on = (chMask >> ch) & 0x1;
+      }else{
+        on = (chMask >> (ch/digi[iDigi]->GetNumRegChannels())) & 0x1;
+      }
+      leTrigger[iDigi][ch]->setEnabled(on);
+      leAccept[iDigi][ch]->setEnabled(on);
+      leDead[iDigi][ch]->setEnabled(on);
     }
   }
 
@@ -1220,52 +1226,89 @@ void FSUDAQ::UpdateScalar(){
 
     // digiMTX[iDigi].lock();
 
-    QString blockCountStr = "agg " + QString::number(digi[iDigi]->GetData()->AggCount);
-    blockCountStr += " / read " + QString::number(readDataThread[iDigi]->GetReadCount());
-    if( digi[iDigi]->GetData()->DecodeTruncated  > 0 ) blockCountStr += " | cut " + QString::number(digi[iDigi]->GetData()->DecodeTruncated);   // reads that ended inside an aggregate (online decode only; the file is complete)
-    if( digi[iDigi]->GetData()->DecodeBadChannel > 0 ) blockCountStr += " | bad-ch " + QString::number(digi[iDigi]->GetData()->DecodeBadChannel);
-    if( digi[iDigi]->GetData()->SaveFailed > 0 ) blockCountStr += " | <font color=red><b>NOT SAVED " + QString::number(digi[iDigi]->GetData()->SaveFailed) + "</b></font>";
-    readDataThread[iDigi]->SetReadCountZero();
-    lbAggCount[iDigi]->setText(blockCountStr);
-    lbFileSize[iDigi]->setText(QString::number(digi[iDigi]->GetData()->GetTotalFileSize()/1024./1024., 'f', 1) + " MB");
+    Data * data = digi[iDigi]->GetData();
 
-    if( dtMs > 0 ){
-      double eventRate = digi[iDigi]->GetData()->EventsSinceRate * 1000. / dtMs;
-      double bytesRate = digi[iDigi]->GetData()->ReadBytesSinceRate * 1000. / dtMs;
-      totalEventRate += eventRate;
-      totalBytesRate += bytesRate;
-      lbRates[iDigi]->setText("<b>" + RateText(eventRate) + "</b> evt/s | <b>" + QString::number(bytesRate / 1e6, 'f', 1) + "</b> MB/s");
-    }else{
-      lbRates[iDigi]->setText("- evt/s | - MB/s");
+    // readout diagnostics, grey; problems in red
+    QString diag = "aggregates " + QString::number(data->AggCount) + " · reads " + QString::number(readDataThread[iDigi]->GetReadCount());
+    if( data->DecodeTruncated  > 0 ) diag += " · <font color=red>cut " + QString::number(data->DecodeTruncated) + "</font>";   // reads that ended inside an aggregate (online decode only; the file is complete)
+    if( data->DecodeBadChannel > 0 ) diag += " · <font color=red>bad-ch " + QString::number(data->DecodeBadChannel) + "</font>";
+    if( data->SaveFailed > 0 ) diag += " · <font color=red><b>NOT SAVED " + QString::number(data->SaveFailed) + "</b></font>";
+    readDataThread[iDigi]->SetReadCountZero();
+    lbAggCount[iDigi]->setText(diag);
+    lbFileSize[iDigi]->setText("written " + QString::number(data->GetTotalFileSize()/1024./1024., 'f', 1) + " MB");
+
+    // per channel: this interval's counts, and the dead-time window
+    const int nCh = digi[iDigi]->GetNumInputCh();
+    const bool flagsOK = data->lossFlagsAvailable;
+    double boardCounts = 0, boardWinCounts = 0, boardWinInput = 0; bool boardLost = false, boardWinValid = false;
+    for( int i = 0; i < nCh; i++){
+      DeadTimeWindow & w = deadWin[iDigi][i];
+      const uint32_t cnt = data->CountsSinceRate[i];
+      if( dtMs <= 0 ){ w = DeadTimeWindow(); continue; }   // first refresh after a start: no interval yet
+      boardCounts += cnt;
+      w.counts += cnt; w.flags += data->Flag1024SinceRate[i]; w.lostFlags += data->LostFlagSinceRate[i]; w.ms += dtMs;
+      if( w.flags >= 50 || (w.ms >= 60000 && w.flags >= 10) ){   // enough flags for about ±2 % (at least ±30 % after a minute at a low rate)
+        w.inputRate = w.flags * 1024. * 1000. / w.ms;
+        w.dead = w.inputRate > 0 ? std::max(0.0, 1.0 - (w.counts * 1000. / w.ms) / w.inputRate) : -1;
+        w.lostSeen = w.lostFlags > 0;
+        w.valid = true;
+        w.counts = 0; w.flags = 0; w.lostFlags = 0; w.ms = 0;
+      }else if( w.ms >= 60000 ){   // under ~10 flags a minute (< ~170 triggers/s): too few to say, and dead time is negligible there
+        w.valid = false; w.counts = 0; w.flags = 0; w.lostFlags = 0; w.ms = 0;
+      }
+      if( w.valid && w.inputRate > 0 ){ boardWinInput += w.inputRate; boardWinCounts += w.inputRate * (1 - w.dead); boardWinValid = true; }
+      if( w.valid && w.lostSeen ) boardLost = true;
     }
 
-    digi[iDigi]->GetData()->CalTriggerRate(); //this will reset NumEventDecode, AggCount, EventsSinceRate, ReadBytesSinceRate
-    if( chkSaveData->isChecked() ) totalFileSize += digi[iDigi]->GetData()->GetTotalFileSize();
-    for( int i = 0; i < digi[iDigi]->GetNumInputCh(); i++){
-      QString a = "";
-      QString b = "";
-      
-      if( digi[iDigi]->GetInputChannelOnOff(i) == true ) {
-        // printf(" %3d %2d | %7.2f %7.2f \n", digi[iDigi]->GetSerialNumber(), i, digi[iDigi]->GetData()->TriggerRate[i], digi[iDigi]->GetData()->NonPileUpRate[i]);
-        QString a = QString::number(digi[iDigi]->GetData()->TriggerRate[i], 'f', 2);
-        QString b = QString::number(digi[iDigi]->GetData()->NonPileUpRate[i], 'f', 2);
-        leTrigger[iDigi][i]->setText(a);
-        leAccept[iDigi][i]->setText(b);
+    if( dtMs > 0 ){
+      double countsRate = boardCounts * 1000. / dtMs;
+      double bytesRate = data->ReadBytesSinceRate * 1000. / dtMs;
+      totalEventRate += countsRate;
+      totalBytesRate += bytesRate;
+      QString head = "<b>" + RateText(countsRate) + "</b> Counts/s";
+      if( flagsOK && boardWinValid ){
+        const double bd = boardWinInput > 0 ? std::max(0.0, 1.0 - boardWinCounts / boardWinInput) : 0;
+        const QString col = boardLost || bd > 0.20 ? "red" : (bd > 0.02 ? "#c77700" : "");
+        head += " · " + RateText(boardWinInput) + " Input/s · " + (col.isEmpty() ? "" : "<font color=" + col + "><b>") + DeadText(bd) + " dead" + (boardLost ? " LOST" : "") + (col.isEmpty() ? "" : "</b></font>");
+      }
+      head += " · <b>" + QString::number(bytesRate / 1e6, 'f', 1) + "</b> MB/s";
+      lbRates[iDigi]->setText(head);
+    }else{
+      lbRates[iDigi]->setText("-");
+    }
 
-        if( influx && chkInflux->isChecked() && a != "inf" ){
-          influx->AddDataPoint("TrigRate,Bd="+std::to_string(digi[iDigi]->GetSerialNumber()) + ",Ch=" + QString::number(i).rightJustified(2, '0').toStdString() + " value=" +  a.toStdString());
-        }
-
+    for( int i = 0; i < nCh; i++){
+      if( digi[iDigi]->GetInputChannelOnOff(i) == false ) continue;
+      const DeadTimeWindow & w = deadWin[iDigi][i];
+      const double countsRate = dtMs > 0 ? data->CountsSinceRate[i] * 1000. / dtMs : -1;
+      leTrigger[iDigi][i]->setText(countsRate >= 0 ? RateText(countsRate) : "");
+      if( !flagsOK ){
+        leAccept[iDigi][i]->setText("n/a");
+        leDead[iDigi][i]->setText("n/a");
+        leDead[iDigi][i]->setStyleSheet("");
+      }else if( !w.valid ){
+        leAccept[iDigi][i]->setText(dtMs > 0 ? "…" : "");
+        leDead[iDigi][i]->setText(dtMs > 0 ? "…" : "");
+        leDead[iDigi][i]->setStyleSheet("");
+      }else{
+        leAccept[iDigi][i]->setText(RateText(w.inputRate));
+        leDead[iDigi][i]->setText(DeadText(w.dead) + (w.lostSeen ? " LOST" : ""));
+        leDead[iDigi][i]->setStyleSheet(w.lostSeen || w.dead > 0.20 ? "background-color: #f4b4b4;" : (w.dead > 0.02 ? "background-color: #f8dc9c;" : ""));
+      }
+      if( influx && chkInflux->isChecked() && countsRate >= 0 ){
+        influx->AddDataPoint("TrigRate,Bd="+std::to_string(digi[iDigi]->GetSerialNumber()) + ",Ch=" + QString::number(i).rightJustified(2, '0').toStdString() + " value=" +  QString::number(countsRate, 'f', 2).toStdString());
       }
     }
 
+    digi[iDigi]->GetData()->CalTriggerRate(); //this resets NumEventDecode, AggCount, EventsSinceRate, ReadBytesSinceRate and the Counts/flag counters
+    if( chkSaveData->isChecked() ) totalFileSize += digi[iDigi]->GetData()->GetTotalFileSize();
     // digiMTX[iDigi].unlock();
     // printf("============= end of  FSUDAQ::%s\n", __func__);
 
   }
 
   QString totalStr = "Total : " + QString::number(totalFileSize/1024./1024., 'f', 1) + " MB";
-  if( dtMs > 0 ) totalStr += "   |   <b>" + RateText(totalEventRate) + "</b> evt/s   |   <b>" + QString::number(totalBytesRate / 1e6, 'f', 1) + "</b> MB/s";
+  if( dtMs > 0 ) totalStr += "   |   <b>" + RateText(totalEventRate) + "</b> Counts/s   |   <b>" + QString::number(totalBytesRate / 1e6, 'f', 1) + "</b> MB/s";
   lbTotalFileSize->setText(totalStr);
 
   // repaint();
@@ -1309,6 +1352,12 @@ void FSUDAQ::StopRunClock(){
   LogMsg("Acquisition time " + ElapsedText(ms) + " (h:mm:ss.ms)");
 }
 
+QString FSUDAQ::DeadText(double fraction){
+  if( fraction < 0 ) return "-";
+  if( fraction < 0.02 ) return "< 2 %";   // the 1024-trigger flags resolve about 2 % (one flag came every 1040 triggers in tests)
+  return QString::number(fraction * 100, 'f', 1) + " %";
+}
+
 QString FSUDAQ::RateText(double perSecond){
   if( perSecond >= 1e6 ) return QString::number(perSecond / 1e6, 'f', 2) + " M";
   if( perSecond >= 1e3 ) return QString::number(perSecond / 1e3, 'f', 1) + " k";
@@ -1327,14 +1376,20 @@ void FSUDAQ::CleanUpScalar(){
     for( int ch = 0; ch < digi[i]->GetNumInputCh(); ch ++){
       delete leTrigger[i][ch];
       delete leAccept[i][ch];
+      delete leDead[i][ch];
     }
     delete [] leTrigger[i];
     delete [] leAccept[i];
+    delete [] leDead[i];
 
   }
   delete [] leTrigger;
+  delete [] leAccept;
+  delete [] leDead;
   leTrigger = nullptr;
   leAccept = nullptr;
+  leDead = nullptr;
+  deadWin.clear();
 
   //Clean up QLabel
   QList<QLabel *> labelChildren = scalar->findChildren<QLabel *>();

@@ -208,7 +208,16 @@ private:
 
   // TimingThread * scalarThread;
   QLineEdit  *** leTrigger; // need to delete manually
-  QLineEdit  *** leAccept; // need to delete manually
+  QLineEdit  *** leAccept; // need to delete manually (now: Input/s)
+  QLineEdit  *** leDead;   // need to delete manually (Dead %)
+  // Input rate and dead time from the "1024 trigger counted" flag: accumulated over a window that
+  // grows until it holds enough flags (one flag per 1024 triggers, so per second is far too coarse
+  // at low rates); the last complete window is what is shown.
+  struct DeadTimeWindow {
+    uint64_t counts = 0, flags = 0, lostFlags = 0; double ms = 0;
+    double inputRate = -1, dead = -1; bool lostSeen = false; bool valid = false;
+  };
+  std::vector<std::vector<DeadTimeWindow>> deadWin;
   QPushButton * runStatus[MaxNDigitizer];
   QLabel * lbLastUpdateTime;
   QLabel * lbScalarACQStatus;
@@ -225,6 +234,7 @@ private:
   void StopRunClock();
   static QString ElapsedText(qint64 ms); // h:mm:ss.mmm
   static QString RateText(double perSecond); // 1234567 -> "1.23 M", 12345 -> "12.3 k"
+  static QString DeadText(double fraction);  // dead-time fraction; "< 2 %" below what the 1024-trigger flags resolve
 
   //@----- Run Record
   QMainWindow * runRecord;
