@@ -2,6 +2,7 @@
 
 #include <QWidget>
 #include <QVBoxLayout>
+#include <QHBoxLayout>
 #include <QGroupBox>
 #include <QDateTime>
 #include <QLabel>
@@ -68,55 +69,72 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     layoutMain->addWidget(box);
     QGridLayout * layout = new QGridLayout(box);
 
+    // where "w/ settings" reads the Digi-<serial>_<DPP>.bin files from (the data path is only for output)
+    {
+      QWidget * row = new QWidget(this);
+      QHBoxLayout * hl = new QHBoxLayout(row);
+      hl->setContentsMargins(0, 0, 0, 0);
+      QLabel * lbSettingsPath = new QLabel("Settings Path : ", this);
+      leSettingsPath = new QLineEdit(this);
+      leSettingsPath->setReadOnly(true);
+      leSettingsPath->setToolTip("Folder with the Digi-<serial>_<DPP>.bin settings files. \"w/ settings\" programs the boards from these files when the digitizers are opened.");
+      bnSetSettingsPath = new QPushButton("Set Path", this);
+      connect(bnSetSettingsPath, &QPushButton::clicked, this, &FSUDAQ::OpenSettingsPath);
+      hl->addWidget(lbSettingsPath);
+      hl->addWidget(leSettingsPath, 1);
+      hl->addWidget(bnSetSettingsPath);
+      layout->addWidget(row, 0, 0, 1, 4);
+    }
+
     // link type and settings handling are chosen first; the button does the opening
     cbOpenDigitizers = new RComboBox(this);
     cbOpenDigitizers->addItem("via Optical link / USB", 1);
     cbOpenDigitizers->addItem("via A4818(s) (a4818_list.txt)", 4);
     cbOpenDigitizers->setToolTip("How the boards are connected. A4818 needs the PIDs in a4818_list.txt next to the program.");
-    layout->addWidget(cbOpenDigitizers, 0, 0);
+    layout->addWidget(cbOpenDigitizers, 1, 0);
     
     cbOpenMethod = new RComboBox(this);
     cbOpenMethod->addItem("w/o settings", 0);
     cbOpenMethod->addItem("w/ settings", 1);
     cbOpenMethod->addItem("default Program", 2);
-    cbOpenMethod->setCurrentIndex(1); // open with the settings files of the data path by default
-    cbOpenMethod->setToolTip("w/ settings: load Digi-<serial>_<DPP>.bin from the data path and program the boards with it (default). w/o settings: open and read the boards as they are. default Program: write the built-in defaults.");
-    layout->addWidget(cbOpenMethod, 1, 0);
+    cbOpenMethod->setCurrentIndex(1); // open with the settings files of the settings path by default
+    cbOpenMethod->setToolTip("w/ settings: load Digi-<serial>_<DPP>.bin from the settings path and program the boards with it (default). w/o settings: open and read the boards as they are. default Program: write the built-in defaults.");
+    layout->addWidget(cbOpenMethod, 2, 0);
 
     bnOpenDigitizers = new QPushButton("Open Digitizers", this);
     bnOpenDigitizers->setStyleSheet("background-color: green;");
-    layout->addWidget(bnOpenDigitizers, 2, 0);
+    layout->addWidget(bnOpenDigitizers, 3, 0);
     connect(bnOpenDigitizers, &QPushButton::clicked, this, &FSUDAQ::OpenDigitizers);
 
     bnCloseDigitizers = new QPushButton("Close Digitizers", this);
-    layout->addWidget(bnCloseDigitizers, 2, 2);
+    layout->addWidget(bnCloseDigitizers, 3, 2);
     connect(bnCloseDigitizers, &QPushButton::clicked, this, &FSUDAQ::CloseDigitizers);
 
     bnDigiSettings = new QPushButton("Digitizers Settings", this);
-    layout->addWidget(bnDigiSettings, 0, 1);
+    layout->addWidget(bnDigiSettings, 1, 1);
     connect(bnDigiSettings, &QPushButton::clicked, this, &FSUDAQ::OpenDigiSettings);
 
     bnOpenScope = new QPushButton("Open Scope", this);
-    layout->addWidget(bnOpenScope, 1, 1);
+    layout->addWidget(bnOpenScope, 2, 1);
     connect(bnOpenScope, &QPushButton::clicked, this, &FSUDAQ::OpenScope);
 
     cbAnalyzer = new RComboBox(this);
-    layout->addWidget(cbAnalyzer, 0, 2);
+    layout->addWidget(cbAnalyzer, 1, 2);
     cbAnalyzer->addItem("Choose Online Analyzer", -1);
     for( int i = 0; i < (int) onlineAnalyzerList.size() ; i++) cbAnalyzer->addItem(onlineAnalyzerList[i].c_str(), i);
     connect(cbAnalyzer, &RComboBox::currentIndexChanged, this, &FSUDAQ::OpenAnalyzer);
 
     bnCanvas = new QPushButton("Online Histograms", this);
-    layout->addWidget(bnCanvas, 1, 2);
+    layout->addWidget(bnCanvas, 2, 2);
     connect(bnCanvas, &QPushButton::clicked, this, &FSUDAQ::OpenSingleHistograms);
 
     bnSync = new QPushButton("Sync Boards", this);
-    layout->addWidget(bnSync,  2, 1);
+    layout->addWidget(bnSync, 3, 1);
     connect(bnSync, &QPushButton::clicked, this, &FSUDAQ::SetSyncMode);
 
     bnDashboard = new QPushButton("Online Dashboard", this);
     bnDashboard->setToolTip("Start the Python online analysis on the data path (online/online_dashboard.py) and open it in the browser.");
-    layout->addWidget(bnDashboard, 0, 3);
+    layout->addWidget(bnDashboard, 1, 3);
     connect(bnDashboard, &QPushButton::clicked, this, &FSUDAQ::OpenDashboard);
     dashboardProc = nullptr;
     net = new QNetworkAccessManager(this);
@@ -125,7 +143,7 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     chkAutoDashboard->setChecked(true);
     chkAutoDashboard->setToolTip("Before a run starts, start the online dashboard if it is not running yet (a running one is left as it is). Off: runs start without it.");
     connect(chkAutoDashboard, &QCheckBox::toggled, this, &FSUDAQ::SaveProgramSettings);
-    layout->addWidget(chkAutoDashboard, 1, 3);
+    layout->addWidget(chkAutoDashboard, 2, 3);
 
   }
 
@@ -192,11 +210,12 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
 
     int rowID = 0;
     //------------------------------------------
-    QLabel * lbDataPath = new QLabel("Data Path : ", this);
+    lbDataPath = new QLabel("Data Path : ", this);
     lbDataPath->setAlignment(Qt::AlignRight | Qt::AlignCenter);
     leDataPath = new QLineEdit(this);
     leDataPath->setReadOnly(true);
-    QPushButton * bnSetDataPath = new QPushButton("Set Path", this);
+    leDataPath->setToolTip("Where saved runs go (run folders, RunTimeStamp, lastRun.sh), and where Open Record reads. Not used while Save Data is off.");
+    bnSetDataPath = new QPushButton("Set Path", this);
     connect(bnSetDataPath, &QPushButton::clicked, this, &FSUDAQ::OpenDataPath);
 
     QPushButton * bnOpenRecord = new QPushButton("Open Record", this);
@@ -227,6 +246,7 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     leRunID->setToolTip("Next run number. Editable when auto-increment is off.");
 
     chkSaveData = new QCheckBox("Save Data", this);
+    connect(chkSaveData, &QCheckBox::toggled, this, &FSUDAQ::UpdateDataPathEnabled);
 
     chkAutoIncrement = new QCheckBox("Auto-increment run no.", this);
     chkAutoIncrement->setChecked(true);
@@ -359,6 +379,7 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
   LogMsg("<font style=\"color: blue;\"><b>Welcome to FSU DAQ.</b></font>");
 
   rawDataPath = "";
+  settingsPath = "";
   prefix = "temp";
   runID = 0;
   elogID = 0;
@@ -370,6 +391,7 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
   influxToken = "";
   programSettingsFilePath = QDir::current().absolutePath() + "/programSettings.txt";
   LoadProgramSettings();
+  UpdateDataPathEnabled();
 
   //=========== disable widget
   WaitForDigitizersOpen(true);
@@ -423,6 +445,22 @@ FSUDAQ::~FSUDAQ(){
 
 //***************************************************************
 //***************************************************************
+void FSUDAQ::OpenSettingsPath(){
+  DebugPrint("%s", "FSUDAQ");
+  QString dir = QFileDialog::getExistingDirectory(this, "Folder with the digitizer settings files", settingsPath.isEmpty() ? rawDataPath : settingsPath);
+  if( dir.isEmpty() ) return;   // cancelled: keep the current path
+  settingsPath = dir;
+  leSettingsPath->setText(settingsPath);
+  LogMsg("Settings path : <b>" + settingsPath + "</b> (used the next time the digitizers are opened w/ settings)");
+  SaveProgramSettings();
+}
+
+void FSUDAQ::UpdateDataPathEnabled(){
+  const bool on = chkSaveData->isChecked();
+  lbDataPath->setEnabled(on);
+  leDataPath->setEnabled(on);   // the Set Path button stays usable: Save Data needs a path before it can be ticked
+}
+
 void FSUDAQ::OpenDataPath(){
   DebugPrint("%s", "FSUDAQ");
   QFileDialog fileDialog(this);
@@ -547,14 +585,17 @@ void FSUDAQ::LoadProgramSettings(){
         if( eq > 0 && key == "maxFileSizeMB" && value.toInt() > 0 ) sbFileSizeMB->setValue(value.toInt());
         if( eq > 0 && key == "repeatPauseSec" ) sbRepeatPauseSec->setValue(value.toInt());
         if( eq > 0 && key == "autoDashboard" ) { QSignalBlocker blocker(chkAutoDashboard); chkAutoDashboard->setChecked(value.toInt() != 0); }
+        if( eq > 0 && key == "settingsPath" ) settingsPath = value;
       }
 
       count ++;
       line = in.readLine();
     }
 
+    if( settingsPath.isEmpty() ) settingsPath = rawDataPath; // files written before the settings path existed
     //looking for the lastRun.sh for 
     leDataPath->setText(rawDataPath);
+    leSettingsPath->setText(settingsPath);
     leInfluxIP->setText(influxIP);
     leDatabaseName->setText(dataBaseName);
     leElogIP->setText(elogIP);
@@ -562,6 +603,7 @@ void FSUDAQ::LoadProgramSettings(){
 
     logMsgHTMLMode = false;
     LogMsg(" Raw Data Path : " + rawDataPath);
+    LogMsg(" Settings Path : " + settingsPath);
     LogMsg("     Influx IP : " + influxIP);
     LogMsg(" Database Name : " + dataBaseName);
     LogMsg("Database Token : " + maskText(influxToken));
@@ -608,6 +650,7 @@ void FSUDAQ::SaveProgramSettings(){
   file.write(("autoIncrementRunID=" + QString::number(chkAutoIncrement->isChecked() ? 1 : 0) + "\n").toStdString().c_str());
   file.write(("maxFileSizeMB=" + QString::number((int) sbFileSizeMB->value()) + "\n").toStdString().c_str());
   file.write(("repeatPauseSec=" + QString::number((int) sbRepeatPauseSec->value()) + "\n").toStdString().c_str());
+  file.write(("settingsPath=" + settingsPath + "\n").toStdString().c_str());
   file.write(("autoDashboard=" + QString::number(chkAutoDashboard->isChecked() ? 1 : 0) + "\n").toStdString().c_str());
   file.write("//------------end of file.\n");
   
@@ -789,7 +832,7 @@ void FSUDAQ::OpenDigitizers(){
 
     ///============== load settings 
     if( cbOpenMethod->currentData().toInt() <= 1 ){
-      QString fileName = rawDataPath + "/Digi-" + QString::number(digi[i]->GetSerialNumber()) + "_" + QString::fromStdString(digi[i]->GetData()->DPPTypeStr) + ".bin";
+      QString fileName = settingsPath + "/Digi-" + QString::number(digi[i]->GetSerialNumber()) + "_" + QString::fromStdString(digi[i]->GetData()->DPPTypeStr) + ".bin";
       QFile file(fileName);
       if( !file.open(QIODevice::Text | QIODevice::ReadOnly) ) {
 
@@ -936,6 +979,7 @@ void FSUDAQ::WaitForDigitizersOpen(bool onOff){
   bnOpenDigitizers->setEnabled(onOff);
   bnOpenDigitizers->setStyleSheet(onOff ? "background-color: green;" : "");
   cbOpenMethod->setEnabled(onOff);
+  bnSetSettingsPath->setEnabled(onOff);
 
   bnCloseDigitizers->setEnabled(!onOff);
   bnOpenScope->setEnabled(!onOff);
@@ -2155,7 +2199,7 @@ void FSUDAQ::OpenScope(){
 void FSUDAQ::OpenDigiSettings(){
   DebugPrint("%s", "FSUDAQ");
   if( digiSettings == nullptr ) {
-    digiSettings = new DigiSettingsPanel(digi, nDigi, rawDataPath);
+    digiSettings = new DigiSettingsPanel(digi, nDigi, settingsPath);   // its save/load dialogs start in the settings path
     //connect(scope, &Scope::SendLogMsg, this, &FSUDAQ::LogMsg);
     connect(digiSettings, &DigiSettingsPanel::UpdateOtherPanels, this, [=](){ UpdateAllPanels(2); });
     connect(digiSettings, &DigiSettingsPanel::SendLogMsg, this, &FSUDAQ::LogMsg);

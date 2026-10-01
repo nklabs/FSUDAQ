@@ -57,6 +57,8 @@ public slots:
 private slots:
 
   void OpenDataPath();
+  void OpenSettingsPath();     // folder with the Digi-<serial>_<DPP>.bin files read by "w/ settings"
+  void UpdateDataPathEnabled(); // the data path field is greyed while Save Data is off
   void OpenRecord();
   void UpdateRecord();
   void LoadProgramSettings();
@@ -112,6 +114,7 @@ private:
 
   QString programSettingsFilePath;
   QString rawDataPath;
+  QString settingsPath;         // digitizer settings files; empty in programSettings.txt = the data path
   QString prefix;
   unsigned int runID;
   int elogID;
@@ -173,6 +176,10 @@ private:
 
   //@-----
   QLineEdit * leDataPath;
+  QLabel * lbDataPath;
+  QPushButton * bnSetDataPath;
+  QLineEdit * leSettingsPath;
+  QPushButton * bnSetSettingsPath;
   QLineEdit * lePrefix;
   QLineEdit * leComment;
   QLineEdit * leRunID;
