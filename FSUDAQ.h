@@ -86,8 +86,6 @@ private slots:
 
   void OpenDigiSettings();
 
-  void OpenSingleHistograms();
-
   void OpenAnalyzer();
 
   void OpenDashboard();         // button: start the dashboard (asks during a run) and open the browser
@@ -135,7 +133,6 @@ private:
   QPushButton * bnStopACQ;
   QPushButton * bnSync;
 
-  QPushButton * bnCanvas;
   QPushButton * bnDashboard;
   QCheckBox * chkAutoDashboard; // start the dashboard before a run if it is not up yet
   QProcess * dashboardProc;

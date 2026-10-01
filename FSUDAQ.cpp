@@ -127,9 +127,9 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     for( int i = 0; i < (int) onlineAnalyzerList.size() ; i++) cbAnalyzer->addItem(onlineAnalyzerList[i].c_str(), i);
     connect(cbAnalyzer, &RComboBox::currentIndexChanged, this, &FSUDAQ::OpenAnalyzer);
 
-    bnCanvas = new QPushButton("Online Histograms", this);
-    layout->addWidget(bnCanvas, 2, 2);
-    connect(bnCanvas, &QPushButton::clicked, this, &FSUDAQ::OpenSingleHistograms);
+    // no "Online Histograms" window: it fills its plots from a worker thread while the GUI thread
+    // draws them, and that race corrupted the heap mid-run (abort in Histogram1D::Fill, 1 Oct 2026).
+    // Spectra belong in the online dashboard, which reads the files in its own process.
 
     bnSync = new QPushButton("Sync Boards", this);
     layout->addWidget(bnSync, 3, 1);
@@ -883,8 +883,6 @@ void FSUDAQ::OpenDigitizers(){
     QCoreApplication::processEvents(); //to prevent Qt said application not responding.
   }
 
-  singleHistograms = new SingleSpectra(digi, nDigi, rawDataPath);
-
   LogMsg("====== <font style=\"color: blue;\"><b>" + QString("Done. Opened %1 digitizer(s).").arg(nDigi) + "</b></font> =====");
 
   WaitForDigitizersOpen(false);
@@ -991,7 +989,6 @@ void FSUDAQ::WaitForDigitizersOpen(bool onOff){
   bnStopACQ->setEnabled(!onOff);
   bnStopACQ->setStyleSheet("");
   chkSaveData->setEnabled(!onOff);
-  bnCanvas->setEnabled(!onOff);
   cbAnalyzer->setEnabled(!onOff);
 
   EnableRunLengthControls(!onOff);
@@ -2341,18 +2338,6 @@ void FSUDAQ::OpenDigiSettings(){
 
 //***************************************************************
 //***************************************************************
-void FSUDAQ::OpenSingleHistograms(){
-  DebugPrint("%s", "FSUDAQ");
-  if( singleHistograms == nullptr ) {
-    singleHistograms = new SingleSpectra(digi, nDigi, rawDataPath);
-    singleHistograms->show();
-  }else{
-    singleHistograms->show();
-    singleHistograms->activateWindow();
-    singleHistograms->LoadSetting();
-  }
-
-}
 //***************************************************************
 //***************************************************************
 void FSUDAQ::OpenAnalyzer(){
