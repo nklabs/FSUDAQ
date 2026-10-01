@@ -6,7 +6,6 @@
 #include <QMutexLocker>
 #include <vector>
 #include <algorithm>
-#include <chrono>
 #include <signal.h>
 #include <pthread.h>
 #include <QWaitCondition>
@@ -63,10 +62,8 @@ public:
   struct ScopeTrace {
     unsigned long count = 0;   // traces decoded for this channel so far, 0 = none yet
     float trigRate = 0;
-    std::chrono::steady_clock::time_point when{};   // when the trace was copied out of Data
     std::vector<short> wf1, wf2;
     std::vector<bool>  dwf1, dwf2, dwf3, dwf4;
-    long long AgeMs() const { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - when).count(); }
   };
   bool GetScopeTrace(int ch, ScopeTrace & out){
     if( ch < 0 || ch >= MaxNChannels ) return false;
@@ -175,7 +172,6 @@ private:
       t.trigRate = data->TriggerRate[ch];
       if( t.count == data->ScopeTraceCount[ch] ) continue;   // no new trace for this channel
       t.count = data->ScopeTraceCount[ch];
-      t.when  = std::chrono::steady_clock::now();
       t.wf1  = data->ScopeWaveform1[ch];
       t.wf2  = data->ScopeWaveform2[ch];
       t.dwf1 = data->ScopeDigiWaveform1[ch];

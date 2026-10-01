@@ -44,7 +44,6 @@ public slots:
   void StartScope();
   void StopScope();
   void UpdateScope();
-  void ClearTraces();   // empty the plotted series (no data, channel or board switched)
   void ReadSettingsFromBoard();
   void UpdatePanelFromMomeory();
 

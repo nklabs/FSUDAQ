@@ -19,7 +19,6 @@
 
 #define MaxDisplayTraceTimeLength 20000 //ns
 #define ScopeUpdateMiliSec  200 // msec
-#define ScopeTraceStaleMiliSec 2000 // msec, the scope shows an empty plot when no trace was decoded for this long
 #define MaxNumberOfTrace  5   // in an event
 
 #define SETTINGSIZE 2048
