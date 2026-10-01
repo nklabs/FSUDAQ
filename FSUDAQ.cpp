@@ -2288,7 +2288,8 @@ bool FSUDAQ::StartDashboardProcess(){
     });
   }
   dashboardProc->setWorkingDirectory(dir);
-  QStringList args = QStringList() << script << "--data-path" << rawDataPath << "--port" << "8050" << "--open-browser";
+  // --exit-with-parent: if FSUDAQ dies, the dashboard leaves and frees the port for the next FSUDAQ's one
+  QStringList args = QStringList() << script << "--data-path" << rawDataPath << "--port" << "8050" << "--open-browser" << "--exit-with-parent";
   if( chkSaveData->isChecked() && QDir(RunFolder()).exists() ) args << "--follow" << RunFolder(); // the current or last run; each new run is sent with GET /run
   dashboardProc->start(python, args);
   if( !dashboardProc->waitForStarted(3000) ){

@@ -44,6 +44,16 @@ import fsu                                   # noqa: E402
 import pipeline as pl                        # noqa: E402
 import online_classify as oc                 # noqa: E402
 from detector import AUX_COUNTERS, ChannelMap, parse_planes   # noqa: E402
+
+
+def say(msg):
+    """Print a status line. Started by FSUDAQ, stdout is a pipe to it; once FSUDAQ is gone a print
+    raises, and that must neither stop the analysis nor skip the clean exit (1 Oct 2026: an orphan
+    stuck in Python's exit handlers kept port 8050, so the next FSUDAQ had no dashboard)."""
+    try:
+        print(msg, flush=True)
+    except (OSError, ValueError):
+        pass
 try:
     import fsu_fast
     FAST = fsu_fast.HAVE_NUMBA
@@ -289,7 +299,7 @@ class Online:
                     self.closed.add(os.path.join(path, name))
                 self.wake.set()
         except Exception as ex:
-            print(f"inotify watcher stopped: {ex!r}", flush=True)
+            say(f"inotify watcher stopped: {ex!r}")
 
     def step(self):
         a = self.a
@@ -372,7 +382,7 @@ class Online:
             try:
                 self._fold(ar.get(), now, bytes_by_board)
             except Exception as ex:
-                print(f"slice failed: {ex!r}", flush=True)
+                say(f"slice failed: {ex!r}")
 
     def _fold(self, r: dict, now, bytes_by_board):
         with self.lock:
@@ -446,7 +456,7 @@ class Handler(BaseHTTPRequestHandler):
             self.online.follow = folder
             self.online.restart = True
             self.online.wake.set()
-            print(f"{time.strftime('%H:%M:%S')} following run folder {folder}", flush=True)
+            say(f"{time.strftime('%H:%M:%S')} following run folder {folder}")
             self.send_response(204); self.end_headers(); return
         if self.path.startswith("/state"):
             body = json.dumps(self.online.state()).encode()
@@ -488,6 +498,7 @@ def main(argv=None):
     p.add_argument("--port", type=int, default=8050)
     p.add_argument("--workers", type=int, default=4, help="processes for sort/build/classify (0 = in the main loop)")
     p.add_argument("--open-browser", action="store_true", help="open the page in the default browser once the server is up")
+    p.add_argument("--exit-with-parent", action="store_true", help="stop when the process that started us (FSUDAQ) is gone")
     a = p.parse_args(argv)
     if not a.run and not a.data_path:
         sys.exit("give --data-path or --run")
@@ -501,30 +512,34 @@ def main(argv=None):
     if a.open_browser:
         import webbrowser
         threading.Thread(target=lambda: webbrowser.open(f"http://localhost:{a.port}/"), daemon=True).start()
-    print(f"online dashboard: http://localhost:{a.port}/   kernels={'numba' if FAST else 'numpy'}  "
+    say(f"online dashboard: http://localhost:{a.port}/   kernels={'numba' if FAST else 'numpy'}  "
           f"files={'inotify' if HAVE_INOTIFY and not a.replay else 'polling'}  "
-          f"{'replay of ' + a.run if a.replay else ('run ' + a.run if a.run else 'following ' + (a.follow or a.data_path))}", flush=True)
+          f"{'replay of ' + a.run if a.replay else ('run ' + a.run if a.run else 'following ' + (a.follow or a.data_path))}")
     last_report = 0.0
     last_seen = None                     # (status, processed_s, hits): report only when this changes
 
     def _term(signum, frame):            # SIGTERM from FSUDAQ (or kill): leave like Ctrl-C
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, _term)
+    parent = os.getppid()
     try:
         while True:
             t0 = time.time()
+            if a.exit_with_parent and os.getppid() != parent:   # FSUDAQ died: free the port for the next one
+                say("FSUDAQ is gone; stopping")
+                break
             try:
                 online.step()
             except Exception as ex:          # keep serving; report the problem
                 online.status = f"error: {ex!r}"
-                print(f"step failed: {ex!r}", flush=True)
+                say(f"step failed: {ex!r}")
             if t0 - last_report > 10:
                 s = online.state()
                 seen = (s['status'], round(s['processed_s'] or 0, 1), s['hits'])
                 if seen != last_seen:    # quiet while nothing happens (between runs, page closed)
-                    print(f"{time.strftime('%H:%M:%S')} {s['status']}: processed {s['processed_s'] or 0:.1f} s of beam, "
+                    say(f"{time.strftime('%H:%M:%S')} {s['status']}: processed {s['processed_s'] or 0:.1f} s of beam, "
                           f"{s['hits']:,} hits, {s['events']:,} events, {s['proc_s']:.1f} s worker CPU, "
-                          f"{s['in_flight']} steps in flight", flush=True)
+                          f"{s['in_flight']} steps in flight")
                     last_seen = seen
                 last_report = t0
             online.wake.wait(max(0.0, a.interval - (time.time() - t0)))
@@ -532,13 +547,16 @@ def main(argv=None):
     except KeyboardInterrupt:
         pass
     finally:
-        srv.shutdown()
+        try:
+            srv.shutdown()
+        except Exception:
+            pass
         # Pool.terminate() waits on the task queue's lock; a worker killed while holding it (a signal
         # to the whole process group: Ctrl-C, timeout, systemd) makes that wait forever and the port
         # stays taken. Kill the workers directly and leave without the pool's exit handlers.
         for child in mp.active_children():
             child.kill()
-        print("online dashboard stopped", flush=True)
+        say("online dashboard stopped")
         os._exit(0)
 
 
