@@ -1509,6 +1509,7 @@ void FSUDAQ::StartACQ(){
     }
     LogMsg("<font style=\"color: orange;\">===================== <b>Start a new Run-" + QString::number(runID) + "</b></font>");
     LogMsg("Run folder : <b>" + runDir + "</b>");
+    TellDashboardRunFolder(runDir);
     WriteRunTimestamp(true, QDateTime::currentDateTime().toString("yyyy.MM.dd hh:mm:ss"));
   }else{
     LogMsg("<font style=\"color: orange;\">===================== <b>Start a non-save Run</b></font>");
@@ -2189,6 +2190,19 @@ void FSUDAQ::AskDashboardToOpenPage(){
   connect(r, &QNetworkReply::finished, r, &QNetworkReply::deleteLater);
 }
 
+void FSUDAQ::TellDashboardRunFolder(const QString & folder, int attempt){
+  // The dashboard follows the run being recorded (data path + prefix + run number), also when a
+  // run number is recorded again in the same folder. HTTP only: nothing is spawned during a run.
+  QNetworkReply * r = net->get(QNetworkRequest(QUrl("http://localhost:8050/run?folder=" + QString::fromLatin1(QUrl::toPercentEncoding(folder)))));
+  connect(r, &QNetworkReply::finished, this, [=](){
+    // a dashboard started just before this run may not be listening yet: retry for a few seconds
+    if( r->error() == QNetworkReply::ConnectionRefusedError && attempt < 10 && dashboardProc && dashboardProc->state() != QProcess::NotRunning ){
+      QTimer::singleShot(1000, this, [=](){ TellDashboardRunFolder(folder, attempt + 1); });
+    }
+    r->deleteLater();
+  });
+}
+
 bool FSUDAQ::StartDashboardProcess(){
   if( dashboardProc && dashboardProc->state() != QProcess::NotRunning ) return true;
   if( rawDataPath.isEmpty() ){
@@ -2222,7 +2236,9 @@ bool FSUDAQ::StartDashboardProcess(){
     });
   }
   dashboardProc->setWorkingDirectory(dir);
-  dashboardProc->start(python, QStringList() << script << "--data-path" << rawDataPath << "--port" << "8050" << "--open-browser");
+  QStringList args = QStringList() << script << "--data-path" << rawDataPath << "--port" << "8050" << "--open-browser";
+  if( chkSaveData->isChecked() && QDir(RunFolder()).exists() ) args << "--follow" << RunFolder(); // the current or last run; each new run is sent with GET /run
+  dashboardProc->start(python, args);
   if( !dashboardProc->waitForStarted(3000) ){
     LogMsg("<font style=\"color: red;\">Cannot start " + python + " " + script + ".</font>");
     return false;

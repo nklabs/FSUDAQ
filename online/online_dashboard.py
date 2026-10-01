@@ -5,7 +5,9 @@
     online_dashboard.py --run /path/to/prefix_012                  (one run folder)
     online_dashboard.py --run /path/to/finished_run --replay        (play a finished run at real-time pace)
 
-Follows the newest run folder in the data path, tails every board's growing .fsu file
+Follows the run folder FSUDAQ names when a saving run starts (GET /run?folder=..., or
+--follow at start-up), else the newest run folder in the data path; a run recorded again
+under the same number (old files replaced) starts over. Tails every board's growing .fsu file
 (the indexer stops at a partial aggregate, so a file being written is safe to read),
 merges the boards with a watermark (everything older than min(newest per board) - lag),
 builds events and classifies them with the same code as the offline pipeline, and
@@ -31,6 +33,7 @@ import signal
 import sys
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
@@ -246,6 +249,8 @@ class Online:
         else:
             _init_worker(self.cmap, self.lut, self.dense, self.window_units, self.to_ns)
         self.pending: list = []
+        self.follow = a.follow                  # run folder FSUDAQ named (--follow or GET /run); None = newest in the data path
+        self.restart = False                    # set by GET /run: a new run starts, even in the same folder
         self.reset(None)
 
     def reset(self, folder):
@@ -266,6 +271,8 @@ class Online:
         self.flushed = False
         self.status = "waiting for data"
         self.closed: set[str] = set()
+        self.pending = []                       # slices of the previous run still in the workers: their results are dropped
+        self.first_files = {}                   # first file of each board -> inode: a re-recorded run replaces them
         self.wake = threading.Event()
         if folder and HAVE_INOTIFY and not self.a.replay:
             threading.Thread(target=self._watch, args=(folder,), daemon=True).start()
@@ -286,8 +293,9 @@ class Online:
 
     def step(self):
         a = self.a
-        folder = a.run if a.run else newest_run_folder(a.data_path)
-        if folder != self.folder:
+        folder = a.run or self.follow or newest_run_folder(a.data_path)
+        if folder != self.folder or self.restart or (folder and self._run_replaced(folder)):
+            self.restart = False
             with self.lock:
                 self.reset(folder)
         if folder is None:
@@ -325,6 +333,20 @@ class Online:
         t_lo = self.W if self.W is not None else self.t_first
         self._submit(t_lo, W, now)
         self.W = W
+
+    def _run_replaced(self, folder):
+        """True when a first file seen earlier is gone or is a new file: the run number was recorded
+        again in the same folder (FSUDAQ deletes the old files on "Overwrite"). New boards' files are fine."""
+        now = {}
+        for f in glob.glob(os.path.join(folder, "*_000.fsu")):
+            try:
+                now[f] = os.stat(f).st_ino
+            except OSError:
+                pass
+        replaced = any(now.get(f) != ino for f, ino in self.first_files.items())
+        if not replaced:
+            self.first_files.update(now)
+        return replaced
 
     def _submit(self, t0, t1, now):
         files = {}
@@ -416,6 +438,16 @@ class Handler(BaseHTTPRequestHandler):
             import webbrowser
             threading.Thread(target=lambda: webbrowser.open(f"http://localhost:{self.server.server_address[1]}/"), daemon=True).start()
             self.send_response(204); self.end_headers(); return
+        if self.path.startswith("/run"):         # FSUDAQ starts a saving run: follow its folder from now on
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            folder = q.get("folder", [""])[0]
+            if not folder:
+                self.send_response(400); self.end_headers(); return
+            self.online.follow = folder
+            self.online.restart = True
+            self.online.wake.set()
+            print(f"{time.strftime('%H:%M:%S')} following run folder {folder}", flush=True)
+            self.send_response(204); self.end_headers(); return
         if self.path.startswith("/state"):
             body = json.dumps(self.online.state()).encode()
             ctype = "application/json"
@@ -438,6 +470,7 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--data-path", help="FSUDAQ data path; the newest run folder in it is followed")
     p.add_argument("--run", help="one run folder instead of following the data path")
+    p.add_argument("--follow", help="run folder to follow until FSUDAQ names the next one (GET /run?folder=...)")
     p.add_argument("--replay", action="store_true", help="play a finished run at real-time pace")
     p.add_argument("--replay-speed", type=float, default=1.0)
     p.add_argument("--boards", default=DEFAULT_BOARDS, help="serials in detector-map board order")
@@ -470,7 +503,7 @@ def main(argv=None):
         threading.Thread(target=lambda: webbrowser.open(f"http://localhost:{a.port}/"), daemon=True).start()
     print(f"online dashboard: http://localhost:{a.port}/   kernels={'numba' if FAST else 'numpy'}  "
           f"files={'inotify' if HAVE_INOTIFY and not a.replay else 'polling'}  "
-          f"{'replay of ' + a.run if a.replay else ('run ' + a.run if a.run else 'following ' + a.data_path)}", flush=True)
+          f"{'replay of ' + a.run if a.replay else ('run ' + a.run if a.run else 'following ' + (a.follow or a.data_path))}", flush=True)
     last_report = 0.0
     last_seen = None                     # (status, processed_s, hits): report only when this changes
 
