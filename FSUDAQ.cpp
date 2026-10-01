@@ -1556,6 +1556,7 @@ void FSUDAQ::StartACQ(){
   if( onlineAnalyzer ) onlineAnalyzer->startTimer();
 
   bnStartACQ->setEnabled(false);
+  bnOpenDigitizers->setEnabled(false); // "Close Digitizers" only while no run is going
   bnStartACQ->setStyleSheet("");
   bnStopACQ->setEnabled(true);
   bnStopACQ->setStyleSheet("background-color: red;");
@@ -1634,6 +1635,7 @@ void FSUDAQ::StopACQ(){
   lbScalarACQStatus->setText("<font style=\"color: red;\"><b>ACQ Off</b></font>");
 
   bnStartACQ->setEnabled(true);
+  bnOpenDigitizers->setEnabled(true); // "Close Digitizers" only while no run is going
   bnStartACQ->setStyleSheet("background-color: green;");
   bnStopACQ->setEnabled(false);
   bnStopACQ->setStyleSheet("");
@@ -1742,6 +1744,7 @@ void FSUDAQ::AutoRun(){
     if( repeat ){
 
       bnStartACQ->setEnabled(false);
+      bnOpenDigitizers->setEnabled(false); // "Close Digitizers" only while no run is going
       bnStartACQ->setStyleSheet("");
       bnStopACQ->setEnabled(true);
       bnStopACQ->setStyleSheet("background-color : red;");
@@ -1755,6 +1758,7 @@ void FSUDAQ::AutoRun(){
         if( breakAutoRepeat ) {
           LogMsg("Break Auto repeat.");
           bnStartACQ->setEnabled(true);
+          bnOpenDigitizers->setEnabled(true); // "Close Digitizers" only while no run is going
           bnStartACQ->setStyleSheet("background-color : green");
           bnStopACQ->setEnabled(false);
           bnStopACQ->setStyleSheet("");
@@ -1768,6 +1772,7 @@ void FSUDAQ::AutoRun(){
       if( !isACQStarted ) { // e.g. files for the next run number already exist
         LogMsg("Auto repeat stopped: the next run could not be started.");
         bnStartACQ->setEnabled(true);
+        bnOpenDigitizers->setEnabled(true); // "Close Digitizers" only while no run is going
         bnStartACQ->setStyleSheet("background-color : green");
         bnStopACQ->setEnabled(false);
         bnStopACQ->setStyleSheet("");
@@ -2235,6 +2240,7 @@ void FSUDAQ::OpenScope(){
     
     connect(scope, &Scope::CloseWindow, this, [=](){
       bnStartACQ->setEnabled(true);
+      bnOpenDigitizers->setEnabled(true); // "Close Digitizers" only while no run is going
       bnStartACQ->setStyleSheet("background-color: green;");
       bnStopACQ->setEnabled(false);  
       bnStopACQ->setStyleSheet("");
@@ -2288,6 +2294,7 @@ void FSUDAQ::OpenScope(){
   }
 
   bnStartACQ->setEnabled(false);
+  bnOpenDigitizers->setEnabled(false); // "Close Digitizers" only while no run is going
   bnStartACQ->setStyleSheet("");
   bnStopACQ->setEnabled(false);  
   bnStopACQ->setStyleSheet("");
