@@ -221,7 +221,8 @@ private:
   QPushButton * runStatus[MaxNDigitizer];
   QLabel * lbLastUpdateTime;
   QLabel * lbScalarACQStatus;
-  QLabel * lbRates[MaxNDigitizer];    // events/s and MB/s of the board
+  QLabel * lbBoardValue[MaxNDigitizer][4]; // board summary: Counts/s, Input/s, Dead, read MB/s
+  QLabel * lbProblems[MaxNDigitizer];      // cut reads, bad channels, NOT SAVED; empty when fine
   QLabel * lbAggCount[MaxNDigitizer]; // aggregates decoded / read calls, per refresh
   QLabel * lbFileSize[MaxNDigitizer];
   QLabel * lbTotalFileSize;           // totals over the boards: size, events/s, MB/s
