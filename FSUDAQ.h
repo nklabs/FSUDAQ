@@ -203,19 +203,24 @@ private:
   // TimingThread * scalarThread;
   QLineEdit  *** leTrigger; // need to delete manually
   QLineEdit  *** leAccept; // need to delete manually (now: Input/s)
-  QLineEdit  *** leDead;   // need to delete manually (Dead %)
-  // Input rate and dead time from the "1024 trigger counted" flag: accumulated over a window that
-  // grows until it holds enough flags (one flag per 1024 triggers, so per second is far too coarse
-  // at low rates); the last complete window is what is shown.
+  QLineEdit  *** leDead;   // need to delete manually (Missed %)
+  QLineEdit  *** leLost;   // need to delete manually (Lost %)
+  // Input, missed and lost from the board's flags (bit 13 every 1024 triggers, bit 12 every 1024 lost
+  // triggers, bit 15 on the first event after a loss): accumulated over a window that grows until it
+  // holds enough flags (per second is far too coarse at low rates); the last complete window is shown.
   struct DeadTimeWindow {
-    uint64_t counts = 0, flags = 0, lostFlags = 0; double ms = 0;
-    double inputRate = -1, dead = -1; bool lostSeen = false; bool valid = false;
+    enum State { Wait, Valid, Low, BadFlags };
+    uint64_t counts = 0, flags = 0, lostFlags = 0, lostNFlags = 0; double ms = 0;   // sums of the open window
+    double inputRate = -1, recRate = -1, lostRate = -1, missed = -1, lost = -1;     // last complete window
+    bool lostSeen = false;
+    State state = Wait;
+    void ResetSums(){ counts = 0; flags = 0; lostFlags = 0; lostNFlags = 0; ms = 0; }
   };
   std::vector<std::vector<DeadTimeWindow>> deadWin;
   QPushButton * runStatus[MaxNDigitizer];
   QLabel * lbLastUpdateTime;
   QLabel * lbScalarACQStatus;
-  QLabel * lbBoardValue[MaxNDigitizer][4]; // board summary: Counts/s, Input/s, Dead, read MB/s
+  QLabel * lbBoardValue[MaxNDigitizer][5]; // board summary: Counts/s, Input/s, Missed, Lost, read MB/s
   QLabel * lbProblems[MaxNDigitizer];      // cut reads, bad channels, NOT SAVED; empty when fine
   QLabel * lbAggCount[MaxNDigitizer]; // aggregates decoded / read calls, per refresh
   QLabel * lbFileSize[MaxNDigitizer];
@@ -229,7 +234,8 @@ private:
   void StopRunClock();
   static QString ElapsedText(qint64 ms); // h:mm:ss.mmm
   static QString RateText(double perSecond); // 1234567 -> "1.23 M", 12345 -> "12.3 k"
-  static QString DeadText(double fraction);  // dead-time fraction; "< 2 %" below what the 1024-trigger flags resolve
+  static QString DeadText(double fraction);  // missed fraction; "< 2 %" below what the 1024-trigger flags resolve
+  static QString LostText(double fraction, bool seen); // lost fraction; "> 0" when only the bit-15 flag says so
 
   //@----- Run Record
   QMainWindow * runRecord;
