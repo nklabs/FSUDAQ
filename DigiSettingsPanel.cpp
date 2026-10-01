@@ -51,6 +51,10 @@ DigiSettingsPanel::DigiSettingsPanel(Digitizer ** digi, unsigned int nDigi, QStr
   }
   // setGeometry(0, 0, 1700, 850);  
 
+  // Created only for some board models (not for DT5730/DT5725); the null checks in
+  // UpdateComboBoxBit and SyncComboBox rely on the unused entries being null.
+  for( int i = 0; i < MaxNDigitizer; i++ ) for( int j = 0; j < MaxRegChannel + 1; j++ ) cbTestPulseRate[i][j] = nullptr;
+
   tabWidget = new QTabWidget(this);
   setCentralWidget(tabWidget);
 
@@ -2162,10 +2166,10 @@ void DigiSettingsPanel::SetUpChannel_PSD(){
     SetUpCheckBox(chkResetTimestampByTRGIN[ID][numChannel],  "TRI-IN Reset Timestamp [G]", otherLayout,  0, 2, DPP::PSD::DPPAlgorithmControl2_G, DPP::PSD::Bit_DPPAlgorithmControl2::ResetTimestampByTRGIN, -1, 2);
     
     SetUpCheckBox(chkTestPule[ID][numChannel],                       "Int. Test Pulse", otherLayout, 1, 0, DPP::DPPAlgorithmControl, DPP::Bit_DPPAlgorithmControl_PSD::InternalTestPulse);
-    if( digi[ID]->GetBoardInfo().Model == CAEN_DGTZ_V1730 || digi[ID]->GetBoardInfo().Model == CAEN_DGTZ_DT5730 ){
+    if( digi[ID]->GetBoardInfo().Model == CAEN_DGTZ_V1730 ){
       SetUpComboBoxBit(cbTestPulseRate[ID][numChannel],  "Test Pulse Rate : ", otherLayout, 1, 2, DPP::Bit_DPPAlgorithmControl_PSD::ListTestPulseRate_730, DPP::DPPAlgorithmControl, DPP::Bit_DPPAlgorithmControl_PSD::TestPulseRate);
     }
-    if( digi[ID]->GetBoardInfo().Model == CAEN_DGTZ_V1725 || digi[ID]->GetBoardInfo().Model == CAEN_DGTZ_DT5725 ){
+    if( digi[ID]->GetBoardInfo().Model == CAEN_DGTZ_V1725 ){
       SetUpComboBoxBit(cbTestPulseRate[ID][numChannel],  "Test Pulse Rate : ", otherLayout, 1, 2, DPP::Bit_DPPAlgorithmControl_PSD::ListTestPulseRate_725, DPP::DPPAlgorithmControl, DPP::Bit_DPPAlgorithmControl_PSD::TestPulseRate);
     }
 
@@ -2530,10 +2534,10 @@ void DigiSettingsPanel::SetUpChannel_PSD(){
             QLabel * lb3 = new QLabel("Test Pulse Rate", this); lb3->setAlignment(Qt::AlignHCenter); tabLayout->addWidget(lb3, 0, 3);
           }
           SetUpCheckBox(chkTestPule[ID][ch],   "Int. Test Pulse", tabLayout, ch + 1, 1, DPP::DPPAlgorithmControl, DPP::Bit_DPPAlgorithmControl_PSD::InternalTestPulse, ch);
-          if( digi[ID]->GetBoardInfo().Model == CAEN_DGTZ_V1730 || digi[ID]->GetBoardInfo().Model == CAEN_DGTZ_DT5730 ){
+          if( digi[ID]->GetBoardInfo().Model == CAEN_DGTZ_V1730 ){
             SetUpComboBoxBit(cbTestPulseRate[ID][ch],  "", tabLayout, ch + 1, 2, DPP::Bit_DPPAlgorithmControl_PSD::ListTestPulseRate_730, DPP::DPPAlgorithmControl, DPP::Bit_DPPAlgorithmControl_PSD::TestPulseRate, 1, ch);
           }
-          if( digi[ID]->GetBoardInfo().Model == CAEN_DGTZ_V1725 || digi[ID]->GetBoardInfo().Model == CAEN_DGTZ_DT5725 ){
+          if( digi[ID]->GetBoardInfo().Model == CAEN_DGTZ_V1725 ){
             SetUpComboBoxBit(cbTestPulseRate[ID][ch],  "", tabLayout, ch + 1, 2, DPP::Bit_DPPAlgorithmControl_PSD::ListTestPulseRate_725, DPP::DPPAlgorithmControl, DPP::Bit_DPPAlgorithmControl_PSD::TestPulseRate, 1, ch);
           }
         }
@@ -3666,6 +3670,7 @@ void DigiSettingsPanel::SyncComboBox(RComboBox *(&cb)[][MaxRegChannel+1]){
   if( !enableSignalSlot ) return;
 
   const int nCh = digi[ID]->GetNumRegChannels();
+  if( cb[ID][nCh] == nullptr ) return; // not created for this board model (e.g. Test Pulse Rate on a DT5730)
 
   int ch = chSelection[ID]->currentData().toInt();
 
