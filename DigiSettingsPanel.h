@@ -22,11 +22,6 @@ public:
   ~DigiSettingsPanel();
 
   unsigned short GetTabID() const {return ID;}
-
-  // boards a write from the current tab goes to: the current board, plus every other
-  // enabled board of the same DPP firmware and sampling rate when "Apply to all boards"
-  // is checked on the all-channels tab (ch == -1); boards without the channel are skipped
-  std::vector<unsigned int> TargetBoards(int ch, int chID) const;
   
 public slots:
   void UpdatePanelFromMemory();
@@ -203,7 +198,6 @@ private:
   QTabWidget * chTab;
 
   RComboBox * chSelection[MaxNDigitizer];
-  QCheckBox * chkApplyAllBoards[MaxNDigitizer]; // on the all-channels tab of each board
   QPushButton * bnProgramChannel[MaxNDigitizer];
 
   //----------- common for PHA and PSD
