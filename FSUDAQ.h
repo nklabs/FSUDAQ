@@ -123,7 +123,6 @@ private:
   RComboBox * cbOpenMethod;
 
   QPushButton * bnOpenDigitizers;
-  QPushButton * bnCloseDigitizers;
   QPushButton * bnOpenScope;
   QPushButton * bnDigiSettings;
   //QPushButton * bnAnalyzer;

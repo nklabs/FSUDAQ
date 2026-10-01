@@ -101,14 +101,17 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     cbOpenMethod->setToolTip("w/ settings: load Digi-<serial>_<DPP>.bin from the settings path and program the boards with it (default). w/o settings: open and read the boards as they are. default Program: write the built-in defaults.");
     layout->addWidget(cbOpenMethod, 2, 0);
 
+    // one button: green "Open Digitizers" while closed, red "Close Digitizers" while open
+    // (WaitForDigitizersOpen sets the look); disabled while it works, so a second click
+    // during the search cannot close half-opened boards
     bnOpenDigitizers = new QPushButton("Open Digitizers", this);
     bnOpenDigitizers->setStyleSheet("background-color: green;");
     layout->addWidget(bnOpenDigitizers, 3, 0);
-    connect(bnOpenDigitizers, &QPushButton::clicked, this, &FSUDAQ::OpenDigitizers);
-
-    bnCloseDigitizers = new QPushButton("Close Digitizers", this);
-    layout->addWidget(bnCloseDigitizers, 3, 2);
-    connect(bnCloseDigitizers, &QPushButton::clicked, this, &FSUDAQ::CloseDigitizers);
+    connect(bnOpenDigitizers, &QPushButton::clicked, this, [this](){
+      bnOpenDigitizers->setEnabled(false);
+      if( digi == nullptr ) OpenDigitizers(); else CloseDigitizers();
+      bnOpenDigitizers->setEnabled(true);
+    });
 
     bnDigiSettings = new QPushButton("Digitizers Settings", this);
     layout->addWidget(bnDigiSettings, 1, 1);
@@ -976,12 +979,11 @@ void FSUDAQ::WaitForDigitizersOpen(bool onOff){
   // bnOpenDigitizers->setEnabled(onOff);
 
   cbOpenDigitizers->setEnabled(onOff);
-  bnOpenDigitizers->setEnabled(onOff);
-  bnOpenDigitizers->setStyleSheet(onOff ? "background-color: green;" : "");
+  bnOpenDigitizers->setText(onOff ? "Open Digitizers" : "Close Digitizers");
+  bnOpenDigitizers->setStyleSheet(onOff ? "background-color: green;" : "background-color: red;");
   cbOpenMethod->setEnabled(onOff);
   bnSetSettingsPath->setEnabled(onOff);
 
-  bnCloseDigitizers->setEnabled(!onOff);
   bnOpenScope->setEnabled(!onOff);
   bnDigiSettings->setEnabled(!onOff);
   bnOpenScaler->setEnabled(!onOff);
