@@ -57,20 +57,6 @@ class Data{
     bool           decodeOverrun;      /// set by ReadBuffer() when a read goes past nByte
     unsigned int   aggTime; /// update every decode
 
-    /// Scope display. With traceOnlyLastEvent set, DecodeBuffer(false, ...) decodes the trace of
-    /// only the last event of each channel block and skips the samples of the others, and the
-    /// trace it decoded is kept here per channel whether or not the event itself was stored
-    /// (pile-up events are not). ScopeTraceCount[ch] goes up each time the trace is replaced.
-    bool               traceOnlyLastEvent;
-    unsigned long      ScopeTraceCount   [MaxNChannels];
-    std::vector<short> ScopeWaveform1    [MaxNChannels];
-    std::vector<short> ScopeWaveform2    [MaxNChannels];
-    std::vector<bool>  ScopeDigiWaveform1[MaxNChannels];
-    std::vector<bool>  ScopeDigiWaveform2[MaxNChannels];
-    std::vector<bool>  ScopeDigiWaveform3[MaxNChannels];
-    std::vector<bool>  ScopeDigiWaveform4[MaxNChannels];
-    void SetTraceOnlyLastEvent(bool on) { traceOnlyLastEvent = on; }
-
     int GetLoopIndex(unsigned short ch) const {return LoopIndex[ch];}
     int GetDataIndex(unsigned short ch) const {return DataIndex[ch];}
     long GetAbsDataIndex(unsigned short ch) const {return LoopIndex[ch] * dataSize + DataIndex[ch];}
@@ -134,7 +120,6 @@ class Data{
     uint64_t GetMaxFileSize() const { return maxFileSize; }
 
     void CalTriggerRate(); // this method is called by FSUDAQ::UpdateScalar()
-    void KeepScopeTrace(int channel); // copy the trace just decoded into ScopeWaveform*[channel]
     void ClearReferenceTime();
 
   protected:
@@ -209,7 +194,6 @@ inline Data::Data(unsigned short numCh, uInt dataSize): numInputCh(numCh){
   DecodeBadChannel = 0;
   SaveFailed = 0;
   decodeOverrun = false;
-  traceOnlyLastEvent = false;
 
   outFileIndex = 0;
   outFilePrefix = "";
@@ -345,14 +329,6 @@ inline void Data::ClearData(){
     calIndexes[ch][0] = -1;
     calIndexes[ch][1] = -1;
 
-    ScopeTraceCount[ch] = 0;
-    ScopeWaveform1[ch].clear();
-    ScopeWaveform2[ch].clear();
-    ScopeDigiWaveform1[ch].clear();
-    ScopeDigiWaveform2[ch].clear();
-    ScopeDigiWaveform3[ch].clear();
-    ScopeDigiWaveform4[ch].clear();
-
     if( ch >= numInputCh) break;
     for( int j = 0; j < dataSize; j++){
       Timestamp[ch][j] = 0;
@@ -381,16 +357,6 @@ inline void Data::ClearData(){
   ClearNumEventsDecoded();
   ClearTriggerRate();
 
-}
-
-inline void Data::KeepScopeTrace(int channel){
-  ScopeWaveform1[channel]     = tempWaveform1;
-  ScopeWaveform2[channel]     = tempWaveform2;
-  ScopeDigiWaveform1[channel] = tempDigiWaveform1;
-  ScopeDigiWaveform2[channel] = tempDigiWaveform2;
-  ScopeDigiWaveform3[channel] = tempDigiWaveform3;
-  ScopeDigiWaveform4[channel] = tempDigiWaveform4;
-  ScopeTraceCount[channel] ++;
 }
 
 inline void Data::ClearBuffer(){
@@ -1024,13 +990,7 @@ inline int Data::DecodePHADualChannelBlock(unsigned int ChannelMask, bool fastDe
     }
     
     unsigned int triggerAtSample = 0 ;
-    // Scope display (traceOnlyLastEvent): only the last event of the block gets its trace
-    // decoded, the others are skipped the way fastDecode skips them. At noise trigger
-    // rates decoding every trace took about a second per board read.
-    const bool keepTrace = !fastDecode && hasWaveForm && ( !traceOnlyLastEvent || ev + 1 == nEvents );
     if( fastDecode ){
-      nw += nSample/2;
-    }else if( hasWaveForm && !keepTrace ){
       nw += nSample/2;
     }else{
       if( hasWaveForm ){
@@ -1086,8 +1046,6 @@ inline int Data::DecodePHADualChannelBlock(unsigned int ChannelMask, bool fastDe
         } 
       }   
     }
-    if( keepTrace && traceOnlyLastEvent ) KeepScopeTrace(channel);
-
     unsigned long long extTimeStamp = 0;
     unsigned int extra2 = 0;
     if( hasExtra2 ){
@@ -1285,13 +1243,7 @@ inline int Data::DecodePSDDualChannelBlock(unsigned int ChannelMask, bool fastDe
       tempDigiWaveform2.clear();
     }
     
-    // Scope display (traceOnlyLastEvent): only the last event of the block gets its trace
-    // decoded, the others are skipped the way fastDecode skips them. At noise trigger
-    // rates decoding every trace took about a second per board read.
-    const bool keepTrace = !fastDecode && hasWaveForm && ( !traceOnlyLastEvent || ev + 1 == nEvents );
     if( fastDecode ){
-      nw += nSample/2;
-    }else if( hasWaveForm && !keepTrace ){
       nw += nSample/2;
     }else{
       if( hasWaveForm ){
@@ -1324,8 +1276,6 @@ inline int Data::DecodePSDDualChannelBlock(unsigned int ChannelMask, bool fastDe
         }
       }
     }
-
-    if( keepTrace && traceOnlyLastEvent ) KeepScopeTrace(channel);
 
     unsigned int extra = 0;
     unsigned long long extTimeStamp = 0;
@@ -1464,13 +1414,7 @@ inline int Data::DecodeQDCGroupedChannelBlock(unsigned int ChannelMask, bool fas
       tempDigiWaveform4.clear();
     }
     
-    // Scope display (traceOnlyLastEvent): only the last event of the block gets its trace
-    // decoded, the others are skipped the way fastDecode skips them. At noise trigger
-    // rates decoding every trace took about a second per board read.
-    const bool keepTrace = !fastDecode && hasWaveForm && ( !traceOnlyLastEvent || ev + 1 == nEvents );
     if( fastDecode ){
-      nw += nSample/2;
-    }else if( hasWaveForm && !keepTrace ){
       nw += nSample/2;
     }else{
       if( hasWaveForm ){
@@ -1547,7 +1491,6 @@ inline int Data::DecodeQDCGroupedChannelBlock(unsigned int ChannelMask, bool fas
       DigiWaveform3[channel][DataIndex[channel]] = tempDigiWaveform3;
       DigiWaveform4[channel][DataIndex[channel]] = tempDigiWaveform4;
     }
-    if( keepTrace && traceOnlyLastEvent ) KeepScopeTrace(channel);
 
     if( verbose == 1 ) printf("ch : %2d, energy : %d, timestamp : %llu\n",  channel, energy, timeStamp * tick2ns);
     if( verbose > 1 ) printf("ch : %2d, energy : %d, timestamp : %llu, pileUp : %d, OverRange : %d\n",  channel, energy, timeStamp * tick2ns, pileup, OverRange);
