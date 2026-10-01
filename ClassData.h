@@ -60,6 +60,7 @@ class Data{
     uint32_t       Flag1024SinceRate[MaxNChannels];
     uint32_t       LostFlagSinceRate[MaxNChannels];
     uint32_t       LostNFlagSinceRate[MaxNChannels];
+    uint32_t       CountsAtFlagSinceRate[MaxNChannels]; /// CountsSinceRate at the last bit-13 flag of the interval (0 = none)
     bool           lossFlagsAvailable; /// the board writes extras with flags (PSD extras option 1 or 2)
     uint64_t       ReadBytesSinceRate; /// bytes read from the board (Digitizer::ReadData), reset after trig-rate calculation
     uint64_t       DecodeTruncated;    /// buffers whose last aggregate was cut off (decode stopped there, the file still has the raw bytes)
@@ -204,7 +205,7 @@ inline Data::Data(unsigned short numCh, uInt dataSize): numInputCh(numCh){
   DecodeTruncated = 0;
   DecodeBadChannel = 0;
   lossFlagsAvailable = false;
-  for( int i = 0; i < MaxNChannels; i++ ){ CountsSinceRate[i] = 0; Flag1024SinceRate[i] = 0; LostFlagSinceRate[i] = 0; LostNFlagSinceRate[i] = 0; }
+  for( int i = 0; i < MaxNChannels; i++ ){ CountsSinceRate[i] = 0; Flag1024SinceRate[i] = 0; LostFlagSinceRate[i] = 0; LostNFlagSinceRate[i] = 0; CountsAtFlagSinceRate[i] = 0; }
   SaveFailed = 0;
   decodeOverrun = false;
 
@@ -327,7 +328,7 @@ inline void Data::ClearNumEventsDecoded(){
   AggCount = 0;
   EventsSinceRate = 0;
   ReadBytesSinceRate = 0;
-  for( int i = 0; i < MaxNChannels; i++ ){ CountsSinceRate[i] = 0; Flag1024SinceRate[i] = 0; LostFlagSinceRate[i] = 0; LostNFlagSinceRate[i] = 0; }
+  for( int i = 0; i < MaxNChannels; i++ ){ CountsSinceRate[i] = 0; Flag1024SinceRate[i] = 0; LostFlagSinceRate[i] = 0; LostNFlagSinceRate[i] = 0; CountsAtFlagSinceRate[i] = 0; }
 }
 
 inline void Data::ClearData(){
@@ -449,7 +450,7 @@ inline void Data::CalTriggerRate(){ // this method is called by FSUDAQ::UpdateSc
   AggCount = 0;
   EventsSinceRate = 0;
   ReadBytesSinceRate = 0;
-  for( int i = 0; i < MaxNChannels; i++ ){ CountsSinceRate[i] = 0; Flag1024SinceRate[i] = 0; LostFlagSinceRate[i] = 0; LostNFlagSinceRate[i] = 0; }
+  for( int i = 0; i < MaxNChannels; i++ ){ CountsSinceRate[i] = 0; Flag1024SinceRate[i] = 0; LostFlagSinceRate[i] = 0; LostNFlagSinceRate[i] = 0; CountsAtFlagSinceRate[i] = 0; }
 }
 
 //^###############################################
@@ -1307,7 +1308,7 @@ inline int Data::DecodePSDDualChannelBlock(unsigned int ChannelMask, bool fastDe
     CountsSinceRate[channel] ++;
     if( hasExtra && (extraOption == 1 || extraOption == 2) ){
       lossFlagsAvailable = true;
-      if( (extra >> 13) & 0x1 ) Flag1024SinceRate[channel] ++;
+      if( (extra >> 13) & 0x1 ){ Flag1024SinceRate[channel] ++; CountsAtFlagSinceRate[channel] = CountsSinceRate[channel]; }
       if( (extra >> 15) & 0x1 ) LostFlagSinceRate[channel] ++;
       if( (extra >> 12) & 0x1 ) LostNFlagSinceRate[channel] ++;
     }

@@ -25,6 +25,12 @@
 static const char * InputCellStyle = "background-color: #F0F0F0;";
 static const char * AmberCellStyle = "background-color: #f8dc9c;";
 static const char * RedCellStyle   = "background-color: #f4b4b4;";
+// Trigger number marked by the F-th "1024 trigger counted" flag (extras bit 13) since the start. The
+// board's counter starts at zero and is exact, but the flag at its 16-bit wrap is never set: flags
+// mark triggers 1024, 2048, ... 64512, then 66560 (65536 has none), so 63 flags per 65536 triggers
+// (1443, DPP-PSD 136.21, test pulse at 1 kHz and 1 MHz: gaps of exactly 1024 events and one of 2048
+// every 63 flags; 1 Oct 2026).
+static double TriggerAtFlag(uint64_t F){ return F == 0 ? 0. : 1024. * (F + (F - 1) / 63); }
 
 
 FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
@@ -1107,15 +1113,17 @@ void FSUDAQ::SetupScalar(){
   QFont smallFont = scalar->font();
   smallFont.setPointSizeF(smallFont.pointSizeF() * 0.85);
 
-  const QString statusTip = "\n\nwait: collecting the first window of trigger flags (under a second at normal rates)\n"
-                            "low: under ~170 triggers/s, too few flags to measure; losses are negligible there\n"
+  const QString statusTip = "\n\nwait: waiting for the second 1024-trigger flag since the start (a second at normal rates)\n"
+                            "low: no 1024-trigger flag for a minute (under ~17 triggers/s), nothing to measure\n"
                             "bad flags: events arrive but the channel's flags are stuck (a board fault, e.g. 62839's odd channels)\n"
                             "n/a: the board's extras word carries no flags (PSD extras option 1 or 2 needed)";
   const QString tips[nCells + 1] = {
     "Counts/s: events recorded per second (pile-up included).",
-    "Input/s: triggers the channel saw per second, recorded or not (the board flags every 1024 triggers).",
+    "Input/s: triggers the channel saw per second, recorded or not (the board flags every 1024 triggers; one flag\n"
+    "in 64 is never set, at its 16-bit counter wrap, so each flag counts as 65536/63 = 1040.25 triggers).",
     "Missed: share of the input the channel ignored by design, i.e. triggers inside the trigger hold-off "
-    "(or rejected as pile-up). Not a readout fault; amber above 20 % = check threshold and hold-off.",
+    "(or rejected as pile-up). Not a readout fault; amber above 20 % = check threshold and hold-off.\n"
+    "Counted exactly: events recorded between two of the board's 1024-trigger flags against the triggers between them.",
     "Lost: share of the input the board saw but could not store because its memory was full, i.e. the readout "
     "did not keep up. Red whenever anything was lost; \"> 0\" = fewer than 1024 lost triggers in the window.",
     "Read: bytes read from the board per second, which is the write rate when saving."};
@@ -1295,35 +1303,54 @@ void FSUDAQ::UpdateScalar(){
     // per channel: this interval's counts, and the window over which input, missed and lost are measured
     const int nCh = digi[iDigi]->GetNumInputCh();
     const bool flagsOK = data->lossFlagsAvailable;
-    double boardCounts = 0, bInput = 0, bRec = 0, bLost = 0;
+    double boardCounts = 0, bInput = 0, bMissedW = 0, bLost = 0;   // bMissedW: input-weighted missed
     bool bLostSeen = false, bValid = false, bWait = false;
     for( int i = 0; i < nCh; i++){
       DeadTimeWindow & w = deadWin[iDigi][i];
       const uint32_t cnt = data->CountsSinceRate[i];
-      if( dtMs <= 0 ){ w = DeadTimeWindow(); continue; }   // first refresh after a start: no interval yet
+      const uint32_t nf  = data->Flag1024SinceRate[i];
+      const uint32_t cAt = data->CountsAtFlagSinceRate[i];
+      if( dtMs <= 0 ) w = DeadTimeWindow();   // first refresh after a start: its flags still count from the start
+      const double ms = std::max<qint64>(dtMs, 0);
       boardCounts += cnt;
-      w.counts += cnt; w.flags += data->Flag1024SinceRate[i]; w.ms += dtMs;
       w.lostFlags += data->LostFlagSinceRate[i]; w.lostNFlags += data->LostNFlagSinceRate[i];
-      if( w.flags == 0 && w.counts >= 5 * 1024 ){
-        // thousands of events and not one 1024-trigger flag: this channel does not write its flags
+      w.ms += ms;
+      if( nf > 0 ){
+        const uint64_t upToFlag = w.sinceFlag + cAt;   // events from the previous flag up to this interval's newest flag
+        w.flagsTotal += nf;
+        if( w.flagsTotal == nf ){   // the first flags since the start: the window opens at the newest of them
+          w.startF = w.flagsTotal; w.wCounts = 0; w.ms = 0; w.lostFlags = 0; w.lostNFlags = 0;
+        }else{
+          w.wCounts += upToFlag;
+        }
+        w.sinceFlag = cnt - cAt;
+        w.msSinceFlag = 0;
+      }else{
+        w.sinceFlag += cnt;
+        w.msSinceFlag += ms;
+      }
+
+      if( w.sinceFlag >= 5 * 1024 ){
+        // thousands of events since the last 1024-trigger flag (or none at all): the channel does not write its flags
         w.state = DeadTimeWindow::BadFlags;
-        w.ResetSums();
-      }else if( w.flags >= 50 || (w.ms >= 60000 && w.flags >= 10) ){   // enough flags for about ±2 % (at least ±30 % after a minute at a low rate)
-        w.inputRate = w.flags * 1024. * 1000. / w.ms;
-        w.recRate   = w.counts * 1000. / w.ms;
-        w.lostRate  = w.lostNFlags * 1024. * 1000. / w.ms;
-        w.missed = std::max(0.0, 1.0 - (w.recRate + w.lostRate) / w.inputRate);
-        w.lost = std::min(1.0, w.lostRate / w.inputRate);
+      }else if( w.flagsTotal > w.startF && w.ms >= 1000 ){
+        // a window from flag startF to the newest flag: the triggers in it are exact, and so are the
+        // events recorded between the two flags
+        const double triggers = TriggerAtFlag(w.flagsTotal) - TriggerAtFlag(w.startF);
+        const double lostTriggers = w.lostNFlags * 1024.;
+        w.inputRate = triggers * 1000. / w.ms;
+        w.lostRate  = lostTriggers * 1000. / w.ms;
+        w.missed = std::max(0.0, 1.0 - (w.wCounts + lostTriggers) / triggers);
+        w.lost = std::min(1.0, lostTriggers / triggers);
         w.lostSeen = w.lostFlags > 0 || w.lostNFlags > 0;
         w.state = DeadTimeWindow::Valid;
-        w.ResetSums();
-      }else if( w.ms >= 60000 ){   // under ~10 flags a minute (< ~170 triggers/s): too few to measure
+        w.startF = w.flagsTotal; w.wCounts = 0; w.ms = 0; w.lostFlags = 0; w.lostNFlags = 0;
+      }else if( w.msSinceFlag >= 60000 ){   // no flag for a minute (< ~17 triggers/s): too few to measure
         w.lostSeen = w.lostFlags > 0 || w.lostNFlags > 0;
         w.state = DeadTimeWindow::Low;
-        w.ResetSums();
       }
       if( !digi[iDigi]->GetInputChannelOnOff(i) ) continue;
-      if( w.state == DeadTimeWindow::Valid ){ bInput += w.inputRate; bRec += w.recRate; bLost += w.lostRate; bValid = true; }
+      if( w.state == DeadTimeWindow::Valid ){ bInput += w.inputRate; bMissedW += w.inputRate * w.missed; bLost += w.lostRate; bValid = true; }
       if( w.state == DeadTimeWindow::Wait ) bWait = true;
       if( (w.state == DeadTimeWindow::Valid || w.state == DeadTimeWindow::Low) && w.lostSeen ) bLostSeen = true;
       if( w.state == DeadTimeWindow::BadFlags ) stuck << QString::number(i);
@@ -1343,7 +1370,7 @@ void FSUDAQ::UpdateScalar(){
         for( int k = 1; k <= 3; k++ ) lbBoardValue[iDigi][k]->setText(bWait ? "wait" : "low");
         if( bLostSeen ) lbBoardValue[iDigi][3]->setText("<font color=red><b>&gt; 0</b></font>");
       }else{
-        const double missed = std::max(0.0, 1.0 - (bRec + bLost) / bInput);
+        const double missed = bMissedW / bInput;
         const double lost = std::min(1.0, bLost / bInput);
         lbBoardValue[iDigi][1]->setText(RateText(bInput));
         lbBoardValue[iDigi][2]->setText(missed > 0.20 ? "<font color=#c77700><b>" + DeadText(missed) + "</b></font>" : DeadText(missed));
@@ -1442,7 +1469,6 @@ void FSUDAQ::StopRunClock(){
 
 QString FSUDAQ::DeadText(double fraction){
   if( fraction < 0 ) return "-";
-  if( fraction < 0.02 ) return "< 2 %";   // the 1024-trigger flags resolve about 2 % (one flag came every 1040 triggers in tests)
   return QString::number(fraction * 100, 'f', 1) + " %";
 }
 
