@@ -533,9 +533,13 @@ def main(argv=None):
         pass
     finally:
         srv.shutdown()
-        if online.pool is not None:
-            online.pool.terminate(); online.pool.join()
+        # Pool.terminate() waits on the task queue's lock; a worker killed while holding it (a signal
+        # to the whole process group: Ctrl-C, timeout, systemd) makes that wait forever and the port
+        # stays taken. Kill the workers directly and leave without the pool's exit handlers.
+        for child in mp.active_children():
+            child.kill()
         print("online dashboard stopped", flush=True)
+        os._exit(0)
 
 
 if __name__ == "__main__":
