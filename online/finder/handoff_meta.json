@@ -1,0 +1,89 @@
+{
+ "what": "Online track finder for the pion spectrometer: momentum map, channel table, one-track light, finder constants.",
+ "built_utc": "2026-10-05T16:26:06+00:00",
+ "design": "N3_a",
+ "readout": "wta",
+ "readout_note": "winner-takes-all inside a cluster: a reading's channel is its largest-light channel. Channels 1-based.",
+ "map_rows": {
+  "high": 3420,
+  "low": 4208
+ },
+ "map_note": "exported: rows with n_cal >= 5 (finder.map_min_n; online_finder.load applies the same cut). ok = 1 when n_cal >= 15 (sigma measured from enough calibration tracks).",
+ "map_calibration": "flat-momentum pion library through the detector model with fluctuating light at the threshold below (19 build_map.py); simulation, to be replaced by beam calibration",
+ "channels": {
+  "t0": {
+   "high": 16,
+   "low": 16
+  },
+  "t1": {
+   "high": 35,
+   "low": 35
+  },
+  "t2": {
+   "high": 59,
+   "low": 59
+  }
+ },
+ "patterns": {
+  "t0": [
+   16,
+   0,
+   0,
+   0
+  ],
+  "t1": [
+   24,
+   8,
+   2,
+   1
+  ],
+  "t2": [
+   32,
+   24,
+   2,
+   1
+  ]
+ },
+ "pattern_note": "channels per gang width [1, 2, 4, 8 bars]",
+ "planes_s_mm": {
+  "high": [
+   1084.767,
+   1795.517,
+   2050.655
+  ],
+  "low": [
+   1084.767,
+   1795.517,
+   2050.655
+  ]
+ },
+ "planes_note": "distance along the arm from the target to each plane's strip centre; T1/T2 move between settings sideways only, so these are the same for both",
+ "threshold_mevee": 0.1,
+ "gate_ns": 10.0,
+ "gate_note": "a channel's hit counts when its measured time is within +-10 ns of the clock-expected arrival of a beta = 0.75 pion at that plane (applied before the finder)",
+ "finder": {
+  "pair_rule": [
+   "light",
+   "light",
+   "light"
+  ],
+  "two_track_k": 1.4,
+  "dt_nsig": 3.0,
+  "sigma_t_ns_by_gang": {
+   "1": 1.25,
+   "2": 1.7857,
+   "4": 2.8571,
+   "8": 5.0
+  },
+  "sigma_t_note": "per-channel time resolution by gang width; PLACEHOLDER = rise time / 4 (rise {1: 5.0, 2: 7.142857142857142, 4: 11.428571428571429, 8: 20.0} ns, user 2026-09-30)",
+  "map_min_n": 5,
+  "max_combos": 4096,
+  "max_cands": 24,
+  "accept": "tracks"
+ },
+ "counters": {
+  "entrance_veto": "two 5 mm scintillator panels, 64 mm square, hole = aperture (36 x 65 mm); 0.1 MeVee per panel; fired on an accepted bunch -> status veto",
+  "gas_cherenkov": "one bit per bunch; fired on an accepted bunch -> status electron",
+  "lucite": "3 cm behind T2; TAG only (offline), never rejects"
+ }
+}

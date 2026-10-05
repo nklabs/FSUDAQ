@@ -10,7 +10,9 @@ Follows the run folder FSUDAQ names when a saving run starts (GET /run?folder=..
 under the same number (old files replaced) starts over. Tails every board's growing .fsu file
 (the indexer stops at a partial aggregate, so a file being written is safe to read),
 merges the boards with a watermark (everything older than min(newest per board) - lag),
-builds events and classifies them with the same code as the offline pipeline, and
+builds bunches and runs the track finder on each (finder_fast.py: a numba fast path that
+reproduces finder/online_finder.py exactly, and that reference itself for bunches with two
+or more candidates), and
 serves http://localhost:<port>/ (the page) and /state (JSON) from a background thread.
 Kernels: numba (fsu_fast) when importable, numpy otherwise.
 
@@ -26,6 +28,7 @@ import argparse
 import collections
 import glob
 import json
+import math
 import multiprocessing as mp
 import os
 import re
@@ -41,9 +44,7 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import fsu                                   # noqa: E402
-import pipeline as pl                        # noqa: E402
-import online_classify as oc                 # noqa: E402
-from detector import AUX_COUNTERS, ChannelMap, parse_planes   # noqa: E402
+import finder_fast as ff                     # noqa: E402  bunch building + track finder (finder/online_finder.py)
 
 
 def say(msg):
@@ -68,9 +69,7 @@ except ImportError:
     HAVE_INOTIFY = False
 
 DEFAULT_BOARDS = "15880,15879,58918,62839,1443,30508"
-P_BINS = np.linspace(0, 1500, 151)            # MeV/c
-TOF_BINS = np.linspace(-20, 100, 121)         # ns
-NHIT_BINS = np.arange(0, 41)                  # hits per event
+EIGHT_CHANNEL_BOARDS = "1443,30508"           # the DT5730s
 HISTORY_S = 600                               # seconds of rate history kept
 
 
@@ -95,8 +94,8 @@ def _decode(words, ix):
 _G: dict = {}
 
 
-def _init_worker(cmap, lut, dense, window_units, to_ns):
-    _G.update(cmap=cmap, lut=lut, dense=dense, window_units=window_units, to_ns=to_ns)
+def _init_worker(tables, chans, window_ps):
+    _G.update(tables=tables, chans=chans, window_ps=window_ps)
 
 
 def _decode_file_range(path, t_lo, t_hi):
@@ -112,10 +111,11 @@ def _decode_file_range(path, t_lo, t_hi):
 
 
 def process_slice(task: dict) -> dict:
-    """task: t0, t1, margin (ps), files {board_id: [paths]}. Returns increments only."""
+    """task: t0, t1, margin (ps), files {board_id: [paths]}. Returns increments only: the finder's
+    histograms and counters for the bunches whose first hit lies in [t0, t1)."""
     t_start = time.perf_counter()
     t0, t1, margin = task["t0"], task["t1"], task["margin"]
-    cmap, lut, dense, W_units, to_ns = _G["cmap"], _G["lut"], _G["dense"], _G["window_units"], _G["to_ns"]
+    tables, chans, window_ps = _G["tables"], _G["chans"], _G["window_ps"]
     parts = []
     hits_by_board = {}
     for bid, paths in task["files"].items():
@@ -129,50 +129,14 @@ def process_slice(task: dict) -> dict:
             ts, ch, e = r
             parts.append((ts, ch, e, np.full(ts.size, bid, np.int16)))
             hits_by_board[bid] = hits_by_board.get(bid, 0) + int(np.count_nonzero((ts >= t0) & (ts < t1)))
-    n_ch = cmap.n_channels
-    out = dict(W=t1, n_hits=0, n_ev=0, n_bad=0, hits_by_board=hits_by_board, counts={}, tags={},
-               chan_counts=np.zeros(n_ch + 1, np.int64), nhit=np.zeros(NHIT_BINS.size - 1, np.int64), hp=None, htof=None)
-    if not parts:
-        out["dt"] = time.perf_counter() - t_start
-        return out
-    ts = np.concatenate([p[0] for p in parts]); ch = np.concatenate([p[1] for p in parts])
-    e = np.concatenate([p[2] for p in parts]); bd = np.concatenate([p[3] for p in parts])
-    order = np.argsort(ts)
-    if FAST:
-        evch, tof, aux, n_ev, n_bad, n_hits = fsu_fast.build_events(
-            ts, bd, ch, e, order, cmap, lut, W_units, to_ns, t0, t1, out["chan_counts"], out["nhit"])
+    if parts:
+        ts = np.concatenate([p[0] for p in parts]); ch = np.concatenate([p[1] for p in parts])
+        e = np.concatenate([p[2] for p in parts]); bd = np.concatenate([p[3] for p in parts])
+        res = ff.process_sorted(tables, chans, ts, bd, ch, e, np.argsort(ts), window_ps, t0, t1)
     else:
-        block = {"Timestamp": ts[order], "Board": bd[order], "Channel": ch[order], "Energy": e[order]}
-        starts = pl._starts_new_event(block["Timestamp"], W_units)
-        first = block["Timestamp"][starts]
-        keep_ev = (first >= t0) & (first < t1)
-        ev = np.cumsum(starts) - 1
-        keep_hit = keep_ev[ev]
-        block = {k: v[keep_hit] for k, v in block.items()}
-        res = pl.Result()
-        if block["Timestamp"].size:
-            evch, tof, aux, n_ev = pl.build_events(block, cmap, lut, W_units, to_ns, res)
-        else:
-            evch = np.zeros((0, 3), np.int32); tof = np.zeros(0); aux = {}; n_ev = 0
-        n_bad = res.unmapped; n_hits = int(block["Timestamp"].size)
-        g = lut[np.clip(block["Board"], 0, lut.shape[0] - 1), np.clip(block["Channel"], 0, lut.shape[1] - 1)]
-        g = np.where((block["Board"] >= lut.shape[0]) | (block["Channel"] >= lut.shape[1]) | (g < 0), n_ch, g)
-        out["chan_counts"] += np.bincount(g, minlength=n_ch + 1)
-        if n_hits:
-            st = pl._starts_new_event(block["Timestamp"], W_units)
-            sizes = np.diff(np.flatnonzero(np.concatenate([st, [True]])))
-            out["nhit"] += np.histogram(np.clip(sizes, 0, NHIT_BINS[-1]), NHIT_BINS)[0]
-    out["n_hits"] = int(n_hits); out["n_ev"] = int(n_ev); out["n_bad"] = int(n_bad)
-    if n_ev:
-        cls, p, _s, tags = pl.classify_vector(evch, tof, aux, dense)
-        codes, n_each = np.unique(cls, return_counts=True)
-        out["counts"] = {pl.CLASSES[c]: int(n) for c, n in zip(codes, n_each)}
-        out["tags"] = tags
-        good = np.isfinite(p)
-        out["hp"] = np.histogram(p[good], P_BINS)[0]
-        both = (evch[:, 0] > 0) & (evch[:, 2] > 0)
-        out["htof"] = np.histogram(tof[both], TOF_BINS)[0]
-    out["dt"] = time.perf_counter() - t_start
+        res = ff.Result(chans.n_slots)
+    out = res.to_dict()
+    out.update(W=t1, hits_by_board=hits_by_board, dt=time.perf_counter() - t_start)
     return out
 
 
@@ -243,21 +207,27 @@ class Online:
     def __init__(self, a):
         self.a = a
         self.serials = [int(x) for x in a.boards.split(",") if x.strip()]
-        aux = tuple(x.strip() for x in a.aux.split(",") if x.strip())
-        self.cmap = ChannelMap(parse_planes(a.planes), a.board_channels, aux)
-        table = oc.load_map(a.map, a.setting)
-        (self.cmap, self.table, self.dense, self.lut, self.window_units,
-         self.to_ns, _) = pl._prepare(table, self.cmap, a.map, a.setting, "ps", a.window)
+        eight = {int(x) for x in a.eight_channel_boards.split(",") if x.strip()}
+        nch = {s: (8 if s in eight else 16) for s in self.serials}
+        if a.cabling:
+            rows, self.cabling_src = ff.load_cabling(a.cabling), a.cabling
+        else:
+            rows, self.cabling_src = ff.default_cabling(self.serials, nch), "placeholder (sequential)"
+        gains = ff.load_per_channel(a.gains, "mevee_per_count") if a.gains else None
+        offs = ff.load_per_channel(a.time_offsets, "offset_ns") if a.time_offsets else None
+        self.tables = ff.Tables(a.setting, map_path=a.map, calibrated=gains is not None)
+        self.chans = ff.Channels(self.serials, rows, gains, offs)
+        self.window_ps = int(round(a.window * 1000))
         self.lag_ps = int(a.lag_ms * 1e9)
-        self.margin = self.lag_ps + int(self.window_units)
+        self.margin = self.lag_ps + self.window_ps
         self.lock = threading.Lock()
         self.pool = None
         if a.workers > 0:
             ctx = mp.get_context("fork")
             self.pool = ctx.Pool(a.workers, initializer=_init_worker,
-                                 initargs=(self.cmap, self.lut, self.dense, self.window_units, self.to_ns))
+                                 initargs=(self.tables, self.chans, self.window_ps))
         else:
-            _init_worker(self.cmap, self.lut, self.dense, self.window_units, self.to_ns)
+            _init_worker(self.tables, self.chans, self.window_ps)
         self.pending: list = []
         self.follow = a.follow                  # run folder FSUDAQ named (--follow or GET /run); None = newest in the data path
         self.restart = False                    # set by GET /run: a new run starts, even in the same folder
@@ -268,13 +238,7 @@ class Online:
         self.boards = {sn: BoardFiles(sn, i) for i, sn in enumerate(self.serials)}
         self.W = None
         self.t_first = None
-        self.hist_p = np.zeros(P_BINS.size - 1, np.int64)
-        self.hist_tof = np.zeros(TOF_BINS.size - 1, np.int64)
-        self.hist_nhit = np.zeros(NHIT_BINS.size - 1, np.int64)
-        self.chan_counts = np.zeros(self.cmap.n_channels + 1, np.int64)
-        self.counts = dict.fromkeys(pl.CLASSES, 0)
-        self.tags = dict.fromkeys(pl.TAGS, 0)
-        self.events = 0; self.hits = 0; self.unmapped = 0
+        self.acc = ff.Result(self.chans.n_slots)      # the run's histograms and counters
         self.history = collections.deque()
         self.proc_s = 0.0; self.steps = 0
         self.replay_t0 = None
@@ -386,17 +350,15 @@ class Online:
 
     def _fold(self, r: dict, now, bytes_by_board):
         with self.lock:
-            self.hits += r["n_hits"]; self.unmapped += r["n_bad"]; self.events += r["n_ev"]
-            self.chan_counts += r["chan_counts"]; self.hist_nhit += r["nhit"]
-            for k, v in r["counts"].items():
-                self.counts[k] += v
-            for k, v in r["tags"].items():
-                self.tags[k] += v
-            if r["hp"] is not None:
-                self.hist_p += r["hp"]; self.hist_tof += r["htof"]
+            for k in ff.Result.ARRAYS:
+                getattr(self.acc, k)[...] += r[k]
+            for k in ff.Result.SCALARS:
+                setattr(self.acc, k, getattr(self.acc, k) + r[k])
             top = max(b.newest for b in self.boards.values() if b.newest is not None)
             beam_s = (min(r["W"], top) - self.t_first) * 1e-12
-            self.history.append((now, beam_s, r["hits_by_board"], bytes_by_board, r["n_ev"], r["counts"]))
+            status = {ff.STATUS[i]: int(c) for i, c in enumerate(r["h_status"]) if c}
+            n_trk = int((r["h_ntrk"] * np.arange(ff.NTRK)).sum())
+            self.history.append((now, beam_s, r["hits_by_board"], bytes_by_board, int(r["n_bunches"]), status, n_trk))
             while self.history and now - self.history[0][0] > HISTORY_S:
                 self.history.popleft()
             self.proc_s += r["dt"]; self.steps += 1
@@ -410,21 +372,43 @@ class Online:
                                    newest_s=None if b.newest is None or self.t_first is None else (b.newest - self.t_first) * 1e-12,
                                    stalled=b.newest is not None and time.time() - b.newest_wall >= self.a.stall_s,
                                    buffered=0))
+            A, ch = self.acc, self.chans
+            occ = [[0] * (int(n) + 1) for n in (ch.ch[ch.plane == p].max(initial=0) for p in range(3))]
+            counters = {}
+            for bi in range(ch.plane.shape[0]):
+                for c in range(ch.plane.shape[1]):
+                    n = int(A.occ[bi * ch.board_channels + c])
+                    if ch.plane[bi, c] >= 0:
+                        occ[ch.plane[bi, c]][ch.ch[bi, c]] += n
+                    elif ch.plane[bi, c] == -1:
+                        name = ff.COUNTERS[ch.counter[bi, c]]
+                        counters[name] = counters.get(name, 0) + n
+            tb = self.tables
             return dict(
                 folder=self.folder, status=self.status, kernels="numba" if FAST else "numpy",
                 workers=self.a.workers, in_flight=len(self.pending),
                 replay=bool(self.a.replay), lag_ms=self.a.lag_ms, window_ns=self.a.window,
                 processed_s=None if self.W is None or self.t_first is None else (self.W - self.t_first) * 1e-12,
-                hits=self.hits, events=self.events, unmapped=self.unmapped,
+                hits=A.n_hits, bunches=A.n_bunches, unmapped=A.n_bad,
                 proc_s=self.proc_s, steps=self.steps,
-                counts=self.counts, tags=self.tags, classes=list(pl.CLASSES),
                 boards=boards,
-                history=[dict(wall=h[0], beam_s=h[1], hits=h[2], bytes=h[3], events=h[4], counts=h[5]) for h in hist],
-                hist_p=dict(edges=P_BINS.tolist(), counts=self.hist_p.tolist()),
-                hist_tof=dict(edges=TOF_BINS.tolist(), counts=self.hist_tof.tolist()),
-                hist_nhit=dict(edges=NHIT_BINS.tolist(), counts=self.hist_nhit.tolist()),
-                channels=dict(counts=self.chan_counts.tolist(), plane=self.cmap.plane.tolist(),
-                              board=self.cmap.board.tolist(), channel=self.cmap.channel.tolist()),
+                finder=dict(setting=tb.setting, map_rows=tb.map_n, calibrated=tb.calibrated, cabling=self.cabling_src,
+                            installed=[c for c, i in zip(ff.COUNTERS, ch.installed) if i],
+                            missing=[c for c, i in zip(ff.COUNTERS, ch.installed) if not i],
+                            channels=[len(o) - 1 for o in occ], timing="offsets file" if self.a.time_offsets else "no offsets",
+                            fast=int(A.n_fast[0]), reference=A.n_slow, reference_s=A.slow_s, overflow=A.n_over,
+                            k=None if math.isinf(tb.k) else tb.k, nsig=tb.nsig, threshold=tb.threshold),
+                statuses=list(ff.STATUS),
+                status_counts={ff.STATUS[i]: int(c) for i, c in enumerate(A.h_status)},
+                history=[dict(wall=h[0], beam_s=h[1], hits=h[2], bytes=h[3], bunches=h[4], status=h[5], tracks=h[6])
+                         for h in hist],
+                hist_p=dict(edges=ff.P_EDGES.tolist(), counts=A.h_p.tolist()),
+                hist_pull=dict(edges=ff.PULL_EDGES.tolist(), t10=A.h_pull[0].tolist(), t21=A.h_pull[1].tolist()),
+                hist_dt=dict(edges=ff.DT_EDGES.tolist(), counts=A.h_dt.tolist()),
+                hist_r=dict(edges=ff.R_EDGES.tolist(), counts=A.h_r.tolist()),
+                hist_cl=A.h_cl.tolist(), hist_ncand=A.h_ncand.tolist(), hist_ntrk=A.h_ntrk.tolist(),
+                hist_nhit=A.h_nhit.tolist(), lucite=dict(yes=int(A.h_lucite[0]), no=int(A.h_lucite[1])),
+                occupancy=occ, counters=counters,
             )
 
 
@@ -459,7 +443,7 @@ class Handler(BaseHTTPRequestHandler):
             say(f"{time.strftime('%H:%M:%S')} following run folder {folder}")
             self.send_response(204); self.end_headers(); return
         if self.path.startswith("/state"):
-            body = json.dumps(self.online.state()).encode()
+            body = json.dumps(self.online.state(), allow_nan=False).encode()   # Infinity/NaN are not JSON
             ctype = "application/json"
         elif self.path == "/" or self.path.startswith("/index"):
             try:                                   # re-read so a page update needs no restart
@@ -484,19 +468,25 @@ def main(argv=None):
     p.add_argument("--replay", action="store_true", help="play a finished run at real-time pace")
     p.add_argument("--replay-speed", type=float, default=1.0)
     p.add_argument("--boards", default=DEFAULT_BOARDS, help="serials in detector-map board order")
-    p.add_argument("--map", default=os.path.join(HERE, "momentum_map.csv"))
-    p.add_argument("--setting", choices=("high", "low"), default=oc.SETTING)
-    p.add_argument("--planes", default="deployed")
-    p.add_argument("--board-channels", type=int, default=16)
-    p.add_argument("--aux", default=",".join(AUX_COUNTERS))
-    p.add_argument("--window", type=float, default=100.0, help="event-building window [ns]")
+    p.add_argument("--map", default=None, help="momentum map (default finder/momentum_map.csv); columns per finder/INTERFACE.md")
+    p.add_argument("--setting", choices=("high", "low"), default="high", help="T1/T2 position installed for this run")
+    p.add_argument("--cabling", help="CSV serial,channel,kind,plane,ch (kind trk/veto/cherenkov/lucite); "
+                                     "default: a sequential placeholder")
+    p.add_argument("--gains", help="CSV serial,channel,mevee_per_count; without it the light tests are off")
+    p.add_argument("--time-offsets", help="CSV serial,channel,offset_ns subtracted from each channel's time")
+    p.add_argument("--eight-channel-boards", default=EIGHT_CHANNEL_BOARDS, help="serials of 8-channel boards")
+    p.add_argument("--window", type=float, default=25.0,
+                   help="bunch building: a gap longer than this starts a new bunch [ns]. 25 = the finder's +-10 ns gate "
+                        "around each plane's expected arrival plus the 4.3 ns T0->T2 flight at beta 0.75")
     p.add_argument("--lag-ms", type=float, default=100.0, help="merge watermark margin [ms]")
     p.add_argument("--stall-s", type=float, default=5.0, help="a board silent this long no longer holds the watermark")
     p.add_argument("--min-step-s", type=float, default=1.0, help="do not cut slices shorter than this (edge decode cost)")
     p.add_argument("--interval", type=float, default=1.0, help="seconds between processing steps (inotify wakes it earlier)")
     p.add_argument("--from-start", action="store_true", help="live mode: process the run from its first file instead of from now")
     p.add_argument("--port", type=int, default=8050)
-    p.add_argument("--workers", type=int, default=4, help="processes for sort/build/classify (0 = in the main loop)")
+    p.add_argument("--workers", type=int, default=16,
+                   help="processes for sort / bunch building / finder (0 = in the main loop); 16 keep up with about "
+                        "1 GB/s of noise data on odin, 8 with about 500 MB/s")
     p.add_argument("--open-browser", action="store_true", help="open the page in the default browser once the server is up")
     p.add_argument("--exit-with-parent", action="store_true", help="stop when the process that started us (FSUDAQ) is gone")
     a = p.parse_args(argv)
@@ -538,7 +528,8 @@ def main(argv=None):
                 seen = (s['status'], round(s['processed_s'] or 0, 1), s['hits'])
                 if seen != last_seen:    # quiet while nothing happens (between runs, page closed)
                     say(f"{time.strftime('%H:%M:%S')} {s['status']}: processed {s['processed_s'] or 0:.1f} s of beam, "
-                          f"{s['hits']:,} hits, {s['events']:,} events, {s['proc_s']:.1f} s worker CPU, "
+                          f"{s['hits']:,} hits, {s['bunches']:,} bunches, "
+                          f"{s['status_counts']['unique'] + s['status_counts']['tracks']:,} accepted, {s['proc_s']:.1f} s worker CPU, "
                           f"{s['in_flight']} steps in flight")
                     last_seen = seen
                 last_report = t0
