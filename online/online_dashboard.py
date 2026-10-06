@@ -32,6 +32,7 @@ import math
 import multiprocessing as mp
 import os
 import re
+import shutil
 import signal
 import sys
 import threading
@@ -45,6 +46,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import fsu                                   # noqa: E402
 import finder_fast as ff                     # noqa: E402  bunch building + track finder (finder/online_finder.py)
+import daq_hist as dh                        # noqa: E402  per-channel monitoring (no cabling needed)
 
 
 def say(msg):
@@ -129,14 +131,19 @@ def process_slice(task: dict) -> dict:
             ts, ch, e = r
             parts.append((ts, ch, e, np.full(ts.size, bid, np.int16)))
             hits_by_board[bid] = hits_by_board.get(bid, 0) + int(np.count_nonzero((ts >= t0) & (ts < t1)))
+    ref = task.get("ref")
     if parts:
         ts = np.concatenate([p[0] for p in parts]); ch = np.concatenate([p[1] for p in parts])
         e = np.concatenate([p[2] for p in parts]); bd = np.concatenate([p[3] for p in parts])
-        res = ff.process_sorted(tables, chans, ts, bd, ch, e, np.argsort(ts), window_ps, t0, t1)
+        order = np.argsort(ts)
+        res = ff.process_sorted(tables, chans, ts, bd, ch, e, order, window_ps, t0, t1)
+        slot = bd.astype(np.int64) * chans.board_channels + ch.astype(np.int64)
+        daq = dh.process(ts, slot, e, order, t0, t1, ref, chans.n_slots)
     else:
         res = ff.Result(chans.n_slots)
+        daq = dh.DaqResult(chans.n_slots)
     out = res.to_dict()
-    out.update(W=t1, hits_by_board=hits_by_board, dt=time.perf_counter() - t_start)
+    out.update(W=t1, hits_by_board=hits_by_board, daq=daq.to_dict(), ref=ref, dt=time.perf_counter() - t_start)
     return out
 
 
@@ -218,6 +225,18 @@ class Online:
         self.tables = ff.Tables(a.setting, map_path=a.map, calibrated=gains is not None)
         self.chans = ff.Channels(self.serials, rows, gains, offs)
         self.window_ps = int(round(a.window * 1000))
+        # digitizer channels that exist, and how to call them; the role only when a cabling file says so
+        self.slots, self.labels = [], {}
+        for bi, sn in enumerate(self.serials):
+            for c in range(nch[sn]):
+                sl = bi * self.chans.board_channels + c
+                role = ""
+                if a.cabling:
+                    pl_, chn, cn = self.chans.plane[bi, c], self.chans.ch[bi, c], self.chans.counter[bi, c]
+                    role = f"T{pl_}:{chn}" if pl_ >= 0 else (ff.COUNTERS[cn] if pl_ == -1 else "")
+                self.slots.append(sl)
+                self.labels[sl] = dict(board=sn, ch=c, role=role)
+        self.ref_slot = a.ref_slot if a.ref_slot is not None else None
         self.lag_ps = int(a.lag_ms * 1e9)
         self.margin = self.lag_ps + self.window_ps
         self.lock = threading.Lock()
@@ -239,6 +258,8 @@ class Online:
         self.W = None
         self.t_first = None
         self.acc = ff.Result(self.chans.n_slots)      # the run's histograms and counters
+        self.daq = dh.DaqResult(self.chans.n_slots)   # per-channel histograms, since the run start or Clear
+        self.cleared_beam_s = 0.0
         self.history = collections.deque()
         self.proc_s = 0.0; self.steps = 0
         self.replay_t0 = None
@@ -330,7 +351,7 @@ class Online:
                 files[b.board_id] = sel
         if not files:
             return
-        task = dict(t0=int(t0), t1=int(t1), margin=int(self.margin), files=files)
+        task = dict(t0=int(t0), t1=int(t1), margin=int(self.margin), files=files, ref=self.ref_slot)
         bytes_by_board = {b.board_id: b.bytes for b in self.boards.values()}
         if self.pool is None:
             self._fold(process_slice(task), now, bytes_by_board)
@@ -358,7 +379,12 @@ class Online:
             beam_s = (min(r["W"], top) - self.t_first) * 1e-12
             status = {ff.STATUS[i]: int(c) for i, c in enumerate(r["h_status"]) if c}
             n_trk = int((r["h_ntrk"] * np.arange(ff.NTRK)).sum())
-            self.history.append((now, beam_s, r["hits_by_board"], bytes_by_board, int(r["n_bunches"]), status, n_trk))
+            d = r["daq"]
+            if r["ref"] != self.ref_slot:         # made before the reference channel changed: keep all but dt
+                d = dict(d); d["dt"] = np.zeros_like(d["dt"])
+            self.daq.add(d)
+            self.history.append((now, beam_s, r["hits_by_board"], bytes_by_board, int(r["n_bunches"]), status, n_trk,
+                                 d["counts"]))
             while self.history and now - self.history[0][0] > HISTORY_S:
                 self.history.popleft()
             self.proc_s += r["dt"]; self.steps += 1
@@ -403,13 +429,76 @@ class Online:
                 history=[dict(wall=h[0], beam_s=h[1], hits=h[2], bytes=h[3], bunches=h[4], status=h[5], tracks=h[6])
                          for h in hist],
                 hist_p=dict(edges=ff.P_EDGES.tolist(), counts=A.h_p.tolist()),
-                hist_pull=dict(edges=ff.PULL_EDGES.tolist(), t10=A.h_pull[0].tolist(), t21=A.h_pull[1].tolist()),
+                hist_res=dict(edges=ff.RES_EDGES.tolist(), t10=A.h_res[0].tolist(), t21=A.h_res[1].tolist()),
                 hist_dt=dict(edges=ff.DT_EDGES.tolist(), counts=A.h_dt.tolist()),
                 hist_r=dict(edges=ff.R_EDGES.tolist(), counts=A.h_r.tolist()),
                 hist_cl=A.h_cl.tolist(), hist_ncand=A.h_ncand.tolist(), hist_ntrk=A.h_ntrk.tolist(),
                 hist_nhit=A.h_nhit.tolist(), lucite=dict(yes=int(A.h_lucite[0]), no=int(A.h_lucite[1])),
                 occupancy=occ, counters=counters,
+                daq=self._daq_state(hist, boards),
             )
+
+    def _daq_state(self, hist, boards):
+        """The DAQ tab: per-channel counts and rates, data volume and disk, how much has been processed."""
+        D = self.daq
+        rate = {}
+        if len(hist) >= 2:                        # the newest step's counts over its beam time
+            dt_s = hist[-1][1] - hist[-2][1]
+            if dt_s > 0:
+                rate = {sl: float(hist[-1][7][sl]) / dt_s for sl in self.slots}
+        newest = max((b["newest_s"] or 0) for b in boards) if boards else 0
+        if self.a.replay and self.replay_t0 is not None:   # a replay only "has" the data up to its clock
+            newest = min(newest, (time.time() - self.replay_t0) * self.a.replay_speed)
+        processed = None if self.W is None or self.t_first is None else (self.W - self.t_first) * 1e-12
+        # keeping up: the lag now against the lag 30 s of wall time ago
+        lag = None if processed is None else max(0.0, newest - processed)
+        try:
+            du = shutil.disk_usage(self.folder or self.a.data_path or "/")
+            disk = dict(free_gb=du.free / 1e9, total_gb=du.total / 1e9)
+        except OSError:
+            disk = None
+        run_bytes = sum(b["bytes"] for b in boards)
+        files = sum(b["files"] for b in boards)
+        return dict(
+            slots=[dict(slot=sl, **self.labels[sl], count=int(D.counts[sl]), rate=rate.get(sl)) for sl in self.slots],
+            ref=self.ref_slot, total_rate=sum(rate.values()) if rate else None,
+            processed_pct=None if processed is None or newest <= 0 else min(100.0, 100.0 * processed / newest),
+            lag_s=lag, in_flight=len(self.pending), backpressure=len(self.pending) >= 2 * max(1, self.a.workers),
+            run_bytes=run_bytes, files=files, disk=disk, n_windows=D.n_seg,
+            history=[dict(beam_s=h[1], total=int(sum(int(h[7][sl]) for sl in self.slots))) for h in hist])
+
+    def channel(self, sl):
+        """One channel's histograms for the DAQ tab (sl = -1: all channels together, spectrum only)."""
+        with self.lock:
+            D, hist = self.daq, list(self.history)
+            f = 0.5 * (dh.F_EDGES[:-1] + dh.F_EDGES[1:])
+            if sl == -1:
+                n = float(D.spec_tot_n[0])
+                return dict(slot=-1, spectrum=dict(f=f.tolist(), p=(D.spec_tot_p / n if n else D.spec_tot_p).tolist()),
+                            windows=D.n_seg)
+            if sl not in self.labels:
+                return None
+            n = float(D.spec_n[sl])
+            rates = []
+            for a, b in zip(hist[:-1], hist[1:]):
+                if b[1] > a[1]:
+                    rates.append([b[1], float(b[7][sl]) / (b[1] - a[1])])
+            return dict(slot=sl, **self.labels[sl], count=int(D.counts[sl]), ref=self.ref_slot,
+                        q=dict(edges=dh.Q_EDGES.tolist(), zero=int(D.q[sl][0]), sat=int(D.q[sl][-1]), counts=D.q[sl][1:-1].tolist()),
+                        iat=dict(edges=dh.IAT_EDGES.tolist(), counts=D.iat[sl].tolist()),
+                        dt=dict(edges=dh.DT_EDGES.tolist(), counts=D.dt[sl].tolist()),
+                        spectrum=dict(f=f.tolist(), p=(D.spec_p[sl] / n if n else D.spec_p[sl]).tolist()),
+                        windows=D.n_seg, rate=rates)
+
+    def clear(self):
+        with self.lock:
+            self.acc = ff.Result(self.chans.n_slots)
+            self.daq = dh.DaqResult(self.chans.n_slots)
+
+    def set_ref(self, sl):
+        with self.lock:
+            self.ref_slot = sl if sl in self.labels else None
+            self.daq.dt[...] = 0
 
 
 def newest_run_folder(data_path: str):
@@ -442,8 +531,27 @@ class Handler(BaseHTTPRequestHandler):
             self.online.wake.set()
             say(f"{time.strftime('%H:%M:%S')} following run folder {folder}")
             self.send_response(204); self.end_headers(); return
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        if self.path.startswith("/clear"):      # the page's Clear: per-channel and finder histograms start again
+            self.online.clear()
+            self.send_response(204); self.end_headers(); return
+        if self.path.startswith("/set"):        # reference channel for the time differences
+            try:
+                self.online.set_ref(int(q.get("ref", ["-1"])[0]))
+            except ValueError:
+                self.send_response(400); self.end_headers(); return
+            self.send_response(204); self.end_headers(); return
         if self.path.startswith("/state"):
             body = json.dumps(self.online.state(), allow_nan=False).encode()   # Infinity/NaN are not JSON
+            ctype = "application/json"
+        elif self.path.startswith("/channel"):
+            try:
+                d = self.online.channel(int(q.get("slot", ["-1"])[0]))
+            except ValueError:
+                d = None
+            if d is None:
+                self.send_response(404); self.end_headers(); return
+            body = json.dumps(d, allow_nan=False).encode()
             ctype = "application/json"
         elif self.path == "/" or self.path.startswith("/index"):
             try:                                   # re-read so a page update needs no restart
@@ -475,6 +583,8 @@ def main(argv=None):
     p.add_argument("--gains", help="CSV serial,channel,mevee_per_count; without it the light tests are off")
     p.add_argument("--time-offsets", help="CSV serial,channel,offset_ns subtracted from each channel's time")
     p.add_argument("--eight-channel-boards", default=EIGHT_CHANNEL_BOARDS, help="serials of 8-channel boards")
+    p.add_argument("--ref-slot", type=int, default=None,
+                   help="reference channel for the time differences (board index x 16 + channel); the page can change it")
     p.add_argument("--window", type=float, default=25.0,
                    help="bunch building: a gap longer than this starts a new bunch [ns]. 25 = the finder's +-10 ns gate "
                         "around each plane's expected arrival plus the 4.3 ns T0->T2 flight at beta 0.75")

@@ -5,24 +5,32 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FSUDAQ Online</title>
 <style>
-  :root { --bg:#f6f7f9; --fg:#1b1f24; --muted:#5b6470; --line:#d8dde3; --card:#ffffff;
-          --c0:#1f77b4; --c1:#ff7f0e; --c2:#2ca02c; --c3:#d62728; --c4:#9467bd; --c5:#8c564b;
-          --pion:#2a9d8f; --elec:#e9c46a; --heavy:#e76f51; --bad:#adb5bd; }
-  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#101418; --fg:#e6e9ee; --muted:#9aa4b1; --line:#2a323c; --card:#171c22; color-scheme:dark; } }
-  :root[data-theme="dark"] { --bg:#101418; --fg:#e6e9ee; --muted:#9aa4b1; --line:#2a323c; --card:#171c22; color-scheme:dark; }
+  :root { --bg:#f6f7f9; --fg:#1b1f24; --muted:#5b6470; --line:#d8dde3; --card:#ffffff; --sel:#1b1f24;
+          --heavy:#d1495b; --good:#2a9d8f; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#101418; --fg:#e6e9ee; --muted:#9aa4b1; --line:#2a323c; --card:#171c22; --sel:#e6e9ee; color-scheme:dark; } }
+  :root[data-theme="dark"] { --bg:#101418; --fg:#e6e9ee; --muted:#9aa4b1; --line:#2a323c; --card:#171c22; --sel:#e6e9ee; color-scheme:dark; }
   body { margin:0; padding:12px 16px; background:var(--bg); color:var(--fg); font:13px/1.35 system-ui, sans-serif; }
   h1 { font-size:16px; margin:0 0 6px; display:flex; gap:14px; align-items:baseline; flex-wrap:wrap; }
   h1 .st { font-weight:normal; color:var(--muted); }
+  .tabs { display:flex; gap:4px; margin:4px 0 10px; }
+  .tabs button { font:600 13px system-ui, sans-serif; padding:4px 14px; border:1px solid var(--line); border-radius:6px 6px 0 0;
+                 background:transparent; color:var(--muted); cursor:pointer; }
+  .tabs button.on { color:var(--fg); background:var(--card); border-bottom-color:var(--card); }
+  .toolbar { display:flex; gap:14px; align-items:center; flex-wrap:wrap; margin:0 0 10px; color:var(--muted); }
+  .toolbar select, .toolbar button, .card select, .card label { font:12px system-ui, sans-serif; }
+  .toolbar select, .card select { background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:4px; padding:1px 4px; }
   .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(340px, 1fr)); gap:10px; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:8px 10px; min-width:0; overflow-x:auto; }
-  .card h2 { font-size:12px; margin:0 0 4px; color:var(--muted); font-weight:600; letter-spacing:.02em; text-transform:uppercase; }
-  canvas { width:100%; height:180px; display:block; }
+  .card h2 { font-size:12px; margin:0 0 4px; color:var(--muted); font-weight:600; letter-spacing:.02em; }
+  .card h2 b { color:var(--fg); font-weight:600; }
+  .ctl { display:flex; gap:10px; align-items:center; color:var(--muted); font-size:12px; margin:0 0 4px; flex-wrap:wrap; }
+  canvas { width:100%; height:190px; display:block; }
   table { border-collapse:collapse; width:100%; font-variant-numeric:tabular-nums; }
   th, td { text-align:right; padding:2px 6px; border-bottom:1px solid var(--line); white-space:nowrap; }
   th:first-child, td:first-child { text-align:left; }
   th { color:var(--muted); font-weight:600; }
-  .big { font-size:22px; font-weight:600; }
-  .tiles { display:flex; gap:18px; flex-wrap:wrap; margin-bottom:10px; }
+  .big { font-size:22px; font-weight:600; font-variant-numeric:tabular-nums; }
+  .tiles { display:flex; gap:22px; flex-wrap:wrap; margin-bottom:10px; }
   .tile small { display:block; color:var(--muted); }
   .warn { color:var(--heavy); font-weight:600; }
   .warnbox { border:1px solid var(--heavy); border-radius:6px; padding:6px 10px; margin:0 0 10px; background:var(--card); }
@@ -32,163 +40,307 @@
   /* cards: drag by the title, widen, heighten, collapse; the layout is kept in this browser */
   .bar { display:flex; align-items:center; gap:4px; margin:0 0 4px; }
   .bar h2 { flex:1; margin:0; cursor:grab; user-select:none; }
-  .bar button, h1 button { font:11px/18px system-ui, sans-serif; padding:0 6px; border:1px solid var(--line); background:transparent;
-                           color:var(--muted); border-radius:4px; cursor:pointer; }
-  .bar button:hover, h1 button:hover { color:var(--fg); border-color:var(--muted); }
+  .bar button, h1 button, .toolbar button { font:11px/18px system-ui, sans-serif; padding:0 6px; border:1px solid var(--line);
+                           background:transparent; color:var(--muted); border-radius:4px; cursor:pointer; }
+  .bar button:hover, h1 button:hover, .toolbar button:hover { color:var(--fg); border-color:var(--muted); }
   .card.w2 { grid-column:span 2; }
   .card.wfull { grid-column:1 / -1; }
-  .card.tall1 canvas { height:320px; }
+  .card.tall1 canvas { height:330px; }
   .card.tall2 canvas { height:520px; }
   .card.collapsed > :not(.bar) { display:none; }
   .card.collapsed .bar { margin:0; }
   .card.dragging { opacity:.4; }
-  .card.drop { outline:2px dashed var(--c0); outline-offset:2px; }
+  .card.drop { outline:2px dashed var(--muted); outline-offset:2px; }
   @media (max-width: 720px) { .card.w2, .card.wfull { grid-column:auto; } }
+  [hidden] { display:none !important; }
 </style>
 </head>
 <body>
 <h1>FSUDAQ Online <span class="st" id="folder">–</span> <span class="st" id="status">connecting…</span>
   <button id="layout_reset" title="Put every card back to its original place and size">reset layout</button></h1>
 <div class="tiles">
-  <div class="tile"><span class="big" id="rate_bunch">–</span><small>bunches / s</small></div>
-  <div class="tile"><span class="big" id="rate_trk">–</span><small>accepted tracks / s</small></div>
-  <div class="tile"><span class="big" id="acc_share">–</span><small>accepted, of complete bunches</small></div>
-  <div class="tile"><span class="big" id="rate_hit">–</span><small>hits / s</small></div>
-  <div class="tile"><span class="big" id="rate_mb">–</span><small>MB / s to disk</small></div>
-  <div class="tile"><span class="big" id="processed">–</span><small>s of beam processed</small></div>
-  <div class="tile"><span class="big" id="lag">–</span><small>analysis lag (s)</small></div>
+  <div class="tile"><span class="big" id="t_hits">–</span><small>hits / s, all channels</small></div>
+  <div class="tile"><span class="big" id="t_mb">–</span><small>MB / s written</small></div>
+  <div class="tile"><span class="big" id="t_gb">–</span><small>this run, GB in files</small></div>
+  <div class="tile"><span class="big" id="t_disk">–</span><small>disk free</small></div>
+  <div class="tile"><span class="big" id="t_proc">–</span><small>of the data processed</small></div>
+  <div class="tile"><span class="big" id="t_lag">–</span><small>analysis behind by (s)</small></div>
 </div>
-<div class="warnbox" id="setup_warn" hidden></div>
-<div class="grid" id="grid">
-  <div class="card"><h2>Bunches per second by finder status</h2><canvas id="c_status"></canvas><div class="legend" id="leg_status"></div></div>
-  <div class="card"><h2>Hits per second per board</h2><canvas id="c_hits"></canvas><div class="legend" id="leg_hits"></div></div>
-  <div class="card"><h2>Momentum of accepted tracks (MeV/c)</h2><canvas id="c_p"></canvas></div>
-  <div class="card"><h2>Time pulls of accepted tracks (σ)</h2><canvas id="c_pull"></canvas><div class="legend" id="leg_pull"></div></div>
-  <div class="card"><h2>t2 − t1 of accepted tracks (ns)</h2><canvas id="c_dt"></canvas><div class="note" id="note_dt"></div></div>
-  <div class="card"><h2>Light ÷ one track's light, accepted tracks</h2><canvas id="c_r"></canvas><div class="legend" id="leg_r"></div></div>
-  <div class="card"><h2>Hits per channel (this run)</h2><canvas id="c_occ"></canvas><div class="legend" id="leg_occ"></div></div>
-  <div class="card"><h2>Cluster size per plane</h2><canvas id="c_cl"></canvas><div class="legend" id="leg_cl"></div></div>
-  <div class="card"><h2>Candidates per bunch</h2><canvas id="c_ncand"></canvas></div>
-  <div class="card"><h2>Hits per bunch</h2><canvas id="c_nh"></canvas></div>
-  <div class="card"><h2>Finder status (this run)</h2><table id="t_status"></table></div>
-  <div class="card"><h2>Finder setup</h2><table id="t_setup"></table></div>
-  <div class="card"><h2>Boards</h2><table id="t_boards"></table></div>
-</div>
+<div class="tabs"><button data-tab="daq" class="on">DAQ channels</button><button data-tab="trk">Tracker (track finder)</button></div>
+
+<section id="tab_daq">
+  <div class="toolbar">
+    <span>Channel <select id="sel_ch"></select></span>
+    <span>Timing reference <select id="sel_ref"></select></span>
+    <button id="btn_clear" title="Start the accumulated counts and histograms (both tabs) again from now">Clear accumulated</button>
+    <span id="clear_note"></span>
+  </div>
+  <div class="grid" data-grid="daq">
+    <div class="card wfull"><h2>Hits per digitizer channel</h2>
+      <div class="ctl"><label>show <select id="occ_mode"><option value="rate">rate (Hz), last update</option><option value="count">hits since Clear</option></select></label>
+        <label><input type="checkbox" id="occ_log" checked> log scale</label><span>click a bar to pick that channel</span></div>
+      <canvas id="c_chan"></canvas><div class="legend" id="leg_chan"></div></div>
+    <div class="card"><h2>Total hit rate, all channels and per board (Hz)</h2><canvas id="c_total"></canvas><div class="legend" id="leg_total"></div></div>
+    <div class="card"><h2>Pulse height (Qlong) · <b class="chname">–</b></h2>
+      <div class="ctl"><label><input type="checkbox" id="q_log" checked> log scale</label></div><canvas id="c_q"></canvas><div class="note" id="note_q"></div></div>
+    <div class="card"><h2>Time since the previous hit on the same channel · <b class="chname">–</b></h2>
+      <canvas id="c_iat"></canvas><div class="note">The cut at short times is the trigger hold-off; a pulser shows as a peak at its period.</div></div>
+    <div class="card"><h2>Time to hits on the reference channel (t − t<sub>ref</sub>, ns) · <b class="chname">–</b></h2>
+      <div class="ctl"><label><input type="checkbox" id="dt_log"> log scale</label><span id="dt_ref"></span></div><canvas id="c_dt"></canvas></div>
+    <div class="card"><h2>Hit rate over time (Hz) · <b class="chname">–</b></h2><canvas id="c_crate"></canvas></div>
+    <div class="card"><h2>Rate spectrum: periodic signals in the hit times</h2>
+      <div class="ctl"><label>for <select id="spec_which"><option value="ch">this channel</option><option value="all">all channels</option></select></label></div>
+      <canvas id="c_spec"></canvas><div class="note" id="note_spec"></div></div>
+    <div class="card"><h2>Data and processing</h2><table id="t_data"></table></div>
+    <div class="card"><h2>Boards</h2><table id="t_boards"></table></div>
+  </div>
+</section>
+
+<section id="tab_trk" hidden>
+  <div class="tiles">
+    <div class="tile"><span class="big" id="rate_bunch">–</span><small>bunches / s</small></div>
+    <div class="tile"><span class="big" id="rate_trk">–</span><small>accepted tracks / s</small></div>
+    <div class="tile"><span class="big" id="acc_share">–</span><small>accepted, of bunches with all planes hit</small></div>
+  </div>
+  <div class="warnbox" id="setup_warn" hidden></div>
+  <div class="grid" data-grid="trk">
+    <div class="card"><h2>Bunches per second, by finder result</h2><canvas id="c_status"></canvas><div class="legend" id="leg_status"></div></div>
+    <div class="card"><h2>Momentum of accepted tracks (MeV/c, from the map)</h2><canvas id="c_p"></canvas></div>
+    <div class="card"><h2>Timing of accepted tracks: measured minus expected flight time (ns)</h2>
+      <canvas id="c_res"></canvas><div class="legend" id="leg_res"></div><div class="note" id="note_res"></div></div>
+    <div class="card"><h2>Hit light ÷ expected light of one pion, accepted tracks only</h2><canvas id="c_r"></canvas><div class="legend" id="leg_r"></div>
+      <div class="note">Expected light is taken at the momentum the map gives the track, so this only exists for tracks the finder accepted. 1 = one particle, 2 = two.</div></div>
+    <div class="card"><h2>Hits per amplifier channel, by tracker plane</h2><canvas id="c_occ"></canvas><div class="legend" id="leg_occ"></div></div>
+    <div class="card"><h2>Adjacent channels firing together (cluster size)</h2><canvas id="c_cl"></canvas><div class="legend" id="leg_cl"></div></div>
+    <div class="card"><h2>Track candidates per bunch</h2><canvas id="c_ncand"></canvas></div>
+    <div class="card"><h2>Hits per bunch</h2><canvas id="c_nh"></canvas></div>
+    <div class="card"><h2>Finder results (since Clear)</h2><table id="t_status"></table></div>
+    <div class="card"><h2>Finder setup</h2><table id="t_setup"></table></div>
+  </div>
+</section>
+
 <script>
-// finder statuses (finder/INTERFACE.md): accepted first, then the ones that accept nothing
+// ---------------------------------------------------------------- plotting: linear or log axes, bars, steps, lines
+const BOARD_COLOR = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd','#8c564b','#17becf','#bcbd22','#7f7f7f'];
+const PLANE_COLOR = ['#1f77b4','#ff7f0e','#2ca02c'];
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+function fmt(x,d=0){ if(x==null||!isFinite(x)) return '–'; const a=Math.abs(x);
+  if(a>=1e9) return (x/1e9).toFixed(2)+' G'; if(a>=1e6) return (x/1e6).toFixed(2)+' M'; if(a>=1e4) return (x/1e3).toFixed(1)+' k'; return x.toFixed(d); }
+function sinum(v){ const a=Math.abs(v); if(a>=1e9) return +(v/1e9).toPrecision(3)+'G'; if(a>=1e6) return +(v/1e6).toPrecision(3)+'M';
+  if(a>=1e3) return +(v/1e3).toPrecision(3)+'k'; if(a>=1 || a===0) return +v.toPrecision(3)+''; return +v.toPrecision(2)+''; }
+function nsfmt(v){ if(v>=1e9) return sinum(v/1e9)+' s'; if(v>=1e6) return sinum(v/1e6)+' ms'; if(v>=1e3) return sinum(v/1e3)+' µs'; return sinum(v)+' ns'; }
+function hzfmt(v){ return v>=1e3 ? sinum(v/1e3)+' kHz' : sinum(v)+' Hz'; }
+function niceTicks(a, b, n=5){ const span=b-a; if(!(span>0)) return [a]; const raw=span/n, mag=Math.pow(10,Math.floor(Math.log10(raw)));
+  const step=[1,2,2.5,5,10].map(m=>m*mag).find(s=>span/s<=n+1) || 10*mag; const out=[]; for(let v=Math.ceil(a/step)*step; v<=b+1e-9*span; v+=step) out.push(+v.toPrecision(12)); return out; }
+function logTicks(a, b){ const out=[]; for(let e=Math.floor(Math.log10(a)); e<=Math.ceil(Math.log10(b)); e++){ const v=Math.pow(10,e); if(v>=a*0.999 && v<=b*1.001) out.push(v); } return out; }
+function setupCanvas(id){ const c=document.getElementById(id); const r=window.devicePixelRatio||1;
+  const w=c.clientWidth, h=c.clientHeight; c.width=w*r; c.height=h*r; const g=c.getContext('2d'); g.setTransform(r,0,0,r,0,0); return {c,g,w,h}; }
+function message(id, text){ const {g,w,h}=setupCanvas(id); g.fillStyle=css('--muted'); g.font='12px system-ui'; g.textAlign='center'; g.fillText(text, w/2, h/2); }
+// spec: {xlog, ylog, x0, x1, xfmt, yfmt, xticks, series:[{kind:'bars'|'step'|'line', edges|x, y, color, colors, width, gap}], marks:[{x}], ylabel, empty}
+function plot(id, spec){
+  const {g,w,h}=setupCanvas(id); const L=50,B=24,T=8,R=10;
+  const ys = spec.series.flatMap(s=>s.y).filter(v=>isFinite(v) && (spec.ylog ? v>0 : true));
+  if(!ys.length || (!spec.ylog && !ys.some(v=>v>0))){ message(id, spec.empty || 'no entries yet'); return null; }
+  let y0, y1;
+  if(spec.ylog){ y1 = Math.pow(10, Math.ceil(Math.log10(Math.max(...ys))+1e-9)); y0 = Math.pow(10, Math.floor(Math.log10(Math.min(...ys)))); if(y1<=y0) y1=y0*10; }
+  else { y0 = Math.min(0, ...ys); y1 = Math.max(...ys)*1.08; }
+  const x0=spec.x0, x1=spec.x1;
+  const tx = spec.xlog ? (v=>Math.log10(v)) : (v=>v), ty = spec.ylog ? (v=>Math.log10(v)) : (v=>v);
+  const X = v => L + (tx(v)-tx(x0))/(tx(x1)-tx(x0)) * (w-L-R);
+  const Y = v => h-B - (ty(spec.ylog ? Math.max(v, y0) : v)-ty(y0))/(ty(y1)-ty(y0)) * (h-B-T);
+  g.font='10px system-ui'; g.lineWidth=1;
+  const yt = spec.ylog ? logTicks(y0,y1) : niceTicks(y0,y1,4);
+  for(const v of yt){ g.strokeStyle=css('--line'); g.globalAlpha=.6; g.beginPath(); g.moveTo(L,Y(v)); g.lineTo(w-R,Y(v)); g.stroke(); g.globalAlpha=1;
+    g.fillStyle=css('--muted'); g.textAlign='right'; g.fillText((spec.yfmt||sinum)(v), L-4, Y(v)+3); }
+  if(spec.xticks !== false){ const xt = spec.xlog ? logTicks(x0,x1) : niceTicks(x0,x1,6);
+    g.textAlign='center'; g.fillStyle=css('--muted'); for(const v of xt) g.fillText((spec.xfmt||sinum)(v), X(v), h-7); }
+  g.strokeStyle=css('--line'); g.beginPath(); g.moveTo(L,T); g.lineTo(L,h-B); g.lineTo(w-R,h-B); g.stroke();
+  const base = Y(spec.ylog ? y0 : 0);
+  for(const s of spec.series){
+    g.fillStyle=s.color; g.strokeStyle=s.color;
+    if(s.kind==='bars'){ for(let i=0;i<s.y.length;i++){ const v=s.y[i]; if(!(v>0) && spec.ylog) continue; if(v===0) continue;
+        const xa=X(s.edges[i]), xb=X(s.edges[i+1]); const yv=Y(v); g.fillStyle = s.colors ? s.colors[i] : s.color;
+        g.fillRect(xa, Math.min(yv,base), Math.max(1, xb-xa-(s.gap??0.5)), Math.abs(base-yv)); } }
+    else if(s.kind==='step'){ g.lineWidth=s.width||1.6; g.beginPath(); let started=false;
+      for(let i=0;i<s.y.length;i++){ const v=s.y[i]; const yv = (spec.ylog && !(v>0)) ? base : Y(v); const xa=X(s.edges[i]), xb=X(s.edges[i+1]);
+        if(!started){ g.moveTo(xa,yv); started=true; } else g.lineTo(xa,yv); g.lineTo(xb,yv); } g.stroke(); }
+    else { g.lineWidth=s.width||1.6; g.beginPath(); let started=false;
+      for(let i=0;i<s.x.length;i++){ const v=s.y[i]; if(!isFinite(v) || (spec.ylog && !(v>0))){ started=false; continue; }
+        if(!started){ g.moveTo(X(s.x[i]),Y(v)); started=true; } else g.lineTo(X(s.x[i]),Y(v)); } g.stroke(); } }
+  for(const m of (spec.marks||[])){ g.strokeStyle=m.color||css('--muted'); g.setLineDash([4,3]); g.lineWidth=1; g.beginPath(); g.moveTo(X(m.x),T); g.lineTo(X(m.x),h-B); g.stroke(); g.setLineDash([]); }
+  if(spec.ylabel){ g.fillStyle=css('--muted'); g.textAlign='left'; g.fillText(spec.ylabel, L+4, T+10); }
+  return {X, Y, L, B, T, R, w, h};
+}
+function legend(id, items){ document.getElementById(id).innerHTML = items.map(it=>`<span><i style="background:${it.color}"></i>${it.name}</span>`).join(''); }
+const sw = c => `<i style="display:inline-block;width:9px;height:9px;background:${c};margin-right:5px"></i>`;
+const warn = t => `<span class="warn">${t}</span>`;
+const store = { get(k,d){ try { const v=localStorage.getItem(k); return v===null?d:JSON.parse(v); } catch(e){ return d; } },
+                set(k,v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} } };
+
+// ---------------------------------------------------------------- state
+let S = null, CH = null, SPEC_ALL = null;
+let selSlot = store.get('fsudaq-sel-slot', null), tab = store.get('fsudaq-tab', 'daq');
+const slotName = s => s ? `Digi-${s.board} ch${s.ch}${s.role?' ('+s.role+')':''}` : '–';
+function boardIndex(serial){ return S ? S.boards.findIndex(b=>b.serial===serial) : 0; }
+
+function showTab(t){ tab=t; store.set('fsudaq-tab', t);
+  document.querySelectorAll('.tabs button').forEach(b=>b.classList.toggle('on', b.dataset.tab===t));
+  document.getElementById('tab_daq').hidden = t!=='daq'; document.getElementById('tab_trk').hidden = t!=='trk'; draw(); }
+document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>showTab(b.dataset.tab));
+
+function fillSelects(){
+  const slots = S.daq.slots, chSel=document.getElementById('sel_ch'), refSel=document.getElementById('sel_ref');
+  const opts = slots.map(s=>`<option value="${s.slot}">${slotName(s)}</option>`).join('');
+  if(chSel.options.length !== slots.length){ chSel.innerHTML = opts; refSel.innerHTML = '<option value="-1">none</option>' + opts; }
+  if(selSlot===null || !slots.some(s=>s.slot===selSlot)) selSlot = slots.length ? slots[0].slot : null;
+  chSel.value = selSlot; refSel.value = S.daq.ref===null ? -1 : S.daq.ref;
+}
+document.getElementById('sel_ch').onchange = e=>{ selSlot=+e.target.value; store.set('fsudaq-sel-slot', selSlot); fetchChannel(); };
+document.getElementById('sel_ref').onchange = async e=>{ await fetch('/set?ref='+e.target.value); await tick(); fetchChannel(); };
+document.getElementById('btn_clear').onclick = async ()=>{ await fetch('/clear'); document.getElementById('clear_note').textContent='cleared at '+new Date().toLocaleTimeString(); await tick(); fetchChannel(); };
+['occ_mode','occ_log','q_log','dt_log','spec_which'].forEach(id=>document.getElementById(id).onchange=()=>{ if(id==='spec_which') fetchChannel(); else draw(); });
+
+async function tick(){
+  try { S = await (await fetch('/state')).json(); } catch(e){ document.getElementById('status').textContent='no connection to the analysis'; return; }
+  fillSelects(); draw();
+}
+async function fetchChannel(){
+  if(selSlot===null) return;
+  try { CH = await (await fetch('/channel?slot='+selSlot)).json();
+        if(document.getElementById('spec_which').value==='all') SPEC_ALL = await (await fetch('/channel?slot=-1')).json(); } catch(e){ return; }
+  draw();
+}
+
+// ---------------------------------------------------------------- drawing
+function draw(){
+  if(!S) return;
+  const D=S.daq, H=S.history;
+  document.getElementById('folder').textContent = S.folder ? S.folder.split('/').slice(-1)[0] : '';
+  document.getElementById('status').textContent = `${S.status} · ${S.workers} workers${S.replay?' · REPLAY':''}`;
+  const last=H[H.length-1], prev=H.length>1?H[H.length-2]:null, wdt = prev ? last.wall-prev.wall : 0;
+  const bytes = h => h ? Object.values(h.bytes).reduce((a,b)=>a+b,0) : 0;
+  document.getElementById('t_hits').textContent = fmt(D.total_rate);
+  document.getElementById('t_mb').textContent = wdt>0 ? ((bytes(last)-bytes(prev))/wdt/1e6).toFixed(1) : '–';
+  document.getElementById('t_gb').textContent = (D.run_bytes/1e9).toFixed(2);
+  document.getElementById('t_disk').textContent = D.disk ? (D.disk.free_gb/1e3).toFixed(2)+' TB' : '–';
+  const tp=document.getElementById('t_proc'); tp.textContent = D.processed_pct==null ? '–' : D.processed_pct.toFixed(1)+' %';
+  const behind = D.backpressure || (D.lag_s!=null && D.lag_s>30);
+  tp.className = 'big' + (behind ? ' warn' : '');
+  document.getElementById('t_lag').textContent = D.lag_s==null ? '–' : D.lag_s.toFixed(1);
+  if(tab==='daq') drawDaq(); else drawTrk();
+}
+
+function drawDaq(){
+  const D=S.daq, slots=D.slots;
+  document.querySelectorAll('.chname').forEach(e=>e.textContent = slotName(slots.find(s=>s.slot===selSlot)));
+  // hits per channel: one bar per digitizer channel, coloured by board
+  const mode=document.getElementById('occ_mode').value, ylog=document.getElementById('occ_log').checked;
+  const vals = slots.map(s=>mode==='rate' ? (s.rate??0) : s.count);
+  const edges = slots.map((_,i)=>i).concat([slots.length]);
+  const colors = slots.map(s=>s.slot===selSlot ? css('--sel') : BOARD_COLOR[boardIndex(s.board)%BOARD_COLOR.length]);
+  const A = plot('c_chan', {x0:0, x1:slots.length, ylog, xticks:false, series:[{kind:'bars', edges, y:vals, colors, gap:1}],
+                            empty:'no hits yet', ylabel: mode==='rate'?'Hz':'hits'});
+  if(A){ const g=document.getElementById('c_chan').getContext('2d'); g.fillStyle=css('--muted'); g.font='10px system-ui'; g.textAlign='center';
+    let start=0; for(let i=1;i<=slots.length;i++){ if(i===slots.length || slots[i].board!==slots[start].board){
+        g.fillText(`Digi-${slots[start].board} ch0–${slots[i-1].ch}`, (A.X(start)+A.X(i))/2, A.h-7); start=i; } } }
+  document.getElementById('c_chan').onclick = ev=>{ if(!A) return; const r=ev.target.getBoundingClientRect(); const x=ev.clientX-r.left;
+    const i=Math.floor((x-A.L)/((A.w-A.L-A.R)/slots.length)); if(i>=0 && i<slots.length){ selSlot=slots[i].slot; store.set('fsudaq-sel-slot', selSlot); fillSelects(); fetchChannel(); } };
+  legend('leg_chan', S.boards.map((b,i)=>({name:'Digi-'+b.serial, color:BOARD_COLOR[i%BOARD_COLOR.length]})).concat([{name:'selected channel', color:css('--sel')}]));
+  // total rate over time, and per board
+  const H=S.history, ser=[];
+  const tot = {x:[], y:[]}; for(let i=1;i<D.history.length;i++){ const a=D.history[i-1], b=D.history[i]; if(b.beam_s>a.beam_s){ tot.x.push(b.beam_s); tot.y.push(b.total/(b.beam_s-a.beam_s)); } }
+  ser.push({kind:'line', x:tot.x, y:tot.y, color:css('--fg'), width:2});
+  S.boards.forEach((bd,i)=>{ const s={x:[],y:[]}; for(let j=1;j<H.length;j++){ const dt=H[j].beam_s-H[j-1].beam_s; if(dt<=0) continue; s.x.push(H[j].beam_s); s.y.push((H[j].hits[bd.id]||0)/dt); }
+    ser.push({kind:'line', x:s.x, y:s.y, color:BOARD_COLOR[i%BOARD_COLOR.length]}); });
+  if(tot.x.length>1) plot('c_total', {x0:tot.x[0], x1:tot.x[tot.x.length-1], xfmt:v=>sinum(v)+' s', series:ser, ylabel:'Hz'}); else message('c_total','no data yet');
+  legend('leg_total', [{name:'all channels', color:css('--fg')}].concat(S.boards.map((b,i)=>({name:'Digi-'+b.serial, color:BOARD_COLOR[i%BOARD_COLOR.length]}))));
+  if(!CH || CH.slot!==selSlot){ ['c_q','c_iat','c_dt','c_crate'].forEach(id=>message(id,'loading…')); }
+  else {
+    // Qlong over the full 16-bit range on a log axis; per count, since the bins widen with Q
+    const qe = CH.q.edges, qd = CH.q.counts.map((c,i)=>c/(qe[i+1]-qe[i]));
+    plot('c_q', {x0:1, x1:65535, xlog:true, ylog:document.getElementById('q_log').checked, series:[{kind:'bars', edges:qe, y:qd, color:'#1f77b4', gap:0}],
+                 empty:'no hits between Q = 1 and 65534 yet', ylabel:'hits per Qlong count'});
+    const qn = CH.q.zero + CH.q.sat + CH.q.counts.reduce((a,b)=>a+b,0);
+    document.getElementById('note_q').textContent = qn ? `Not on the axis: Q = 0 in ${(100*CH.q.zero/qn).toFixed(1)} % of hits, Q = 65535 (saturated, or a negative integral) in ${(100*CH.q.sat/qn).toFixed(1)} %.` : '';
+    plot('c_iat', {x0:1, x1:1e9, xlog:true, ylog:true, xfmt:nsfmt, series:[{kind:'bars', edges:CH.iat.edges, y:CH.iat.counts, color:'#9467bd', gap:0}], empty:'no hits on this channel yet', ylabel:'hits'});
+    const refName = D.ref===null ? null : slotName(D.slots.find(s=>s.slot===D.ref));
+    document.getElementById('dt_ref').textContent = refName ? 'reference: '+refName : '';
+    if(refName) plot('c_dt', {x0:-200, x1:200, ylog:document.getElementById('dt_log').checked, series:[{kind:'bars', edges:CH.dt.edges, y:CH.dt.counts, color:'#2a9d8f', gap:0}],
+                              empty:'no pairs within ±200 ns yet', ylabel:'pairs per 0.5 ns'});
+    else message('c_dt', 'pick a timing reference channel above (the beam trigger, once there is one)');
+    if(CH.rate.length>1) plot('c_crate', {x0:CH.rate[0][0], x1:CH.rate[CH.rate.length-1][0], xfmt:v=>sinum(v)+' s', series:[{kind:'line', x:CH.rate.map(r=>r[0]), y:CH.rate.map(r=>r[1]), color:'#1f77b4'}], ylabel:'Hz'});
+    else message('c_crate', 'no data yet');
+  }
+  const sp = document.getElementById('spec_which').value==='all' ? SPEC_ALL : CH;
+  if(sp && sp.spectrum && sp.windows>0) plot('c_spec', {x0:sp.spectrum.f[0], x1:sp.spectrum.f[sp.spectrum.f.length-1], xlog:true, ylog:true, xfmt:hzfmt,
+       series:[{kind:'line', x:sp.spectrum.f, y:sp.spectrum.p, color:'#d1495b', width:1.2}], ylabel:'power ÷ random'});
+  else message('c_spec', 'needs a full 0.33 s window of data');
+  document.getElementById('note_spec').textContent = `Hits counted in 10 µs bins, Fourier transformed over ${D.n_windows} windows of 0.33 s. Random hits give 1; a pulser or a modulated beam gives peaks at its frequency and harmonics (12 Hz resolution, up to 50 kHz).`;
+  // data and processing
+  const row=(k,v)=>`<tr><td>${k}</td><td style="text-align:left">${v}</td></tr>`;
+  const mbps = parseFloat(document.getElementById('t_mb').textContent);
+  const hoursLeft = D.disk && mbps>0 ? D.disk.free_gb*1e3/mbps/3600 : null;
+  document.getElementById('t_data').innerHTML =
+    row('run folder', S.folder||'–') + row('files', D.files.toLocaleString()) + row('data', (D.run_bytes/1e9).toFixed(2)+' GB') +
+    row('disk', D.disk ? `${(D.disk.free_gb).toFixed(0)} GB free of ${(D.disk.total_gb).toFixed(0)} GB` + (hoursLeft!==null ? ` · full in ${hoursLeft<2?warn(hoursLeft.toFixed(1)+' h'):hoursLeft.toFixed(1)+' h'} at the current rate` : '') : '–') +
+    row('processed', D.processed_pct==null ? '–' : `${D.processed_pct.toFixed(1)} % of the data on disk · ${D.lag_s.toFixed(1)} s behind`) +
+    row('analysis', `${S.workers} workers, ${D.in_flight} slices in flight` + (D.backpressure ? ' · '+warn('falling behind: every worker is busy') : (D.lag_s>30 ? ' · '+warn('more than 30 s behind') : ' · keeping up')));
+  document.getElementById('t_boards').innerHTML = '<tr><th>board</th><th>files</th><th>MB</th><th>newest (s)</th><th></th></tr>' +
+    S.boards.map((b,i)=>`<tr><td>${sw(BOARD_COLOR[i%BOARD_COLOR.length])}Digi-${b.serial}</td><td>${b.files}</td><td>${(b.bytes/1e6).toFixed(0)}</td><td>${b.newest_s==null?'–':b.newest_s.toFixed(2)}</td><td>${b.stalled?warn('no new data'):(b.newest_s==null?'no data':'')}</td></tr>`).join('');
+}
+
 const STATUS_ORDER = ['unique','tracks','ambiguous','multitrack','veto','electron','dropped','none','incomplete'];
 const ST_COLOR = {unique:'#2a9d8f', tracks:'#1f77b4', ambiguous:'#e9c46a', multitrack:'#9467bd', veto:'#8c564b',
                   electron:'#ff7f0e', dropped:'#d62728', none:'#adb5bd', incomplete:'#d5dbe1'};
 const ST_NOTE = {unique:'one track accepted', tracks:'2+ tracks accepted', ambiguous:'several readings fit; nothing accepted',
                  multitrack:'a hit brighter than one track, unexplained', veto:'entrance veto fired', electron:'gas Cherenkov fired',
-                 dropped:'too many combinations or candidates', none:'no triplet fits', incomplete:'a plane has no hit'};
-const PLANE_COLOR = ['#1f77b4','#ff7f0e','#2ca02c'];
-const BOARD_COLOR = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd','#8c564b','#17becf'];
-const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
-function setup(id){ const c=document.getElementById(id); const r=window.devicePixelRatio||1;
-  const w=c.clientWidth, h=c.clientHeight; c.width=w*r; c.height=h*r; const g=c.getContext('2d'); g.setTransform(r,0,0,r,0,0); return {g,w,h}; }
-function fmt(x,d=0){ if(x==null||!isFinite(x)) return '–'; if(Math.abs(x)>=1e6) return (x/1e6).toFixed(2)+' M'; if(Math.abs(x)>=1e4) return (x/1e3).toFixed(1)+' k'; return x.toFixed(d); }
-function axes(g,w,h,x0,x1,y0,y1,xl){ const L=44,B=22,T=6,R=8; g.strokeStyle=css('--line'); g.fillStyle=css('--muted'); g.font='10px system-ui';
-  g.beginPath(); g.moveTo(L,T); g.lineTo(L,h-B); g.lineTo(w-R,h-B); g.stroke();
-  const X=x=>L+(x-x0)/(x1-x0||1)*(w-L-R), Y=y=>h-B-(y-y0)/(y1-y0||1)*(h-B-T);
-  for(let i=0;i<=4;i++){ const y=y0+(y1-y0)*i/4; g.fillText(fmt(y,y1<10?1:0), 2, Y(y)+3); g.strokeStyle=css('--line'); g.beginPath(); g.moveTo(L,Y(y)); g.lineTo(w-R,Y(y)); g.globalAlpha=.5; g.stroke(); g.globalAlpha=1; }
-  if(xl!==false) for(let i=0;i<=4;i++){ const x=x0+(x1-x0)*i/4; g.textAlign='center'; g.fillText(xl?xl(x):fmt(x,1), X(x), h-6); }
-  g.textAlign='left'; return {X,Y,L,B,T,R}; }
-function empty(g,w,h,text){ g.fillStyle=css('--muted'); g.font='12px system-ui'; g.textAlign='center'; g.fillText(text, w/2, h/2); g.textAlign='left'; }
-function lines(id, series, xlab){ const {g,w,h}=setup(id); if(!series.length||!series[0].x.length){ empty(g,w,h,'no data yet'); return; }
-  const x0=Math.min(...series.map(s=>s.x[0])), x1=Math.max(...series.map(s=>s.x[s.x.length-1]));
-  const y1=Math.max(1e-9, ...series.flatMap(s=>s.y)); const A=axes(g,w,h,x0,x1,0,y1*1.05,xlab);
-  for(const s of series){ g.strokeStyle=s.color; g.lineWidth=1.6; g.beginPath(); s.x.forEach((x,i)=>{ i?g.lineTo(A.X(x),A.Y(s.y[i])):g.moveTo(A.X(x),A.Y(s.y[i])); }); g.stroke(); } }
-function hist(id, edges, counts, color, log, emptyText){ const {g,w,h}=setup(id); const n=counts.length;
-  if(!n || !counts.some(c=>c>0)){ empty(g,w,h,emptyText||'no entries yet'); return; }
-  const vals = log ? counts.map(c=>Math.log10(c+1)) : counts; const y1=Math.max(1e-9, ...vals);
-  const A=axes(g,w,h,edges[0],edges[n],0,y1*1.05,null); g.fillStyle=color;
-  for(let i=0;i<n;i++){ const x=A.X(edges[i]), x2=A.X(edges[i+1]); const y=A.Y(vals[i]); g.fillRect(x, y, Math.max(1,x2-x-0.5), A.Y(0)-y); }
-  if(log){ g.fillStyle=css('--muted'); g.fillText('log10(counts+1)', A.L+4, A.T+10); } }
-function steps(id, edges, series, emptyText){ // several histograms as step lines on one axis
-  const {g,w,h}=setup(id); const n=edges.length-1;
-  if(!series.some(s=>s.counts.some(c=>c>0))){ empty(g,w,h,emptyText||'no entries yet'); return; }
-  const y1=Math.max(1e-9,...series.flatMap(s=>s.counts)); const A=axes(g,w,h,edges[0],edges[n],0,y1*1.05,null);
-  for(const s of series){ g.strokeStyle=s.color; g.lineWidth=1.6; g.beginPath();
-    for(let i=0;i<n;i++){ const y=A.Y(s.counts[i]); if(i===0) g.moveTo(A.X(edges[0]),y); else g.lineTo(A.X(edges[i]),y); g.lineTo(A.X(edges[i+1]),y); }
-    g.stroke(); } }
-function bars(id, labels, series, log){ // grouped bars, one group per label
-  const {g,w,h}=setup(id); const n=labels.length;
-  if(!series.some(s=>s.counts.some(c=>c>0))){ empty(g,w,h,'no entries yet'); return; }
-  const tr=c=>log?Math.log10(c+1):c; const y1=Math.max(1e-9,...series.flatMap(s=>s.counts.map(tr)));
-  const A=axes(g,w,h,0,n,0,y1*1.05,false); const gw=A.X(1)-A.X(0), bw=gw*0.8/series.length;
-  series.forEach((s,k)=>{ g.fillStyle=s.color; for(let i=0;i<n;i++){ const x=A.X(i)+gw*0.1+k*bw, y=A.Y(tr(s.counts[i])); g.fillRect(x,y,Math.max(1,bw-1),A.Y(0)-y); } });
-  g.fillStyle=css('--muted'); g.textAlign='center'; for(let i=0;i<n;i++) g.fillText(labels[i], A.X(i+0.5), h-6); g.textAlign='left';
-  if(log) g.fillText('log10(counts+1)', A.L+4, A.T+10); }
-function occupancy(id, occ){ // hits per amplifier, the three planes side by side
-  const {g,w,h}=setup(id); const segs=occ.map(o=>o.slice(1)), gap=3;
-  const total=segs.reduce((a,s)=>a+s.length,0)+gap*(segs.length-1);
-  if(!segs.some(s=>s.some(c=>c>0))){ empty(g,w,h,'no hits yet'); return; }
-  const tr=c=>Math.log10(c+1); const y1=Math.max(1e-9,...segs.flat().map(tr)); const A=axes(g,w,h,0,total,0,y1*1.05,false);
-  let x0=0; segs.forEach((s,p)=>{ g.fillStyle=PLANE_COLOR[p];
-    s.forEach((c,i)=>{ const x=A.X(x0+i), x2=A.X(x0+i+1), y=A.Y(tr(c)); g.fillRect(x,y,Math.max(1,x2-x-0.5),A.Y(0)-y); });
-    g.fillStyle=css('--muted'); g.textAlign='center'; g.fillText(`T${p}  1–${s.length}`, A.X(x0+s.length/2), h-6); g.textAlign='left';
-    x0+=s.length+gap; });
-  g.fillStyle=css('--muted'); g.fillText('log10(hits+1)', A.L+4, A.T+10); }
-function legend(id, items){ document.getElementById(id).innerHTML = items.map(it=>`<span><i style="background:${it.color}"></i>${it.name}</span>`).join(''); }
-function rateSeries(hist, key, sub){ // per-second rates from history deltas in beam time
-  const x=[], y=[]; for(let i=1;i<hist.length;i++){ const dt=hist[i].beam_s-hist[i-1].beam_s; if(dt<=0) continue;
-    const v = sub !== undefined ? (hist[i][key][sub]||0) : hist[i][key]; x.push(hist[i].beam_s); y.push(v/dt); } return {x,y}; }
-const sw = c => `<i style="display:inline-block;width:9px;height:9px;background:${c};margin-right:5px"></i>`;
-const warn = t => `<span class="warn">${t}</span>`;
-async function tick(){
-  let s; try { s = await (await fetch('/state')).json(); } catch(e){ document.getElementById('status').textContent='no connection to the analysis'; return; }
-  const F = s.finder, SC = s.status_counts;
-  document.getElementById('folder').textContent = s.folder ? s.folder.split('/').slice(-1)[0] : '';
-  document.getElementById('status').textContent = `${s.status} · ${s.kernels} · ${s.workers} workers (${s.in_flight} in flight)${s.replay?' · REPLAY':''} · setting ${F.setting} · window ${s.window_ns} ns`;
-  const H=s.history; const last=H[H.length-1], prev=H.length>1?H[H.length-2]:null;
-  const dt = prev ? last.beam_s-prev.beam_s : 0;
-  const hitsNow = last ? Object.values(last.hits).reduce((a,b)=>a+b,0) : 0;
-  const bytesNow = last ? Object.values(last.bytes).reduce((a,b)=>a+b,0) : 0, bytesPrev = prev ? Object.values(prev.bytes).reduce((a,b)=>a+b,0) : 0;
-  const wdt = prev ? last.wall-prev.wall : 0;
+                 dropped:'too many combinations or candidates', none:'no triplet in the map fits', incomplete:'a plane has no hit'};
+function drawTrk(){
+  const F=S.finder, SC=S.status_counts, H=S.history;
+  const last=H[H.length-1], prev=H.length>1?H[H.length-2]:null, dt = prev ? last.beam_s-prev.beam_s : 0;
   document.getElementById('rate_bunch').textContent = dt>0 ? fmt(last.bunches/dt) : '–';
   document.getElementById('rate_trk').textContent = dt>0 ? fmt(last.tracks/dt, 1) : '–';
-  const complete = s.bunches - (SC.incomplete||0), accepted = (SC.unique||0)+(SC.tracks||0);
+  const complete = S.bunches - (SC.incomplete||0), accepted = (SC.unique||0)+(SC.tracks||0);
   document.getElementById('acc_share').textContent = complete>0 ? (100*accepted/complete).toFixed(2)+' %' : '–';
-  document.getElementById('rate_hit').textContent = dt>0 ? fmt(hitsNow/dt) : '–';
-  document.getElementById('rate_mb').textContent = wdt>0 ? ((bytesNow-bytesPrev)/wdt/1e6).toFixed(1) : '–';
-  document.getElementById('processed').textContent = s.processed_s==null ? '–' : s.processed_s.toFixed(1);
-  const newest = Math.max(0, ...s.boards.map(b=>b.newest_s||0));
-  document.getElementById('lag').textContent = s.processed_s==null ? '–' : (newest - s.processed_s).toFixed(2);
-  // what is still a placeholder: said once, above the cards
-  const full = [16,35,59], ph = [];
-  if(F.cabling.startsWith('placeholder')) ph.push('cabling is a sequential placeholder');
+  const full=[16,35,59], ph=[];
+  if(F.cabling.startsWith('placeholder')) ph.push('cabling is a sequential placeholder (give --cabling)');
   if(!F.calibrated) ph.push('no light calibration: light tests off');
   F.channels.forEach((n,p)=>{ if(n<full[p]) ph.push(`T${p} reads ${n} of ${full[p]} channels`); });
   if(F.missing.length) ph.push('not cabled: '+F.missing.join(', ')+' (no information)');
   const wb=document.getElementById('setup_warn'); wb.hidden=!ph.length; wb.innerHTML = ph.length ? '<b>Placeholders:</b> '+ph.join(' · ') : '';
-  // status rates
-  const sser = STATUS_ORDER.map(n=>({name:n, color:ST_COLOR[n], ...rateSeries(H,'status',n)})).filter(x=>x.y.some(v=>v>0));
-  lines('c_status', sser, x=>x.toFixed(0)+' s'); legend('leg_status', sser);
-  const bser = s.boards.map(b=>({name:'Digi-'+b.serial, color:BOARD_COLOR[b.id%7], ...rateSeries(H,'hits',b.id)}));
-  lines('c_hits', bser, x=>x.toFixed(0)+' s'); legend('leg_hits', bser);
-  hist('c_p', s.hist_p.edges, s.hist_p.counts, ST_COLOR.unique, false, 'no accepted track yet');
-  const pser = [{name:'t1 − t0', color:PLANE_COLOR[1], counts:s.hist_pull.t10}, {name:'t2 − t1', color:PLANE_COLOR[2], counts:s.hist_pull.t21}];
-  steps('c_pull', s.hist_pull.edges, pser, 'no accepted track yet'); legend('leg_pull', pser);
-  hist('c_dt', s.hist_dt.edges, s.hist_dt.counts, PLANE_COLOR[2], false, 'no accepted track yet');
-  const nd = s.hist_dt.counts.reduce((a,b)=>a+b,0), neg = s.hist_dt.counts.reduce((a,c,i)=>a+(s.hist_dt.edges[i+1]<=0?c:0),0);
-  document.getElementById('note_dt').textContent = nd ? `t2 < t1 in ${(100*neg/nd).toFixed(1)} % of accepted tracks (simulation: about 30 %; the finder allows it)` : '';
-  const rser = [0,1,2].map(p=>({name:'T'+p, color:PLANE_COLOR[p], counts:s.hist_r.counts[p]}));
-  if(F.calibrated){ steps('c_r', s.hist_r.edges, rser, 'no accepted track yet'); legend('leg_r', rser); }
-  else { const {g,w,h}=setup('c_r'); empty(g,w,h,'no light calibration (--gains): every hit counts as one track'); legend('leg_r', []); }
-  occupancy('c_occ', s.occupancy); legend('leg_occ', [0,1,2].map(p=>({name:'T'+p, color:PLANE_COLOR[p]})));
-  const cser = [0,1,2].map(p=>({name:'T'+p, color:PLANE_COLOR[p], counts:s.hist_cl[p]}));
-  bars('c_cl', ['1','2','3','4','5','6+'], cser, true); legend('leg_cl', cser);
-  bars('c_ncand', ['0','1','2','3','4','5','6','7+'], [{color:'#5b6470', counts:s.hist_ncand}], true);
-  hist('c_nh', [...Array(s.hist_nhit.length+1).keys()], s.hist_nhit, '#9467bd', true, 'no bunches yet');
-  // status table
-  const tot = Math.max(1, s.bunches);
-  document.getElementById('t_status').innerHTML = '<tr><th>status</th><th>bunches</th><th>share</th><th>meaning</th></tr>' +
+  const ser=[], leg=[];
+  for(const n of STATUS_ORDER){ const s={x:[],y:[]}; for(let i=1;i<H.length;i++){ const d=H[i].beam_s-H[i-1].beam_s; if(d<=0) continue; s.x.push(H[i].beam_s); s.y.push((H[i].status[n]||0)/d); }
+    if(s.y.some(v=>v>0)){ ser.push({kind:'line', x:s.x, y:s.y, color:ST_COLOR[n]}); leg.push({name:n, color:ST_COLOR[n]}); } }
+  if(ser.length && ser[0].x.length>1) plot('c_status', {x0:ser[0].x[0], x1:ser[0].x[ser[0].x.length-1], ylog:true, xfmt:v=>sinum(v)+' s', series:ser, ylabel:'bunches / s'}); else message('c_status','no data yet');
+  legend('leg_status', leg);
+  plot('c_p', {x0:0, x1:1000, series:[{kind:'bars', edges:S.hist_p.edges, y:S.hist_p.counts, color:ST_COLOR.unique}], empty:'no accepted track yet', ylabel:'tracks per 10 MeV/c'});
+  const rs = [{name:'T0 → T1', color:PLANE_COLOR[1], y:S.hist_res.t10}, {name:'T1 → T2', color:PLANE_COLOR[2], y:S.hist_res.t21}];
+  plot('c_res', {x0:-15, x1:15, series:rs.map(r=>({kind:'step', edges:S.hist_res.edges, y:r.y, color:r.color})), marks:[{x:0}], empty:'no accepted track yet', ylabel:'tracks per 0.25 ns'});
+  legend('leg_res', rs);
+  const nd = S.hist_dt.counts.reduce((a,b)=>a+b,0), neg = S.hist_dt.counts.reduce((a,c,i)=>a+(S.hist_dt.edges[i+1]<=0?c:0),0);
+  document.getElementById('note_res').textContent = 'Centred on 0 when the cable delays are right; the width is the timing resolution. The finder accepts within ±3σ of its assumed resolution.' +
+    (nd ? ` T2 earlier than T1 in ${(100*neg/nd).toFixed(1)} % of accepted tracks (simulation: about 30 %).` : '');
+  const rser = [0,1,2].map(p=>({name:'T'+p, color:PLANE_COLOR[p], y:S.hist_r.counts[p]}));
+  if(F.calibrated){ plot('c_r', {x0:0, x1:4, series:rser.map(r=>({kind:'step', edges:S.hist_r.edges, y:r.y, color:r.color})), marks:[{x:1},{x:2}], empty:'no accepted track yet'}); legend('leg_r', rser); }
+  else { message('c_r','no light calibration (--gains): every hit counts as one track'); legend('leg_r', []); }
+  // hits per amplifier channel, the three planes side by side with a gap between them
+  const gap=3, ys=[], cs=[], starts=[];
+  S.occupancy.forEach((o,p)=>{ starts.push(ys.length); o.slice(1).forEach(v=>{ ys.push(v); cs.push(PLANE_COLOR[p]); }); if(p<2) for(let k=0;k<gap;k++){ ys.push(0); cs.push(null); } });
+  const A = plot('c_occ', {x0:0, x1:ys.length, ylog:true, xticks:false, series:[{kind:'bars', edges:[...Array(ys.length+1).keys()], y:ys, colors:cs, gap:0.5}], empty:'no hits yet', ylabel:'hits'});
+  if(A){ const g=document.getElementById('c_occ').getContext('2d'); g.fillStyle=css('--muted'); g.font='10px system-ui'; g.textAlign='center';
+    S.occupancy.forEach((o,p)=>{ const n=o.length-1; g.fillText(`T${p}  ch 1–${n}`, A.X(starts[p]+n/2), A.h-7); }); }
+  legend('leg_occ', [0,1,2].map(p=>({name:'T'+p, color:PLANE_COLOR[p]})));
+  const cedges=[...Array(7).keys()].map(v=>v+0.5);
+  plot('c_cl', {x0:0.5, x1:6.5, ylog:true, xfmt:v=>v>=6?'6+':String(Math.round(v)), series:[0,1,2].map(p=>({kind:'step', edges:cedges, y:S.hist_cl[p], color:PLANE_COLOR[p]})), ylabel:'clusters'});
+  legend('leg_cl', [0,1,2].map(p=>({name:'T'+p, color:PLANE_COLOR[p]})));
+  plot('c_ncand', {x0:-0.5, x1:7.5, ylog:true, xfmt:v=>v>=7?'7+':String(Math.round(v)), series:[{kind:'bars', edges:[...Array(9).keys()].map(v=>v-0.5), y:S.hist_ncand, color:'#5b6470'}], ylabel:'bunches'});
+  plot('c_nh', {x0:-0.5, x1:S.hist_nhit.length-0.5, ylog:true, series:[{kind:'bars', edges:[...Array(S.hist_nhit.length+1).keys()].map(v=>v-0.5), y:S.hist_nhit, color:'#9467bd', gap:0}], ylabel:'bunches (last bin: 40+)'});
+  const tot = Math.max(1, S.bunches);
+  document.getElementById('t_status').innerHTML = '<tr><th>result</th><th>bunches</th><th>share</th><th>meaning</th></tr>' +
     STATUS_ORDER.map(n=>`<tr><td>${sw(ST_COLOR[n])}${n}</td><td>${(SC[n]||0).toLocaleString()}</td><td>${(100*(SC[n]||0)/tot).toFixed(2)} %</td><td style="text-align:left;color:var(--muted)">${ST_NOTE[n]}</td></tr>`).join('') +
-    `<tr><td>bunches</td><td>${s.bunches.toLocaleString()}</td><td></td><td style="text-align:left;color:var(--muted)">${s.hits.toLocaleString()} hits${s.unmapped?', '+fmt(s.unmapped)+' on uncabled channels':''}</td></tr>` +
-    `<tr><td>accepted tracks</td><td>${s.hist_ntrk.reduce((a,c,i)=>a+c*i,0).toLocaleString()}</td><td></td><td style="text-align:left;color:var(--muted)">lucite ${F.installed.includes('lucite')?`yes ${s.lucite.yes.toLocaleString()} · no ${s.lucite.no.toLocaleString()}`:'not cabled'}</td></tr>` +
+    `<tr><td>bunches</td><td>${S.bunches.toLocaleString()}</td><td></td><td style="text-align:left;color:var(--muted)">${S.hits.toLocaleString()} hits${S.unmapped?', '+fmt(S.unmapped)+' on uncabled channels':''}</td></tr>` +
+    `<tr><td>accepted tracks</td><td>${S.hist_ntrk.reduce((a,c,i)=>a+c*i,0).toLocaleString()}</td><td></td><td style="text-align:left;color:var(--muted)">lucite ${F.installed.includes('lucite')?`yes ${S.lucite.yes.toLocaleString()} · no ${S.lucite.no.toLocaleString()}`:'not cabled'}</td></tr>` +
     `<tr><td>decided by</td><td>${fmt(F.fast)}</td><td></td><td style="text-align:left;color:var(--muted)">fast path · ${fmt(F.reference)} by the reference finder (${F.reference_s.toFixed(1)} s CPU)${F.overflow?' · '+warn(F.overflow+' bunches over 1024 hits'):''}</td></tr>`;
-  // setup table
   const row = (k,v) => `<tr><td>${k}</td><td style="text-align:left">${v}</td></tr>`;
   document.getElementById('t_setup').innerHTML =
     row('setting', F.setting + ' (T1/T2 position; from the run, not the data)') +
@@ -197,55 +349,54 @@ async function tick(){
     row('cabling', F.cabling.startsWith('placeholder') ? warn(F.cabling) : F.cabling) +
     row('channels', F.channels.map((n,p)=>n<full[p]?warn(`T${p} ${n}/${full[p]}`):`T${p} ${n}/${full[p]}`).join(' · ')) +
     row('counters', (F.installed.length?F.installed.join(', '):'none') + (F.missing.length?' · '+warn('not cabled: '+F.missing.join(', ')):'')) +
-    row('timing', (F.timing==='no offsets'?warn('no cable offsets'):F.timing) + ` · time test ${F.nsig} σ · no bunch clock: the window is the gate`) +
-    row('bunch window', `${s.window_ns} ns gap`);
-  document.getElementById('t_boards').innerHTML = '<tr><th>board</th><th>files</th><th>MB</th><th>hits</th><th>newest (s)</th><th></th></tr>' +
-    s.boards.map(b=>`<tr><td>${sw(BOARD_COLOR[b.id%7])}Digi-${b.serial}</td><td>${b.files}</td><td>${(b.bytes/1e6).toFixed(0)}</td><td>${fmt(b.hits)}</td><td>${b.newest_s==null?'–':b.newest_s.toFixed(2)}</td><td>${b.stalled?'<span class="warn">stalled</span>':(b.newest_s==null?'no data':'')}</td></tr>`).join('');
+    row('timing', (F.timing==='no offsets'?warn('no cable offsets'):F.timing) + ` · accepted within ${F.nsig} σ · no bunch clock: the 25 ns window is the gate`) +
+    row('bunch window', `${S.window_ns} ns gap`);
 }
-// ---------------------------------------------------------------- card layout
-const LAYOUT_KEY = 'fsudaq-dashboard-layout';
+
+// ---------------------------------------------------------------- card layout (per tab)
+const LAYOUT_KEY = 'fsudaq-dashboard-layout-2';
 const WIDTHS = ['', 'w2', 'wfull'], HEIGHTS = ['', 'tall1', 'tall2'];
-const grid = document.getElementById('grid');
-const cards = [...grid.querySelectorAll('.card')];
-const defaultOrder = cards.map(c => c.dataset.id = c.querySelector('canvas,table').id);
-function loadLayout(){ try { return JSON.parse(localStorage.getItem(LAYOUT_KEY)) || {}; } catch(e){ return {}; } }
+const grids = [...document.querySelectorAll('.grid')];
+const cards = grids.flatMap(gr => [...gr.querySelectorAll('.card')]);
+cards.forEach(c => { c.dataset.id = c.querySelector('canvas,table').id; c.dataset.grid = c.parentElement.dataset.grid; });
+const defaults = Object.fromEntries(cards.map(c => [c.dataset.id, {w: Math.max(0, WIDTHS.findIndex(x=>x && c.classList.contains(x)))}]));
+const defaultOrder = Object.fromEntries(grids.map(gr => [gr.dataset.grid, [...gr.children].map(c=>c.dataset.id)]));
 function saveLayout(){
-  const L = { order:[...grid.children].map(c=>c.dataset.id), w:{}, h:{}, c:{} };
+  const L = { order:Object.fromEntries(grids.map(gr=>[gr.dataset.grid, [...gr.children].map(c=>c.dataset.id)])), w:{}, h:{}, c:{} };
   for(const c of cards){ L.w[c.dataset.id]=+c.dataset.w||0; L.h[c.dataset.id]=+c.dataset.h||0; L.c[c.dataset.id]=c.classList.contains('collapsed'); }
-  try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(L)); } catch(e){}
+  store.set(LAYOUT_KEY, L);
 }
-function setSize(c, w, h){
-  c.dataset.w = w; c.dataset.h = h;
+function setSize(c, w, h){ c.dataset.w = w; c.dataset.h = h;
   c.classList.remove(...WIDTHS.filter(Boolean), ...HEIGHTS.filter(Boolean));
-  if(WIDTHS[w]) c.classList.add(WIDTHS[w]);
-  if(HEIGHTS[h]) c.classList.add(HEIGHTS[h]);
-}
+  if(WIDTHS[w]) c.classList.add(WIDTHS[w]); if(HEIGHTS[h]) c.classList.add(HEIGHTS[h]); }
 function applyLayout(L){
   const byId = Object.fromEntries(cards.map(c=>[c.dataset.id, c]));
-  const order = (L.order||[]).filter(id=>byId[id]).concat(defaultOrder.filter(id=>!(L.order||[]).includes(id)));
-  for(const id of order) grid.appendChild(byId[id]);
-  for(const c of cards){ const id=c.dataset.id; setSize(c, (L.w||{})[id]||0, (L.h||{})[id]||0); c.classList.toggle('collapsed', !!(L.c||{})[id]); }
+  for(const gr of grids){ const want=((L.order||{})[gr.dataset.grid]||[]).filter(id=>byId[id] && byId[id].dataset.grid===gr.dataset.grid);
+    for(const id of want.concat(defaultOrder[gr.dataset.grid].filter(id=>!want.includes(id)))) gr.appendChild(byId[id]); }
+  for(const c of cards){ const id=c.dataset.id; setSize(c, (L.w||{})[id] ?? defaults[id].w, (L.h||{})[id]||0); c.classList.toggle('collapsed', !!(L.c||{})[id]); }
 }
 let dragCard = null;
 for(const c of cards){
   const h2 = c.querySelector('h2'), bar = document.createElement('div'); bar.className = 'bar';
   c.insertBefore(bar, h2); bar.appendChild(h2); h2.title = 'drag to move this card';
-  const btn = (label, title, fn) => { const b=document.createElement('button'); b.textContent=label; b.title=title; b.onclick=()=>{ fn(); saveLayout(); tick(); }; bar.appendChild(b); };
+  const btn = (label, title, fn) => { const b=document.createElement('button'); b.textContent=label; b.title=title; b.onclick=()=>{ fn(); saveLayout(); draw(); }; bar.appendChild(b); };
   btn('↔', 'width: one column, two columns, full row', ()=>setSize(c, ((+c.dataset.w||0)+1)%3, +c.dataset.h||0));
   if(c.querySelector('canvas')) btn('↕', 'height: normal, tall, taller', ()=>setSize(c, +c.dataset.w||0, ((+c.dataset.h||0)+1)%3));
   btn('–', 'collapse / expand', ()=>c.classList.toggle('collapsed'));
   h2.addEventListener('mousedown', ()=>{ c.draggable = true; });
   h2.addEventListener('mouseup', ()=>{ c.draggable = false; });
   c.addEventListener('dragstart', e=>{ dragCard=c; c.classList.add('dragging'); e.dataTransfer.effectAllowed='move'; e.dataTransfer.setData('text/plain', c.dataset.id); });
-  c.addEventListener('dragend', ()=>{ c.classList.remove('dragging'); c.draggable=false; dragCard=null; cards.forEach(x=>x.classList.remove('drop')); saveLayout(); tick(); });
-  c.addEventListener('dragover', e=>{ if(!dragCard || dragCard===c) return; e.preventDefault(); cards.forEach(x=>x.classList.toggle('drop', x===c)); });
-  c.addEventListener('drop', e=>{ if(!dragCard || dragCard===c) return; e.preventDefault();
-    const kids=[...grid.children]; grid.insertBefore(dragCard, kids.indexOf(dragCard) < kids.indexOf(c) ? c.nextSibling : c); });
+  c.addEventListener('dragend', ()=>{ c.classList.remove('dragging'); c.draggable=false; dragCard=null; cards.forEach(x=>x.classList.remove('drop')); saveLayout(); draw(); });
+  c.addEventListener('dragover', e=>{ if(!dragCard || dragCard===c || dragCard.dataset.grid!==c.dataset.grid) return; e.preventDefault(); cards.forEach(x=>x.classList.toggle('drop', x===c)); });
+  c.addEventListener('drop', e=>{ if(!dragCard || dragCard===c || dragCard.dataset.grid!==c.dataset.grid) return; e.preventDefault();
+    const kids=[...c.parentElement.children]; c.parentElement.insertBefore(dragCard, kids.indexOf(dragCard) < kids.indexOf(c) ? c.nextSibling : c); });
 }
-document.getElementById('layout_reset').onclick = ()=>{ try { localStorage.removeItem(LAYOUT_KEY); } catch(e){} applyLayout({}); tick(); };
-applyLayout(loadLayout());
+document.getElementById('layout_reset').onclick = ()=>{ try { localStorage.removeItem(LAYOUT_KEY); } catch(e){} applyLayout({}); draw(); };
+applyLayout(store.get(LAYOUT_KEY, {}));
+window.addEventListener('resize', draw);
 
-tick(); setInterval(tick, 1000);
+showTab(location.hash==='#trk' ? 'trk' : location.hash==='#daq' ? 'daq' : tab);
+tick().then(fetchChannel); setInterval(tick, 1000); setInterval(fetchChannel, 2000);
 </script>
 </body>
 </html>

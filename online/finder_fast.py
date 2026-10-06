@@ -57,7 +57,7 @@ RMAX = 64                                     # readings per plane the fast path
 
 # histograms (shared by the kernel and the Python path, so both fill the same bins)
 P_EDGES = np.linspace(0, 1000, 101)           # MeV/c, accepted tracks
-PULL_EDGES = np.linspace(-6, 6, 61)           # (t_b - t_a - expected) / sigma
+RES_EDGES = np.linspace(-15, 15, 121)         # ns: measured minus expected flight time between planes
 DT_EDGES = np.linspace(-15, 15, 61)           # t2 - t1, ns
 R_EDGES = np.linspace(0, 4, 81)               # reading light / one track's light
 NCL = 6                                       # cluster size 1..5, 6+ in the last slot
@@ -213,7 +213,8 @@ def _fast_bunch(nb, bp, bc, bq, bt, lut, map_p, gang, sigma_t, light_p, light_q,
                 max_cands, max_combos, veto, cher, cl_size, trk, W):
     """One bunch: bp/bc/bq/bt[:nb] = plane, channel, light, time of its tracker hits.
     Fills cl_size[3, NCL] for every cluster. Returns a status index, or SLOW when the reference
-    has to decide. For an accepted single track, trk = [p, R0, R1, R2, pull01, pull12, dt12, ncand]."""
+    has to decide. For an accepted single track, trk = [p, R0, R1, R2, res01, res12, dt12, ncand] with
+    res = measured minus expected flight time between the planes, in ns."""
     # scratch (allocated once by the caller): W = (idx, cstart, cnt, ncl, nr, r_code, r_kind, r_light, r_pair, r_t, r_sg)
     idx, cstart, cnt, ncl, nr, r_code, r_kind, r_light, r_pair, r_t, r_sg = W
     # per plane: hits sorted by (channel, light, time), as the reference's sorted(hits)
@@ -350,14 +351,14 @@ def _fast_bunch(nb, bp, bc, bq, bt, lut, map_p, gang, sigma_t, light_p, light_q,
     beta = cp / math.hypot(cp, 139.57)
     d0 = (s_mm[1] - s_mm[0]) / (beta * 299.792458)
     d1 = (s_mm[2] - s_mm[1]) / (beta * 299.792458)
-    trk[4] = (r_t[1, c1] - r_t[0, c0] - d0) / math.hypot(r_sg[0, c0], r_sg[1, c1])
-    trk[5] = (r_t[2, c2] - r_t[1, c1] - d1) / math.hypot(r_sg[1, c1], r_sg[2, c2])
+    trk[4] = r_t[1, c1] - r_t[0, c0] - d0
+    trk[5] = r_t[2, c2] - r_t[1, c1] - d1
     trk[6] = r_t[2, c2] - r_t[1, c1]
     return 2                                  # unique
 
 
 @njit(cache=True, nogil=True)
-def _fill_track(trk, h_p, h_r, h_pull, h_dt):
+def _fill_track(trk, h_p, h_r, h_res, h_dt):
     b = _bin(trk[0], 0.0, 1000.0, h_p.size)
     if b >= 0:
         h_p[b] += 1
@@ -366,9 +367,9 @@ def _fill_track(trk, h_p, h_r, h_pull, h_dt):
         if b >= 0:
             h_r[p, b] += 1
     for q in range(2):
-        b = _bin(trk[4 + q], -6.0, 6.0, h_pull.shape[1])
+        b = _bin(trk[4 + q], -15.0, 15.0, h_res.shape[1])
         if b >= 0:
-            h_pull[q, b] += 1
+            h_res[q, b] += 1
     b = _bin(trk[6], -15.0, 15.0, h_dt.size)
     if b >= 0:
         h_dt[b] += 1
@@ -378,7 +379,7 @@ def _fill_track(trk, h_p, h_r, h_pull, h_dt):
 def _bunch_kernel(ts, board, chan, energy, order, plane_of, ch_of, counter_of, gain, toff, installed, calibrated,
                   threshold, window, t0, t1,
                   lut, map_p, gang, sigma_t, light_p, light_q, s_mm, rule, k, has_nsig, nsig, max_cands, max_combos,
-                  occ, h_nhit, h_status, h_p, h_r, h_pull, h_dt, h_cl, h_ncand, h_ntrk, h_lucite, n_fast,
+                  occ, h_nhit, h_status, h_p, h_r, h_res, h_dt, h_cl, h_ncand, h_ntrk, h_lucite, n_fast,
                   sl_start, sl_plane, sl_ch, sl_q, sl_t, sl_aux):
     """Build bunches from the time-ordered hits and decide each one as it closes. Bunches whose
     first hit is in [t0, t1) are kept. Slow bunches are written to the sl_* arrays (CSR);
@@ -440,7 +441,7 @@ def _bunch_kernel(ts, board, chan, energy, order, plane_of, ch_of, counter_of, g
                             h_ncand[min(int(trk[7]), h_ncand.size - 1)] += 1
                         if st == 2:
                             h_ntrk[1] += 1
-                            _fill_track(trk, h_p, h_r, h_pull, h_dt)
+                            _fill_track(trk, h_p, h_r, h_res, h_dt)
                             if installed[2]:
                                 h_lucite[0 if (aux & 4) != 0 else 1] += 1
             if j == n:
@@ -482,7 +483,7 @@ class Result:
         self.h_status = np.zeros(len(STATUS), np.int64)
         self.h_p = np.zeros(P_EDGES.size - 1, np.int64)
         self.h_r = np.zeros((3, R_EDGES.size - 1), np.int64)
-        self.h_pull = np.zeros((2, PULL_EDGES.size - 1), np.int64)
+        self.h_res = np.zeros((2, RES_EDGES.size - 1), np.int64)
         self.h_dt = np.zeros(DT_EDGES.size - 1, np.int64)
         self.h_cl = np.zeros((3, NCL), np.int64)
         self.h_ncand = np.zeros(NCAND, np.int64)
@@ -492,7 +493,7 @@ class Result:
         self.n_bunches = 0; self.n_hits = 0; self.n_bad = 0; self.n_slow = 0; self.n_over = 0
         self.slow_s = 0.0
 
-    ARRAYS = ("occ", "h_nhit", "h_status", "h_p", "h_r", "h_pull", "h_dt", "h_cl", "h_ncand", "h_ntrk",
+    ARRAYS = ("occ", "h_nhit", "h_status", "h_p", "h_r", "h_res", "h_dt", "h_cl", "h_ncand", "h_ntrk",
               "h_lucite", "n_fast")
     SCALARS = ("n_bunches", "n_hits", "n_bad", "n_slow", "n_over", "slow_s")
 
@@ -510,19 +511,12 @@ class Result:
 
 
 def _track_from_reference(T, tables, hits, cand):
-    """[p, R0, R1, R2, pull01, pull12, dt12] of a reference candidate, with the kernel's definitions."""
-    cls = [of.clusters(hits.get(i, [])) for i in range(3)]
+    """[p, R0, R1, R2, res01, res12, dt12] of a reference candidate, with the kernel's definitions."""
     p = cand["p"]
     d = of.dt_expected(T, p)
     t = [r["t"] for r in cand["readings"]]
-    sg = []
-    for i, x in enumerate(cand["readings"]):
-        g = max(T["gang"][i][cls[i][x["ic"]]["chans"][j]] for j in x["pos"])
-        sg.append(T["sigma_t"][g] / math.sqrt(len(x["pos"])))
     return np.asarray([p, cand["R"][0], cand["R"][1], cand["R"][2],
-                       (t[1] - t[0] - d[0]) / math.hypot(sg[0], sg[1]),
-                       (t[2] - t[1] - d[1]) / math.hypot(sg[1], sg[2]),
-                       t[2] - t[1], 0.0], np.float64)
+                       t[1] - t[0] - d[0], t[2] - t[1] - d[1], t[2] - t[1], 0.0], np.float64)
 
 
 def decide_slow(tables, chans, res, sl_start, sl_plane, sl_ch, sl_q, sl_t, sl_aux, n_slow):
@@ -547,7 +541,7 @@ def decide_slow(tables, chans, res, sl_start, sl_plane, sl_ch, sl_q, sl_t, sl_au
         if r["tracks"]:
             res.h_ntrk[min(len(r["tracks"]), NTRK - 1)] += 1
             for c in r["tracks"]:
-                _fill_track(_track_from_reference(T, tables, hits, c), res.h_p, res.h_r, res.h_pull, res.h_dt)
+                _fill_track(_track_from_reference(T, tables, hits, c), res.h_p, res.h_r, res.h_res, res.h_dt)
             if luc is not None:
                 res.h_lucite[0 if luc else 1] += 1
     res.slow_s += _time.perf_counter() - t_start
@@ -573,7 +567,7 @@ def process_sorted(tables, chans, ts, board, chan, energy, order, window_ps, t0=
                             np.ascontiguousarray(order, np.int64), chans.plane, chans.ch, chans.counter,
                             chans.gain, chans.toff, chans.installed, tables.calibrated, tables.threshold,
                             np.int64(window_ps), np.int64(t0), np.int64(t1), *tables.kernel_args(),
-                            r0.occ, r0.h_nhit, r0.h_status, r0.h_p, r0.h_r, r0.h_pull, r0.h_dt, r0.h_cl,
+                            r0.occ, r0.h_nhit, r0.h_status, r0.h_p, r0.h_r, r0.h_res, r0.h_dt, r0.h_cl,
                             r0.h_ncand, r0.h_ntrk, r0.h_lucite, r0.n_fast,
                             sl_start, sl_plane, sl_ch, sl_q, sl_t, sl_aux)
         n_b, n_hits, n_bad, n_slow, n_sh, n_over, full = out
@@ -763,12 +757,12 @@ def selftest_stream(n=50000, seed=2):
             if r["tracks"]:
                 ref.h_ntrk[min(len(r["tracks"]), NTRK - 1)] += 1
                 for c in r["tracks"]:
-                    _fill_track(_track_from_reference(T, tb, hits, c), ref.h_p, ref.h_r, ref.h_pull, ref.h_dt)
+                    _fill_track(_track_from_reference(T, tb, hits, c), ref.h_p, ref.h_r, ref.h_res, ref.h_dt)
                 ref.h_lucite[0 if aux & 4 else 1] += 1
             for i in range(3):
                 for cc in of.clusters(hits[i]):
                     ref.h_cl[i, min(len(cc["chans"]), NCL) - 1] += 1
-        diffs = [a for a in ("occ", "h_nhit", "h_status", "h_p", "h_r", "h_pull", "h_dt", "h_cl", "h_ncand", "h_ntrk",
+        diffs = [a for a in ("occ", "h_nhit", "h_status", "h_p", "h_r", "h_res", "h_dt", "h_cl", "h_ncand", "h_ntrk",
                              "h_lucite") if not np.array_equal(getattr(res, a), getattr(ref, a))]
         ok = not diffs and res.n_bunches == len(bounds) - 1
         ok_all &= ok
