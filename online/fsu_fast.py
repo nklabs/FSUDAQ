@@ -100,9 +100,9 @@ FINE_DIV = 1024
 
 
 @njit(cache=True, nogil=True)
-def _decode_kernel(w, ev_start, nev, couple, wpe, has_extra, t_lo, t_hi, ts_out, ch_out, e_out):
+def _decode_kernel(w, ev_start, nev, couple, wpe, has_extra, t_lo, t_hi, ts_out, ch_out, e_out, s_out):
     """Linear pass over couple aggregates: only what the pipeline needs (time, channel,
-    long charge), keeping hits with t_lo <= ts < t_hi. Returns the number kept."""
+    long and short charge), keeping hits with t_lo <= ts < t_hi. Returns the number kept."""
     k = 0
     for a in range(ev_start.size):
         p = ev_start[a]; step = wpe[a]; c2 = couple[a] * 2; hx = has_extra[a]
@@ -120,13 +120,15 @@ def _decode_kernel(w, ev_start, nev, couple, wpe, has_extra, t_lo, t_hi, ts_out,
                 ts_out[k] = ts
                 ch_out[k] = c2 + (ttt_w >> 31)
                 e_out[k] = chg_w >> 16
+                s_out[k] = chg_w & 0x7FFF
                 k += 1
             p += step
     return k
 
 
-def decode_range(words: np.ndarray, ix, t_lo=None, t_hi=None):
-    """Hits of an indexed file with t_lo <= ts < t_hi as (ts_ps int64, ch uint8, qlong uint16)."""
+def decode_range(words: np.ndarray, ix, t_lo=None, t_hi=None, short=False):
+    """Hits of an indexed file with t_lo <= ts < t_hi as (ts_ps int64, ch uint8, qlong uint16),
+    and qshort uint16 (15 bits) as a fourth array with short=True."""
     w = np.ascontiguousarray(words, dtype=np.uint32)
     if t_lo is None:
         t_lo = np.int64(-1) << 62
@@ -134,9 +136,10 @@ def decode_range(words: np.ndarray, ix, t_lo=None, t_hi=None):
         t_hi = np.int64(1) << 62
     tot = int(ix.nev.sum())
     ts = np.empty(tot, np.int64); ch = np.empty(tot, np.uint8); e = np.empty(tot, np.uint16)
+    qs = np.empty(tot, np.uint16)
     k = _decode_kernel(w, ix.ev_start, ix.nev, ix.couple, ix.wpe, ix.has_extra,
-                       np.int64(t_lo), np.int64(t_hi), ts, ch, e)
-    return ts[:k], ch[:k], e[:k]
+                       np.int64(t_lo), np.int64(t_hi), ts, ch, e, qs)
+    return (ts[:k], ch[:k], e[:k], qs[:k]) if short else (ts[:k], ch[:k], e[:k])
 
 
 # ------------------------------------------------------------------ event builder
@@ -499,6 +502,7 @@ def _check_file(path):
     n = len(ts)
     assert n == len(d["ch"]), (n, len(d["ch"]))
     assert np.array_equal(ts, d["ts_ps"]) and np.array_equal(ch, d["ch"]) and np.array_equal(e, d["qlong"])
+    assert np.array_equal(decode_range(w, ix2, short=True)[3], d["qshort"])
     lo, hi = int(ts[n // 3]), int(ts[2 * n // 3])
     ts2, ch2, e2 = decode_range(w, ix2, lo, hi)
     m = (d["ts_ps"] >= lo) & (d["ts_ps"] < hi)

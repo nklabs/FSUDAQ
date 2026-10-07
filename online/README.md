@@ -15,6 +15,11 @@ the two bunch by bunch and must report no difference:
     python finder_fast.py --selftest 50000      # per bunch: status, candidates, p, R, pulls
     python finder_fast.py --selftest-stream     # whole kernel: bunching, cabling, histograms
 
+The **DAQ channels** tab needs no cabling: hits per channel, rate over time, and for the
+picked channel the pulse height (full 16-bit Qlong kept per count; linear or log axis, drag to
+zoom), a PSD map ((Qlong − Qshort)/Qlong against Qlong), time since the previous hit, time
+to a reference channel and a rate spectrum; plus every channel's pulse height side by side.
+
 What the finder needs that is not in the data yet (the dashboard says which are placeholders):
 `--cabling` (serial, channel -> plane and amplifier, or veto / cherenkov / lucite; default a
 sequential placeholder), `--gains` (MeVee per count; without it the light tests are off:

@@ -40,9 +40,15 @@
   /* cards: drag by the title, widen, heighten, collapse; the layout is kept in this browser */
   .bar { display:flex; align-items:center; gap:4px; margin:0 0 4px; }
   .bar h2 { flex:1; margin:0; cursor:grab; user-select:none; }
-  .bar button, h1 button, .toolbar button { font:11px/18px system-ui, sans-serif; padding:0 6px; border:1px solid var(--line);
+  .ctl input[type=number] { width:64px; font:12px system-ui, sans-serif; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:4px; padding:0 3px; }
+  #c_q, #c_psd { cursor:crosshair; }
+  #c_grid { height:430px; cursor:pointer; }
+  .card.tall1 #c_grid { height:620px; }
+  .card.tall2 #c_grid { height:840px; }
+  .zoomsel { position:fixed; pointer-events:none; background:color-mix(in srgb, var(--muted) 20%, transparent); border:1px solid var(--muted); z-index:5; }
+  .bar button, h1 button, .toolbar button, .ctl button { font:11px/18px system-ui, sans-serif; padding:0 6px; border:1px solid var(--line);
                            background:transparent; color:var(--muted); border-radius:4px; cursor:pointer; }
-  .bar button:hover, h1 button:hover, .toolbar button:hover { color:var(--fg); border-color:var(--muted); }
+  .bar button:hover, h1 button:hover, .toolbar button:hover, .ctl button:hover { color:var(--fg); border-color:var(--muted); }
   .card.w2 { grid-column:span 2; }
   .card.wfull { grid-column:1 / -1; }
   .card.tall1 canvas { height:330px; }
@@ -82,7 +88,17 @@
       <canvas id="c_chan"></canvas><div class="legend" id="leg_chan"></div></div>
     <div class="card"><h2>Total hit rate, all channels and per board (Hz)</h2><canvas id="c_total"></canvas><div class="legend" id="leg_total"></div></div>
     <div class="card"><h2>Pulse height (Qlong) · <b class="chname">–</b></h2>
-      <div class="ctl"><label><input type="checkbox" id="q_log" checked> log scale</label></div><canvas id="c_q"></canvas><div class="note" id="note_q"></div></div>
+      <div class="ctl"><label>x <select id="q_x"><option value="lin">linear</option><option value="log">log</option></select></label>
+        <label>bins <select id="q_nb"></select></label><label><input type="checkbox" id="q_log" checked> log y</label>
+        <span>Q <input type="number" id="q_lo" min="0" max="65535"> – <input type="number" id="q_hi" min="1" max="65536"></span>
+        <button id="q_full" title="Show the full 16-bit range (or double-click the plot)">full range</button></div>
+      <canvas id="c_q"></canvas><div class="note" id="note_q"></div></div>
+    <div class="card"><h2>Pulse shape: (Qlong − Qshort) ÷ Qlong against Qlong · <b class="chname">–</b></h2>
+      <canvas id="c_psd"></canvas><div class="note" id="note_psd"></div></div>
+    <div class="card wfull"><h2>Pulse height on every channel</h2>
+      <div class="ctl"><label><input type="checkbox" id="grid_log" checked> log y</label>
+        <span id="grid_note"></span></div>
+      <canvas id="c_grid"></canvas></div>
     <div class="card"><h2>Time since the previous hit on the same channel · <b class="chname">–</b></h2>
       <canvas id="c_iat"></canvas><div class="note">The cut at short times is the trigger hold-off; a pulser shows as a peak at its period.</div></div>
     <div class="card"><h2>Time to hits on the reference channel (t − t<sub>ref</sub>, ns) · <b class="chname">–</b></h2>
@@ -140,7 +156,7 @@ function message(id, text){ const {g,w,h}=setupCanvas(id); g.fillStyle=css('--mu
 function plot(id, spec){
   const {g,w,h}=setupCanvas(id); const L=50,B=24,T=8,R=10;
   const ys = spec.series.flatMap(s=>s.y).filter(v=>isFinite(v) && (spec.ylog ? v>0 : true));
-  if(!ys.length || (!spec.ylog && !ys.some(v=>v>0))){ message(id, spec.empty || 'no entries yet'); return null; }
+  if(!ys.length || (!spec.ylog && !ys.some(v=>v>0))){ message(id, spec.empty || 'no entries yet'); PLOTS[id]=null; return null; }
   let y0, y1;
   if(spec.ylog){ y1 = Math.pow(10, Math.ceil(Math.log10(Math.max(...ys))+1e-9)); y0 = Math.pow(10, Math.floor(Math.log10(Math.min(...ys)))); if(y1<=y0) y1=y0*10; }
   else { y0 = Math.min(0, ...ys); y1 = Math.max(...ys)*1.08; }
@@ -156,6 +172,7 @@ function plot(id, spec){
     g.textAlign='center'; g.fillStyle=css('--muted'); for(const v of xt) g.fillText((spec.xfmt||sinum)(v), X(v), h-7); }
   g.strokeStyle=css('--line'); g.beginPath(); g.moveTo(L,T); g.lineTo(L,h-B); g.lineTo(w-R,h-B); g.stroke();
   const base = Y(spec.ylog ? y0 : 0);
+  g.save(); g.beginPath(); g.rect(L, T-1, w-L-R, h-B-T+1); g.clip();
   for(const s of spec.series){
     g.fillStyle=s.color; g.strokeStyle=s.color;
     if(s.kind==='bars'){ for(let i=0;i<s.y.length;i++){ const v=s.y[i]; if(!(v>0) && spec.ylog) continue; if(v===0) continue;
@@ -167,9 +184,34 @@ function plot(id, spec){
     else { g.lineWidth=s.width||1.6; g.beginPath(); let started=false;
       for(let i=0;i<s.x.length;i++){ const v=s.y[i]; if(!isFinite(v) || (spec.ylog && !(v>0))){ started=false; continue; }
         if(!started){ g.moveTo(X(s.x[i]),Y(v)); started=true; } else g.lineTo(X(s.x[i]),Y(v)); } g.stroke(); } }
+  g.restore();
   for(const m of (spec.marks||[])){ g.strokeStyle=m.color||css('--muted'); g.setLineDash([4,3]); g.lineWidth=1; g.beginPath(); g.moveTo(X(m.x),T); g.lineTo(X(m.x),h-B); g.stroke(); g.setLineDash([]); }
   if(spec.ylabel){ g.fillStyle=css('--muted'); g.textAlign='left'; g.fillText(spec.ylabel, L+4, T+10); }
-  return {X, Y, L, B, T, R, w, h};
+  return (PLOTS[id] = {X, Y, L, B, T, R, w, h, inv:invX(x0, x1, spec.xlog, L, w-R)});
+}
+const PLOTS = {};
+function invX(x0, x1, xlog, pa, pb){ return px => { const f=Math.min(1, Math.max(0, (px-pa)/(pb-pa)));
+  return xlog ? Math.pow(10, Math.log10(x0) + f*(Math.log10(x1)-Math.log10(x0))) : x0 + f*(x1-x0); }; }
+// 2-D histogram: spec {x0, x1, xlog, xedges, ny (y bins over 0..1), counts[ix][iy], color, xfmt}; shade = log of the count
+function plot2d(id, spec){
+  const {g,w,h}=setupCanvas(id); const L=50,B=24,T=8,R=10;
+  let mx=0; for(const col of spec.counts) for(const v of col) if(v>mx) mx=v;
+  if(!mx){ message(id, spec.empty || 'no entries yet'); PLOTS[id]=null; return null; }
+  const x0=spec.x0, x1=spec.x1, tx = spec.xlog ? (v=>Math.log10(v)) : (v=>v);
+  const X = v => L + (tx(v)-tx(x0))/(tx(x1)-tx(x0)) * (w-L-R), Y = v => h-B - v*(h-B-T);
+  g.font='10px system-ui'; g.lineWidth=1;
+  for(const v of [0,0.2,0.4,0.6,0.8,1]){ g.strokeStyle=css('--line'); g.globalAlpha=.6; g.beginPath(); g.moveTo(L,Y(v)); g.lineTo(w-R,Y(v)); g.stroke(); g.globalAlpha=1;
+    g.fillStyle=css('--muted'); g.textAlign='right'; g.fillText(String(v), L-4, Y(v)+3); }
+  const xt = spec.xlog ? logTicks(x0,x1) : niceTicks(x0,x1,6);
+  g.textAlign='center'; for(const v of xt) g.fillText((spec.xfmt||sinum)(v), X(v), h-7);
+  g.strokeStyle=css('--line'); g.beginPath(); g.moveTo(L,T); g.lineTo(L,h-B); g.lineTo(w-R,h-B); g.stroke();
+  g.save(); g.beginPath(); g.rect(L, T, w-L-R, h-B-T); g.clip(); g.fillStyle=spec.color;
+  const lm = Math.log(1+mx), dy = 1/spec.ny;
+  spec.counts.forEach((col,i)=>{ const xa=X(Math.max(spec.xedges[i], spec.xlog ? x0 : -Infinity)), xb=X(spec.xedges[i+1]);
+    col.forEach((v,j)=>{ if(!v) return; g.globalAlpha = 0.12 + 0.88*Math.log(1+v)/lm;
+      g.fillRect(xa, Y((j+1)*dy), Math.max(1, xb-xa), Math.max(1, Y(j*dy)-Y((j+1)*dy))); }); });
+  g.restore(); g.globalAlpha=1;
+  return (PLOTS[id] = {X, Y, L, B, T, R, w, h, max:mx, inv:invX(x0, x1, spec.xlog, L, w-R)});
 }
 function legend(id, items){ document.getElementById(id).innerHTML = items.map(it=>`<span><i style="background:${it.color}"></i>${it.name}</span>`).join(''); }
 const sw = c => `<i style="display:inline-block;width:9px;height:9px;background:${c};margin-right:5px"></i>`;
@@ -178,7 +220,39 @@ const store = { get(k,d){ try { const v=localStorage.getItem(k); return v===null
                 set(k,v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} } };
 
 // ---------------------------------------------------------------- state
-let S = null, CH = null, SPEC_ALL = null;
+let S = null, CH = null, SPEC_ALL = null, GRID = null;
+// the Qlong range and binning the spectrum, the PSD map and the grid show: [lo, hi), kept in this browser
+const NB = {lin:[256, 1024, 4096, 16384], log:[100, 300, 1000]}, NB_DEF = {lin:4096, log:300};
+let VIEW = Object.assign({lo:0, hi:65536, log:false, nb:4096}, store.get('fsudaq-qview', {}));
+function viewQuery(nb){ return `lo=${VIEW.lo}&hi=${VIEW.hi}&nb=${nb||VIEW.nb}&log=${VIEW.log?1:0}`; }
+function setView(v){ Object.assign(VIEW, v);
+  if(VIEW.log) VIEW.lo = Math.max(1, VIEW.lo);
+  VIEW.lo = Math.max(0, Math.min(65535, Math.round(VIEW.lo))); VIEW.hi = Math.max(VIEW.lo+1, Math.min(65536, Math.round(VIEW.hi)));
+  if(!NB[VIEW.log?'log':'lin'].includes(VIEW.nb)) VIEW.nb = NB_DEF[VIEW.log?'log':'lin'];
+  store.set('fsudaq-qview', VIEW); viewControls(); fetchChannel(); }
+function viewControls(){
+  document.getElementById('q_x').value = VIEW.log ? 'log' : 'lin';
+  document.getElementById('q_nb').innerHTML = NB[VIEW.log?'log':'lin'].map(n=>`<option value="${n}">${n}</option>`).join('');
+  document.getElementById('q_nb').value = VIEW.nb;
+  document.getElementById('q_lo').value = VIEW.lo; document.getElementById('q_hi').value = VIEW.hi;
+}
+document.getElementById('q_x').onchange = e=>setView({log:e.target.value==='log'});
+document.getElementById('q_nb').onchange = e=>setView({nb:+e.target.value});
+document.getElementById('q_lo').onchange = e=>setView({lo:+e.target.value});
+document.getElementById('q_hi').onchange = e=>setView({hi:+e.target.value});
+document.getElementById('q_full').onclick = ()=>setView({lo:0, hi:65536});
+// drag across the spectrum or the PSD map to zoom in on Qlong; double-click for the full range
+const zsel = document.createElement('div'); zsel.className='zoomsel'; zsel.hidden=true; document.body.appendChild(zsel);
+let zdrag = null;
+for(const id of ['c_q','c_psd']){ const c=document.getElementById(id);
+  c.addEventListener('mousedown', ev=>{ const A=PLOTS[id]; if(!A || ev.button!==0) return; ev.preventDefault();
+    const r=c.getBoundingClientRect(); zdrag={id, A, r, x:Math.min(Math.max(ev.clientX, r.left+A.L), r.left+A.w-A.R)}; });
+  c.addEventListener('dblclick', ()=>setView({lo:0, hi:65536})); }
+window.addEventListener('mousemove', ev=>{ if(!zdrag) return; const {A, r}=zdrag; const x=Math.min(Math.max(ev.clientX, r.left+A.L), r.left+A.w-A.R);
+  Object.assign(zsel.style, {left:Math.min(x, zdrag.x)+'px', width:Math.abs(x-zdrag.x)+'px', top:(r.top+A.T)+'px', height:(A.h-A.B-A.T)+'px'}); zsel.hidden=false; });
+window.addEventListener('mouseup', ev=>{ if(!zdrag) return; const {A, r}=zdrag; zsel.hidden=true;
+  const x=Math.min(Math.max(ev.clientX, r.left+A.L), r.left+A.w-A.R), a=Math.min(x, zdrag.x), b=Math.max(x, zdrag.x); zdrag=null;
+  if(b-a>4) setView({lo:Math.floor(A.inv(a-r.left)), hi:Math.ceil(A.inv(b-r.left))}); });
 let selSlot = store.get('fsudaq-sel-slot', null), tab = store.get('fsudaq-tab', 'daq');
 const slotName = s => s ? `Digi-${s.board} ch${s.ch}${s.role?' ('+s.role+')':''}` : '–';
 function boardIndex(serial){ return S ? S.boards.findIndex(b=>b.serial===serial) : 0; }
@@ -198,7 +272,7 @@ function fillSelects(){
 document.getElementById('sel_ch').onchange = e=>{ selSlot=+e.target.value; store.set('fsudaq-sel-slot', selSlot); fetchChannel(); };
 document.getElementById('sel_ref').onchange = async e=>{ await fetch('/set?ref='+e.target.value); await tick(); fetchChannel(); };
 document.getElementById('btn_clear').onclick = async ()=>{ await fetch('/clear'); document.getElementById('clear_note').textContent='cleared at '+new Date().toLocaleTimeString(); await tick(); fetchChannel(); };
-['occ_mode','occ_log','q_log','dt_log','spec_which'].forEach(id=>document.getElementById(id).onchange=()=>{ if(id==='spec_which') fetchChannel(); else draw(); });
+['occ_mode','occ_log','q_log','dt_log','spec_which','grid_log'].forEach(id=>document.getElementById(id).onchange=()=>{ if(id==='spec_which') fetchChannel(); else draw(); });
 
 async function tick(){
   try { S = await (await fetch('/state')).json(); } catch(e){ document.getElementById('status').textContent='no connection to the analysis'; return; }
@@ -206,8 +280,10 @@ async function tick(){
 }
 async function fetchChannel(){
   if(selSlot===null) return;
-  try { CH = await (await fetch('/channel?slot='+selSlot)).json();
-        if(document.getElementById('spec_which').value==='all') SPEC_ALL = await (await fetch('/channel?slot=-1')).json(); } catch(e){ return; }
+  try { CH = await (await fetch(`/channel?slot=${selSlot}&${viewQuery()}`)).json();
+        if(document.getElementById('spec_which').value==='all') SPEC_ALL = await (await fetch('/channel?slot=-1')).json();
+        const gc = document.getElementById('c_grid').closest('.card');
+        if(tab==='daq' && !gc.classList.contains('collapsed')) GRID = await (await fetch('/grid?'+viewQuery(64))).json(); } catch(e){ return; }
   draw();
 }
 
@@ -254,20 +330,29 @@ function drawDaq(){
     ser.push({kind:'line', x:s.x, y:s.y, color:BOARD_COLOR[i%BOARD_COLOR.length]}); });
   if(tot.x.length>1) plot('c_total', {x0:tot.x[0], x1:tot.x[tot.x.length-1], xfmt:v=>sinum(v)+' s', series:ser, ylabel:'Hz'}); else message('c_total','no data yet');
   legend('leg_total', [{name:'all channels', color:css('--fg')}].concat(S.boards.map((b,i)=>({name:'Digi-'+b.serial, color:BOARD_COLOR[i%BOARD_COLOR.length]}))));
-  if(!CH || CH.slot!==selSlot){ ['c_q','c_iat','c_dt','c_crate'].forEach(id=>message(id,'loading…')); }
+  drawGrid();
+  if(!CH || CH.slot!==selSlot){ ['c_q','c_psd','c_iat','c_dt','c_crate'].forEach(id=>{ message(id,'loading…'); PLOTS[id]=null; }); }
   else {
-    // Qlong over the full 16-bit range on a log axis; per count, since the bins widen with Q
-    const qe = CH.q.edges, qd = CH.q.counts.map((c,i)=>c/(qe[i+1]-qe[i]));
-    plot('c_q', {x0:1, x1:65535, xlog:true, ylog:document.getElementById('q_log').checked, series:[{kind:'bars', edges:qe, y:qd, color:'#1f77b4', gap:0}],
-                 empty:'no hits between Q = 1 and 65534 yet', ylabel:'hits per Qlong count'});
-    const qn = CH.q.zero + CH.q.sat + CH.q.counts.reduce((a,b)=>a+b,0);
-    document.getElementById('note_q').textContent = qn ? `Not on the axis: Q = 0 in ${(100*CH.q.zero/qn).toFixed(1)} % of hits, Q = 65535 (saturated, or a negative integral) in ${(100*CH.q.sat/qn).toFixed(1)} %.` : '';
+    // Qlong over the range picked above; on the log axis per count, since the bins widen with Q
+    const q=CH.q, qe=q.edges, bw=qe[1]-qe[0];
+    const qy = q.log ? q.counts.map((c,i)=>c/(qe[i+1]-qe[i])) : q.counts;
+    plot('c_q', {x0:VIEW.lo, x1:VIEW.hi, xlog:q.log, ylog:document.getElementById('q_log').checked, series:[{kind:'bars', edges:qe, y:qy, color:'#1f77b4', gap:0}],
+                 empty:'no hits in this range yet', ylabel: q.log ? 'hits per Qlong count' : `hits per ${bw===1?'count':bw+' counts'}`});
+    const pc = n => q.total ? (100*n/q.total).toFixed(1)+' %' : '–';
+    document.getElementById('note_q').textContent = q.total ? `Not shown: Q = 0 ${pc(q.zero)}, Q = 65535 (saturated, or a negative integral) ${pc(q.sat)}` +
+      (q.outside ? `, outside Q ${VIEW.lo}–${VIEW.hi} ${pc(q.outside)}` : '') + '. Drag across the plot to zoom in; double-click for the full range.' : '';
+    // PSD map over the same Qlong range
+    const P=CH.psd, A2 = plot2d('c_psd', {x0:VIEW.lo, x1:VIEW.hi, xlog:q.log, xedges:P.xedges, ny:P.ny, counts:P.counts, color:'#1f77b4',
+                                         empty:'no hits in this range yet'});
+    const pn = P.n + P.out;
+    document.getElementById('note_psd').textContent = `Shade: hits per cell, log scale${A2?` (darkest ${sinum(A2.max)})`:''}. Qlong bins ${(100*(P.xedges[P.xedges.length-1]/P.xedges[P.xedges.length-2]-1)).toFixed(1)} % wide, PSD bins 0.01. ` +
+      (pn ? `Not shown: Qshort saturated (32767) or larger than Qlong in ${(100*P.out/pn).toFixed(1)} % of hits with 0 < Q < 65535. ` : '') + 'Zooms with the pulse-height plot.';
     plot('c_iat', {x0:1, x1:1e9, xlog:true, ylog:true, xfmt:nsfmt, series:[{kind:'bars', edges:CH.iat.edges, y:CH.iat.counts, color:'#9467bd', gap:0}], empty:'no hits on this channel yet', ylabel:'hits'});
     const refName = D.ref===null ? null : slotName(D.slots.find(s=>s.slot===D.ref));
     document.getElementById('dt_ref').textContent = refName ? 'reference: '+refName : '';
     if(refName) plot('c_dt', {x0:-200, x1:200, ylog:document.getElementById('dt_log').checked, series:[{kind:'bars', edges:CH.dt.edges, y:CH.dt.counts, color:'#2a9d8f', gap:0}],
                               empty:'no pairs within ±200 ns yet', ylabel:'pairs per 0.5 ns'});
-    else message('c_dt', 'pick a timing reference channel above (the beam trigger, once there is one)');
+    else message('c_dt', 'pick a timing reference channel above');
     if(CH.rate.length>1) plot('c_crate', {x0:CH.rate[0][0], x1:CH.rate[CH.rate.length-1][0], xfmt:v=>sinum(v)+' s', series:[{kind:'line', x:CH.rate.map(r=>r[0]), y:CH.rate.map(r=>r[1]), color:'#1f77b4'}], ylabel:'Hz'});
     else message('c_crate', 'no data yet');
   }
@@ -288,6 +373,36 @@ function drawDaq(){
   document.getElementById('t_boards').innerHTML = '<tr><th>board</th><th>files</th><th>MB</th><th>newest (s)</th><th></th></tr>' +
     S.boards.map((b,i)=>`<tr><td>${sw(BOARD_COLOR[i%BOARD_COLOR.length])}Digi-${b.serial}</td><td>${b.files}</td><td>${(b.bytes/1e6).toFixed(0)}</td><td>${b.newest_s==null?'–':b.newest_s.toFixed(2)}</td><td>${b.stalled?warn('no new data'):(b.newest_s==null?'no data':'')}</td></tr>`).join('');
 }
+
+// every channel's Qlong spectrum over the shown range: one row per board, one panel per channel
+let GRID_BOXES = [];
+function drawGrid(){
+  const gc = document.getElementById('c_grid'); if(gc.closest('.card').classList.contains('collapsed')) return;
+  if(!GRID){ message('c_grid','loading…'); return; }
+  const {g,w,h}=setupCanvas('c_grid'), ylog=document.getElementById('grid_log').checked;
+  const boards = S.boards.map(b=>b.serial), L=84, T=2, ncol=16, rowH=(h-T)/Math.max(1,boards.length), cw=(w-L)/ncol;
+  const e=GRID.edges, tx = GRID.log ? (v=>Math.log10(Math.max(v,1))) : (v=>v), xa=tx(e[0]), xb=tx(e[e.length-1]);
+  GRID_BOXES = [];
+  g.font='10px system-ui';
+  boards.forEach((sn,i)=>{ const y=T+i*rowH, col=BOARD_COLOR[i%BOARD_COLOR.length];
+    g.fillStyle=col; g.fillRect(2, y+rowH/2-5, 9, 9); g.fillStyle=css('--fg'); g.textAlign='left'; g.fillText('Digi-'+sn, 15, y+rowH/2+3); });
+  for(const sl of GRID.slots){ const i=boards.indexOf(sl.board); if(i<0) continue;
+    const x=L+sl.ch*cw, y=T+i*rowH, bw=cw-4, bh=rowH-4, top=13, col=BOARD_COLOR[i%BOARD_COLOR.length];
+    GRID_BOXES.push({x, y, w:cw, h:rowH, slot:sl.slot});
+    g.strokeStyle = sl.slot===selSlot ? css('--sel') : css('--line'); g.lineWidth = sl.slot===selSlot ? 2 : 1; g.strokeRect(x+1.5, y+1.5, bw, bh);
+    const tot = sl.counts.reduce((a,b)=>a+b,0), mx = Math.max(...sl.counts);
+    g.fillStyle=css('--muted'); g.textAlign='left'; g.fillText('ch'+sl.ch, x+5, y+12); g.textAlign='right'; g.fillText(tot?sinum(tot):'', x+bw-2, y+12);
+    if(!mx) continue;
+    const py0=y+bh, ph=bh-top-2, lm=Math.log10(1+mx);
+    g.fillStyle=col; g.globalAlpha=.85; g.beginPath(); g.moveTo(x+2, py0);
+    sl.counts.forEach((c,k)=>{ const v = ylog ? Math.log10(1+c)/lm : c/mx, yy=py0-v*ph;
+      const xl=x+2+(tx(e[k])-xa)/(xb-xa)*(bw-2), xr=x+2+(tx(e[k+1])-xa)/(xb-xa)*(bw-2); g.lineTo(xl, yy); g.lineTo(xr, yy); });
+    g.lineTo(x+bw, py0); g.closePath(); g.fill(); g.globalAlpha=1; }
+  document.getElementById('grid_note').textContent = `Q ${VIEW.lo}–${VIEW.hi} (${GRID.log?'log':'linear'} x, ${e.length-1} bins), the range of the pulse-height plot · each panel scaled to its own peak · number: hits in range · click a panel to pick that channel`;
+}
+document.getElementById('c_grid').onclick = ev=>{ const r=ev.target.getBoundingClientRect(), x=ev.clientX-r.left, y=ev.clientY-r.top;
+  const b=GRID_BOXES.find(b=>x>=b.x && x<b.x+b.w && y>=b.y && y<b.y+b.h);
+  if(b){ selSlot=b.slot; store.set('fsudaq-sel-slot', selSlot); fillSelects(); draw(); fetchChannel(); } };
 
 const STATUS_ORDER = ['unique','tracks','ambiguous','multitrack','veto','electron','dropped','none','incomplete'];
 const ST_COLOR = {unique:'#2a9d8f', tracks:'#1f77b4', ambiguous:'#e9c46a', multitrack:'#9467bd', veto:'#8c564b',
@@ -372,7 +487,9 @@ function setSize(c, w, h){ c.dataset.w = w; c.dataset.h = h;
 function applyLayout(L){
   const byId = Object.fromEntries(cards.map(c=>[c.dataset.id, c]));
   for(const gr of grids){ const want=((L.order||{})[gr.dataset.grid]||[]).filter(id=>byId[id] && byId[id].dataset.grid===gr.dataset.grid);
-    for(const id of want.concat(defaultOrder[gr.dataset.grid].filter(id=>!want.includes(id)))) gr.appendChild(byId[id]); }
+    const def=defaultOrder[gr.dataset.grid];   // a card added since the layout was saved goes in after its default neighbour
+    def.forEach((id,k)=>{ if(!want.includes(id)){ const at = k ? want.indexOf(def[k-1])+1 : 0; want.splice(at, 0, id); } });
+    for(const id of want) gr.appendChild(byId[id]); }
   for(const c of cards){ const id=c.dataset.id; setSize(c, (L.w||{})[id] ?? defaults[id].w, (L.h||{})[id]||0); c.classList.toggle('collapsed', !!(L.c||{})[id]); }
 }
 let dragCard = null;
@@ -395,6 +512,7 @@ document.getElementById('layout_reset').onclick = ()=>{ try { localStorage.remov
 applyLayout(store.get(LAYOUT_KEY, {}));
 window.addEventListener('resize', draw);
 
+viewControls();
 showTab(location.hash==='#trk' ? 'trk' : location.hash==='#daq' ? 'daq' : tab);
 tick().then(fetchChannel); setInterval(tick, 1000); setInterval(fetchChannel, 2000);
 </script>

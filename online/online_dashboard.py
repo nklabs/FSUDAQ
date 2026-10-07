@@ -81,11 +81,11 @@ def _index(words):
 
 def _decode(words, ix):
     if FAST:
-        return fsu_fast.decode_range(words, ix)
+        return fsu_fast.decode_range(words, ix, short=True)
     d = fsu._decode_chunk(words, ix, 0, len(ix.nev))
     if d is None:
-        return np.zeros(0, np.int64), np.zeros(0, np.uint8), np.zeros(0, np.uint16)
-    return d["ts_ps"].astype(np.int64), d["ch"], d["qlong"]
+        return np.zeros(0, np.int64), np.zeros(0, np.uint8), np.zeros(0, np.uint16), np.zeros(0, np.uint16)
+    return d["ts_ps"].astype(np.int64), d["ch"], d["qlong"], d["qshort"]
 
 
 # ---------------------------------------------------------------- slice processing (in a worker)
@@ -106,10 +106,10 @@ def _decode_file_range(path, t_lo, t_hi):
     if len(ix.nev) == 0:
         return None
     if FAST:
-        return fsu_fast.decode_range(words, ix, t_lo, t_hi)
-    ts, ch, e = _decode(words, ix)
+        return fsu_fast.decode_range(words, ix, t_lo, t_hi, short=True)
+    ts, ch, e, qs = _decode(words, ix)
     m = (ts >= t_lo) & (ts < t_hi)
-    return ts[m], ch[m], e[m]
+    return ts[m], ch[m], e[m], qs[m]
 
 
 def process_slice(task: dict) -> dict:
@@ -128,20 +128,21 @@ def process_slice(task: dict) -> dict:
                 continue
             if r is None or r[0].size == 0:
                 continue
-            ts, ch, e = r
-            parts.append((ts, ch, e, np.full(ts.size, bid, np.int16)))
+            ts, ch, e, qs = r
+            parts.append((ts, ch, e, np.full(ts.size, bid, np.int16), qs))
             hits_by_board[bid] = hits_by_board.get(bid, 0) + int(np.count_nonzero((ts >= t0) & (ts < t1)))
     ref = task.get("ref")
     if parts:
         ts = np.concatenate([p[0] for p in parts]); ch = np.concatenate([p[1] for p in parts])
         e = np.concatenate([p[2] for p in parts]); bd = np.concatenate([p[3] for p in parts])
+        qs = np.concatenate([p[4] for p in parts])
         order = np.argsort(ts)
         res = ff.process_sorted(tables, chans, ts, bd, ch, e, order, window_ps, t0, t1)
         slot = bd.astype(np.int64) * chans.board_channels + ch.astype(np.int64)
-        daq = dh.process(ts, slot, e, order, t0, t1, ref, chans.n_slots)
+        daq = dh.process(ts, slot, e, qs, order, t0, t1, ref, chans.n_slots)
     else:
         res = ff.Result(chans.n_slots)
-        daq = dh.DaqResult(chans.n_slots)
+        daq = dh.DaqResult(chans.n_slots, np.uint32)
     out = res.to_dict()
     out.update(W=t1, hits_by_board=hits_by_board, daq=daq.to_dict(), ref=ref, dt=time.perf_counter() - t_start)
     return out
@@ -467,8 +468,9 @@ class Online:
             run_bytes=run_bytes, files=files, disk=disk, n_windows=D.n_seg,
             history=[dict(beam_s=h[1], total=int(sum(int(h[7][sl]) for sl in self.slots))) for h in hist])
 
-    def channel(self, sl):
-        """One channel's histograms for the DAQ tab (sl = -1: all channels together, spectrum only)."""
+    def channel(self, sl, view=None):
+        """One channel's histograms for the DAQ tab (sl = -1: all channels together, spectrum only).
+        view = (lo, hi, nb, log): the Qlong range [lo, hi) and binning the page shows."""
         with self.lock:
             D, hist = self.daq, list(self.history)
             f = 0.5 * (dh.F_EDGES[:-1] + dh.F_EDGES[1:])
@@ -483,12 +485,34 @@ class Online:
             for a, b in zip(hist[:-1], hist[1:]):
                 if b[1] > a[1]:
                     rates.append([b[1], float(b[7][sl]) / (b[1] - a[1])])
+            lo, hi, nb, log = view or (0, 65536, 4096, False)
+            e = dh.q_edges(lo, hi, nb, log)
+            row = D.q[sl]
+            tot = int(row.sum())
+            inside = dh.rebin(row, np.array([0, 65536]))[0]          # all but Q = 0 and 65535
+            shown = dh.rebin(row, e)
+            # PSD map: the Qlong bins that overlap the shown range
+            i0 = max(0, int(np.searchsorted(dh.PX_EDGES, e[0], side="right")) - 1)
+            i1 = min(dh.NPX, int(np.searchsorted(dh.PX_EDGES, e[-1], side="left")))
+            P = D.psd[sl, i0:i1]
             return dict(slot=sl, **self.labels[sl], count=int(D.counts[sl]), ref=self.ref_slot,
-                        q=dict(edges=dh.Q_EDGES.tolist(), zero=int(D.q[sl][0]), sat=int(D.q[sl][-1]), counts=D.q[sl][1:-1].tolist()),
+                        q=dict(edges=e.tolist(), counts=shown.tolist(), total=tot, zero=int(row[0]), sat=int(row[65535]),
+                               outside=int(inside - shown.sum()), log=bool(log)),
+                        psd=dict(xedges=dh.PX_EDGES[i0:i1 + 1].tolist(), ny=dh.NPY, counts=P.tolist(),
+                                 n=int(D.psd[sl].sum()), out=int(D.psd_out[sl])),
                         iat=dict(edges=dh.IAT_EDGES.tolist(), counts=D.iat[sl].tolist()),
                         dt=dict(edges=dh.DT_EDGES.tolist(), counts=D.dt[sl].tolist()),
                         spectrum=dict(f=f.tolist(), p=(D.spec_p[sl] / n if n else D.spec_p[sl]).tolist()),
                         windows=D.n_seg, rate=rates)
+
+    def grid(self, view):
+        """Every channel's Qlong spectrum over the shown range, coarsely binned, for the overview grid."""
+        lo, hi, nb, log = view
+        e = dh.q_edges(lo, hi, nb, log)
+        with self.lock:
+            C = dh.rebin(self.daq.q, e)[self.slots]                  # no copy of the full array
+            return dict(edges=e.tolist(), log=bool(log),
+                        slots=[dict(slot=sl, **self.labels[sl], counts=C[i].tolist()) for i, sl in enumerate(self.slots)])
 
     def clear(self):
         with self.lock:
@@ -544,10 +568,16 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/state"):
             body = json.dumps(self.online.state(), allow_nan=False).encode()   # Infinity/NaN are not JSON
             ctype = "application/json"
-        elif self.path.startswith("/channel"):
+        elif self.path.startswith("/channel") or self.path.startswith("/grid"):
             try:
-                d = self.online.channel(int(q.get("slot", ["-1"])[0]))
-            except ValueError:
+                view = None
+                if "lo" in q:
+                    view = (int(q["lo"][0]), int(q["hi"][0]), int(q.get("nb", ["4096"])[0]), q.get("log", ["0"])[0] == "1")
+                if self.path.startswith("/grid"):
+                    d = self.online.grid(view or (0, 65536, 64, False))
+                else:
+                    d = self.online.channel(int(q.get("slot", ["-1"])[0]), view)
+            except (ValueError, KeyError):
                 d = None
             if d is None:
                 self.send_response(404); self.end_headers(); return
