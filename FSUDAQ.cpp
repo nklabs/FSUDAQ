@@ -2327,6 +2327,16 @@ bool FSUDAQ::StartDashboardProcess(){
   // --exit-with-parent: if FSUDAQ dies, the dashboard leaves and frees the port for the next FSUDAQ's one
   QStringList args = QStringList() << script << "--data-path" << rawDataPath << "--port" << "8050" << "--open-browser" << "--exit-with-parent";
   if( chkSaveData->isChecked() && QDir(RunFolder()).exists() ) args << "--follow" << RunFolder(); // the current or last run; each new run is sent with GET /run
+  // The dashboard reads only the boards it is given; its default list is odin's six. Pass the
+  // open digitizers (in port order, the detector-map board order) so another setup is seen.
+  if( digi && nDigi > 0 ){
+    QStringList serials, eightCh;
+    for( unsigned int i = 0; i < nDigi; i++ ){
+      serials << QString::number(digi[i]->GetSerialNumber());
+      if( digi[i]->GetNumInputCh() == 8 ) eightCh << QString::number(digi[i]->GetSerialNumber());
+    }
+    args << "--boards" << serials.join(",") << "--eight-channel-boards" << eightCh.join(",");
+  }
   dashboardProc->start(python, args);
   if( !dashboardProc->waitForStarted(3000) ){
     LogMsg("<font style=\"color: red;\">Cannot start " + python + " " + script + ".</font>");
