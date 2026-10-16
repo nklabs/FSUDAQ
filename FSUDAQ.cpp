@@ -796,12 +796,22 @@ void FSUDAQ::OpenDigitizers(){
 
   }else{ // optical fiber
 
+    // OpenDigitizer tries USB first, with the board number as the USB link and the port
+    // ignored, so a board on USB answers at every port. Count each serial number once:
+    // opening the duplicates later fails (the board is already open) and crashed FSUDAQ.
+    std::vector<int> foundSN;
+
     for(int port = 0; port < MaxNPorts; port++){
 
       for( int board = 0; board < MaxNBoards; board ++){ /// max number of diasy chain
         Digitizer dig;
         dig.OpenDigitizer(board, port);
+        bool isDuplicate = false;
         if( dig.IsConnected() ){
+          for( int sn : foundSN ) if( sn == (int) dig.GetSerialNumber() ) isDuplicate = true;
+        }
+        if( dig.IsConnected() && !isDuplicate ){
+          foundSN.push_back(dig.GetSerialNumber());
           nDigi++;
           portList.push_back(std::pair(board, port));
           LogMsg(QString("... Found at port: %1, board: %2. SN: %3 %4").arg(port).arg(board).arg(dig.GetSerialNumber(), 3, 10, QChar(' ')).arg(dig.GetDPPString().c_str()));
