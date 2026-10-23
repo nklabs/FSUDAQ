@@ -298,6 +298,25 @@ public:
     w->CloseDigitizers();
   }
 
+  void BoardAlsoOnUSB(){
+    printf("== a DT5730 that also has its USB cable in: opened once, over its optical link\n");
+    NewWorkDir(); AddBoards(); NewFSUDAQ();
+    fake_caen_add_usb_alias(1443, 0);
+    dialogs.clear();
+    Open();
+    CHECK(w->nDigi == 6, "opened %u boards, expected 6", w->nDigi);
+    bool order = w->nDigi == 6;
+    for( unsigned int i = 0; i < w->nDigi && i < 6; i++ ) if( w->digi[i]->GetSerialNumber() != Serials[i] ) order = false;
+    CHECK(order, "boards not in port order");
+    for( unsigned int i = 0; i < w->nDigi; i++ ){
+      CHECK(w->digi[i]->GetLinkType() == CAEN_DGTZ_OpticalLink, "Digi-%d opened over link type %d", w->digi[i]->GetSerialNumber(), (int) w->digi[i]->GetLinkType());
+    }
+    CHECK(w->logInfo->toPlainText().contains("1443 also answers on USB link 0"), "the second link of Digi-1443 is not logged");
+    CHECK(dialogs.isEmpty(), "dialogs: %s", qPrintable(dialogs.join(" | ")));
+    if( nFail == 0 ) OK("six boards in port order, all optical, the USB link logged");
+    w->CloseDigitizers();
+  }
+
   void SignalStopsRunProperly(){
     printf("== SIGTERM during a run: the run is read out, recorded as stopped by the signal\n");
     NewWorkDir(); AddBoards(100, 2); NewFSUDAQ();
@@ -368,6 +387,7 @@ int main(int argc, char ** argv){
   t.ReadFailureStopsRun();
   t.WriteFailureStopsRun();
   t.RepeatedRuns();
+  t.BoardAlsoOnUSB();
   t.SignalStopsRunProperly();
   t.ScopeKeepsSaveData();
 

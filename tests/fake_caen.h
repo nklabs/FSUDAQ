@@ -32,6 +32,8 @@ typedef struct {
 // model: "V1730" (16 ch) or "DT5730" (8 ch). image: an 8192-byte FSUDAQ settings file of the real
 // board to take the identity registers from (may be NULL). Returns 0 on success.
 int  fake_caen_add_board(int link, int num, int node, int serial, const char * model, const char * image);
+// The board also answers on this USB link (a desktop board with its USB cable plugged in too).
+void fake_caen_add_usb_alias(int serial, int usbLink);
 // Serve the board aggregates of an .fsu file from ReadData; aggPerMs: how fast the board "takes" them.
 int  fake_caen_set_data(int serial, const char * fsuFile, double aggPerMs);
 void fake_caen_reset_all(void);

@@ -85,11 +85,13 @@ class Digitizer{
 
   public:
     Digitizer(); /// no digitizer open
-    Digitizer(int boardID, int portID = 0, bool program = false, bool verbose = false); 
+    Digitizer(int boardID, int portID = 0, bool program = false, bool verbose = false, int linkType = -1); 
     virtual ~Digitizer();
 
     //^------ portID is for optical link for using PCIe card, from 0, 1, 2, 3
-    int  OpenDigitizer(int boardID, int portID = 0, bool program = false, bool verbose = false);
+    /// linkType: CAEN_DGTZ_OpticalLink or CAEN_DGTZ_USB to open over that link only; -1 = USB
+    /// (board number = USB link) first, then optical (port, board), as before
+    int  OpenDigitizer(int boardID, int portID = 0, bool program = false, bool verbose = false, int linkType = -1);
     void SetDPPType        (int type) { this->DPPType = type;} /// for manual override, or, digitizer does not open
     void SetRegChannelMask    (uint32_t mask);
     void SetRegChannelOnOff   (unsigned short ch, bool onOff);

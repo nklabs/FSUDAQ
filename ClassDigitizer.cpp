@@ -7,10 +7,10 @@ Digitizer::Digitizer(){
   Initalization();
 }
 
-Digitizer::Digitizer(int boardID, int portID, bool program,  bool verbose){
+Digitizer::Digitizer(int boardID, int portID, bool program,  bool verbose, int linkType){
   DebugPrint("%s", "Digitizer");
   Initalization();
-  OpenDigitizer(boardID, portID, program, verbose);
+  OpenDigitizer(boardID, portID, program, verbose, linkType);
 }
 
 Digitizer::~Digitizer(){
@@ -89,7 +89,7 @@ void Digitizer::PrintBoard (){
   printf(" Channle Memeory Size : %u kSample\n", MemorySizekSample);
 }
 
-int Digitizer::OpenDigitizer(int boardID, int portID, bool program, bool verbose){
+int Digitizer::OpenDigitizer(int boardID, int portID, bool program, bool verbose, int linkType){
   DebugPrint("%s", "Digitizer");
   this->boardID = boardID;
   this->portID = portID;
@@ -102,8 +102,11 @@ int Digitizer::OpenDigitizer(int boardID, int portID, bool program, bool verbose
 
   if( verbose) printf("============= Opening Digitizer at Board %d, Port %d \n", boardID, portID);
   
-  ///-------- try USB first
-  if( portID < MaxNPorts){
+  if( linkType == CAEN_DGTZ_OpticalLink || linkType == CAEN_DGTZ_USB ){
+    LinkType = (CAEN_DGTZ_ConnectionType) linkType;
+    if( LinkType == CAEN_DGTZ_USB ) ret = (int) CAEN_DGTZ_OpenDigitizer(LinkType, boardID, 0, VMEBaseAddress, &handle);
+    else                            ret = (int) CAEN_DGTZ_OpenDigitizer(LinkType, portID, boardID, VMEBaseAddress, &handle);
+  }else if( portID < MaxNPorts){ ///-------- try USB first
     LinkType = CAEN_DGTZ_USB;     /// Link Type
     ret = (int) CAEN_DGTZ_OpenDigitizer(LinkType, boardID, 0, VMEBaseAddress, &handle);
     if (ret != 0){ ///---------- try Optical link

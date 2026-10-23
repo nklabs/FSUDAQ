@@ -18,6 +18,7 @@ namespace {
 
 struct Board {
   int link, num, node, serial;
+  int usbAlias = -1;                     // also reachable on this USB link
   std::string model;
   int nCh;
   bool open = false;
@@ -177,6 +178,11 @@ extern "C" int fake_caen_add_board(int link, int num, int node, int serial, cons
   return 0;
 }
 
+extern "C" void fake_caen_add_usb_alias(int serial, int usbLink) {
+  Board * b = FromSerial(serial);
+  if( b ) b->usbAlias = usbLink;
+}
+
 extern "C" int fake_caen_set_data(int serial, const char * fsuFile, double aggPerMs) {
   Board * b = FromSerial(serial);
   if( !b ) return -1;
@@ -253,7 +259,7 @@ CAEN_DGTZ_ErrorCode CAEN_DGTZ_OpenDigitizer(CAEN_DGTZ_ConnectionType LinkType, i
   (void) VMEBaseAddress;
   for( size_t i = 0; i < boards.size(); i++ ){
     Board & b = boards[i];
-    bool match = (LinkType == CAEN_DGTZ_USB && b.link == 0 && b.num == LinkNum)
+    bool match = (LinkType == CAEN_DGTZ_USB && ((b.link == 0 && b.num == LinkNum) || b.usbAlias == LinkNum))
               || (LinkType == CAEN_DGTZ_OpticalLink && b.link == 1 && b.num == LinkNum && b.node == ConetNode);
     if( !match ) continue;
     if( b.open ) return CAEN_DGTZ_DigitizerAlreadyOpen;

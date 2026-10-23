@@ -770,7 +770,8 @@ void FSUDAQ::OpenDigitizers(){
 
   logMsgHTMLMode = false;
   nDigi = 0;
-  std::vector<std::pair<int, int>> portList; //boardID, portID
+  struct Found { int board, port, link; };   // link: CAEN_DGTZ_OpticalLink, CAEN_DGTZ_USB, or -1 for A4818
+  std::vector<Found> portList;
 
   if( cbOpenDigitizers->currentData().toInt() == 4 ) { //for A4818
     
@@ -782,7 +783,7 @@ void FSUDAQ::OpenDigitizers(){
         dig.OpenDigitizer(board, port);
         if( dig.IsConnected() ){
           nDigi++;
-          portList.push_back(std::pair(board, port));
+          portList.push_back({board, port, -1});
           LogMsg(QString("... Found at port: %1, board: %2. SN: %3 %4").arg(port).arg(board).arg(dig.GetSerialNumber(), 3, 10, QChar(' ')).arg(dig.GetDPPString().c_str()));
         }
         dig.CloseDigitizer();
@@ -790,31 +791,42 @@ void FSUDAQ::OpenDigitizers(){
       }
     }
 
-  }else{ // optical fiber
+  }else{ // optical fiber, then USB
 
-    // OpenDigitizer tries USB first, with the board number as the USB link and the port
-    // ignored, so a board on USB answers at every port. Count each serial number once:
-    // opening the duplicates later fails (the board is already open) and crashed FSUDAQ.
+    // Each board is opened over the link it is found on: the optical links first (port, daisy-chain
+    // index), then the USB links. A board that answers on both is read over the optical link.
+    // (OpenDigitizer without a link type tries USB first with the board number as the USB link,
+    // so a board on USB answered at every port and hid the optical boards at index 0.)
     std::vector<int> foundSN;
-
     for(int port = 0; port < MaxNPorts; port++){
-
       for( int board = 0; board < MaxNBoards; board ++){ /// max number of diasy chain
         Digitizer dig;
-        dig.OpenDigitizer(board, port);
-        bool isDuplicate = false;
+        dig.OpenDigitizer(board, port, false, false, CAEN_DGTZ_OpticalLink);
         if( dig.IsConnected() ){
-          for( int sn : foundSN ) if( sn == (int) dig.GetSerialNumber() ) isDuplicate = true;
-        }
-        if( dig.IsConnected() && !isDuplicate ){
           foundSN.push_back(dig.GetSerialNumber());
           nDigi++;
-          portList.push_back(std::pair(board, port));
+          portList.push_back({board, port, CAEN_DGTZ_OpticalLink});
           LogMsg(QString("... Found at port: %1, board: %2. SN: %3 %4").arg(port).arg(board).arg(dig.GetSerialNumber(), 3, 10, QChar(' ')).arg(dig.GetDPPString().c_str()));
         }
         dig.CloseDigitizer();
         QCoreApplication::processEvents(); //to prevent Qt said application not responding.
       }
+    }
+    for( int usbLink = 0; usbLink < MaxNBoards; usbLink ++){
+      Digitizer dig;
+      dig.OpenDigitizer(usbLink, 0, false, false, CAEN_DGTZ_USB);
+      if( dig.IsConnected() ){
+        if( std::find(foundSN.begin(), foundSN.end(), (int) dig.GetSerialNumber()) != foundSN.end() ){
+          LogMsg(QString("... SN: %1 also answers on USB link %2; it is read over its optical link.").arg(dig.GetSerialNumber()).arg(usbLink));
+        }else{
+          foundSN.push_back(dig.GetSerialNumber());
+          nDigi++;
+          portList.push_back({usbLink, 0, CAEN_DGTZ_USB});
+          LogMsg(QString("... Found on USB link: %1. SN: %2 %3").arg(usbLink).arg(dig.GetSerialNumber(), 3, 10, QChar(' ')).arg(dig.GetDPPString().c_str()));
+        }
+      }
+      dig.CloseDigitizer();
+      QCoreApplication::processEvents();
     }
   }
   logMsgHTMLMode = true;
@@ -834,7 +846,7 @@ void FSUDAQ::OpenDigitizers(){
   QStringList settingsProblems; // shown together once every board is open
 
   for( unsigned int i = 0; i < nDigi; i++){
-    digi[i] = new Digitizer(portList[i].first, portList[i].second);
+    digi[i] = new Digitizer(portList[i].board, portList[i].port, false, false, portList[i].link);
     //digi[i]->Reset();
     QString digiName = "Digi-" + QString::number(digi[i]->GetSerialNumber());
 
@@ -1649,6 +1661,7 @@ void FSUDAQ::StartACQ(){
     for( int i = (int) nDigi-1; i >= 0 ; i--){
       if( digi[i]->IsBoardDisabled() ) continue;
       readDataThread[i]->SetSaveData(save);
+      readDataThread[i]->SetScopeMode(false); // a readout that ended while the scope ran is still in scope mode
       digi[i]->WriteRegister(DPP::SoftwareClear_W, 1);
       if( !digi[i]->StartACQ() ){
         problems << "Digi-" + QString::number(digi[i]->GetSerialNumber()) + " did not start (no readout buffer, or the start command failed).";
@@ -2439,6 +2452,7 @@ bool FSUDAQ::StartDashboardProcess(){
     return false;
   }
   QString python = QFile::exists(dir + "/venv/bin/python") ? dir + "/venv/bin/python" : "python3";
+  if( python == "python3" ) LogMsg("<font style=\"color: orange;\">" + dir + "/venv not found: the dashboard runs with python3, and without numba it cannot keep up. Run online/setup-venv.sh once.</font>");
 
   if( dashboardProc == nullptr ){
     dashboardProc = new QProcess(this);
@@ -2448,6 +2462,10 @@ bool FSUDAQ::StartDashboardProcess(){
     // optical-link DMA copies into our buffers and overruns the driver); and the child
     // must not inherit the CAEN device descriptors or anything else of ours
     dashboardProc->setUnixProcessParameters(QProcess::UnixProcessFlag::UseVFork | QProcess::UnixProcessFlag::CloseFileDescriptors);
+#else
+    // no CloseFileDescriptors before Qt 6.6: close them in the child, so it does not keep the
+    // CAEN device descriptors (stdin/out/err are already in place when this runs)
+    dashboardProc->setChildProcessModifier([](){ for( int fd = 3; fd < 4096; fd++ ) ::close(fd); });
 #endif
     connect(dashboardProc, &QProcess::readyReadStandardOutput, this, [=](){
       for( const QByteArray & line : dashboardProc->readAllStandardOutput().split('\n') ){
@@ -2461,7 +2479,9 @@ bool FSUDAQ::StartDashboardProcess(){
   dashboardProc->setWorkingDirectory(dir);
   // --exit-with-parent: if FSUDAQ dies, the dashboard leaves and frees the port for the next FSUDAQ's one
   QStringList args = QStringList() << script << "--data-path" << rawDataPath << "--port" << "8050" << "--open-browser" << "--exit-with-parent";
-  if( chkSaveData->isChecked() && QDir(RunFolder()).exists() ) args << "--follow" << RunFolder(); // the current or last run; each new run is sent with GET /run
+  // the run being recorded; a run that starts later is sent with GET /run (and a finished run is
+  // not given: the dashboard would work through all of it before the next run's data)
+  if( inDataRun && chkSaveData->isChecked() ) args << "--follow" << RunFolder();
   // The dashboard reads only the boards it is given; its default list is odin's six. Pass the
   // open digitizers (in port order, the detector-map board order) so another setup is seen.
   if( digi && nDigi > 0 ){
