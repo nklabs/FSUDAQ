@@ -111,7 +111,8 @@ class Digitizer{
     
     //^================ ACQ control
     void   StopACQ();
-    void   StartACQ();
+    bool   StartACQ();   /// false if the board did not start (no readout buffer, or the start command failed)
+    void   SWStopACQ();  /// stop taking data but stay readable, so what the board holds can still be read out
     int    ReadData();
     bool   IsRunning() const {return AcqRun;}
     Data * GetData()   const {return data;}
@@ -123,7 +124,7 @@ class Digitizer{
       CAEN_DGTZ_ReadRegister(handle, DPP::AcquisitionStatus_R, &acqStatus);
     }
 
-    unsigned int CalByteForBuffer(bool verbose = false);
+    uint64_t     CalByteForBuffer(bool verbose = false); /// one block transfer at the programmed aggregation
     unsigned int CalByteForBufferCAEN();
 
     //^================= Settings
@@ -164,6 +165,7 @@ class Digitizer{
     /// board <--> memory functions; both return the number of register reads/writes that failed
     int            ReadAllSettingsFromBoard  (bool force = false);
     int            ProgramSettingsToBoard    ();
+    static int     programPauseMs;           /// pause after each channel register written by ProgramSettingsToBoard (20 ms, as upstream)
     /// load a settings file, write it to the board and read the board back. Returns -1 if the file
     /// was not loaded (why in problems), else the number of problems: failed writes or reads, and
     /// registers that differ from the file after programming (listed in problems).

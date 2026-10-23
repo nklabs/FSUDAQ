@@ -1,0 +1,356 @@
+// FSUDAQ's run control, run off-screen against six fake boards (tests/fake_caen.cpp).
+//
+// Opens the digitizers "w/ settings" from tests/data/odin-runB, takes runs and checks what
+// ends up on disk against what the boards handed out, the run records, the run numbers and
+// the dialogs FSUDAQ shows (answered automatically: the default button, else the first).
+//
+//   QT_QPA_PLATFORM=offscreen test_daq [fixture dir]
+
+#include <QApplication>
+#include <QDialog>
+#include <QDir>
+#include <QElapsedTimer>
+#include <QFile>
+#include <QMessageBox>
+#include <QPushButton>
+#include <QTextStream>
+#include <QTimer>
+
+#include <functional>
+#include <unistd.h>
+#include <sys/stat.h>
+
+#include "FSUDAQ.h"
+#include "fake_caen.h"
+
+static int nFail = 0;
+#define CHECK(cond, ...) do{ if( !(cond) ){ nFail++; printf("   FAIL  "); printf(__VA_ARGS__); printf("\n"); fflush(stdout); } }while(0)
+#define OK(...) do{ printf("   ok    "); printf(__VA_ARGS__); printf("\n"); fflush(stdout); }while(0)
+
+static const int Serials[6] = {15880, 15879, 58918, 62839, 1443, 30508}; // port order on odin
+static QStringList dialogs;   // "title: text" of every dialog answered
+
+class FSUDAQTest {
+public:
+  QString fixtures, work, dataPath, settingsPath;
+  FSUDAQ * w = nullptr;
+
+  static void Pump(int ms){
+    QElapsedTimer t; t.start();
+    while( t.elapsed() < ms ){ QCoreApplication::processEvents(QEventLoop::AllEvents, 5); usleep(2000); }
+  }
+  static bool WaitFor(std::function<bool()> cond, int ms){
+    QElapsedTimer t; t.start();
+    while( t.elapsed() < ms ){ if( cond() ) return true; QCoreApplication::processEvents(QEventLoop::AllEvents, 5); usleep(2000); }
+    return cond();
+  }
+  static int Dialogs(const QString & title){ int n = 0; for( auto & d : dialogs ) if( d.startsWith(title + ":") ) n++; return n; }
+
+  // six boards like odin's, generating eventsPerCouple events per couple and aggregate
+  void AddBoards(int eventsPerCouple = 100, double aggPerMs = 2){
+    fake_caen_reset_all();
+    for( int i = 0; i < 6; i++ ){
+      bool dt = (Serials[i] == 1443 || Serials[i] == 30508);
+      QString image = fixtures + "/Digi-" + QString::number(Serials[i]) + "_PSD.bin";
+      fake_caen_add_board(1, i, 0, Serials[i], dt ? "DT5730" : "V1730", image.toStdString().c_str());
+      fake_caen_set_synthetic(Serials[i], eventsPerCouple, aggPerMs);
+    }
+  }
+
+  void NewWorkDir(){
+    work = QDir::tempPath() + "/fsudaq_test_daq_" + QString::number(getpid());
+    QDir(work).removeRecursively();
+    dataPath = work + "/data";
+    settingsPath = work + "/settings";
+    QDir().mkpath(dataPath);
+    QDir().mkpath(settingsPath);
+    for( int s : Serials ) QFile::copy(fixtures + "/Digi-" + QString::number(s) + "_PSD.bin", settingsPath + "/Digi-" + QString::number(s) + "_PSD.bin");
+    QFile f(work + "/programSettings.txt");
+    f.open(QIODevice::WriteOnly | QIODevice::Text);
+    QTextStream out(&f);
+    out << dataPath << "\n\n\n\n\n\n\n\n\n";   // data path; no influx, no elog
+    out << "settingsPath=" << settingsPath << "\nautoIncrementRunID=1\nautoDashboard=0\n";
+    f.close();
+    QDir::setCurrent(work);
+  }
+
+  void NewFSUDAQ(){
+    delete w;
+    w = new FSUDAQ();
+    w->chkSkipComment->setChecked(true);
+    w->chkAutoDashboard->setChecked(false);
+  }
+
+  void Open(){
+    w->cbOpenMethod->setCurrentIndex(w->cbOpenMethod->findData(1)); // w/ settings
+    w->OpenDigitizers();
+    w->UpdateRunControls();
+  }
+
+  // the run folder's data files of one board, concatenated, as 32-bit words
+  std::vector<uint32_t> Saved(const QString & runDir, int serial){
+    QStringList files = QDir(runDir).entryList(QStringList() << ("*_" + QString::number(serial) + "_PSD_2_*.fsu"), QDir::Files, QDir::Name);
+    std::vector<uint32_t> all;
+    for( auto & name : files ){
+      QFile f(runDir + "/" + name);
+      f.open(QIODevice::ReadOnly);
+      QByteArray b = f.readAll();
+      size_t n = b.size() / 4;
+      size_t old = all.size();
+      all.resize(old + n);
+      memcpy(all.data() + old, b.constData(), n * 4);
+    }
+    return all;
+  }
+  int NumFiles(const QString & runDir, int serial){
+    return QDir(runDir).entryList(QStringList() << ("*_" + QString::number(serial) + "_PSD_2_*.fsu"), QDir::Files).size();
+  }
+  QStringList RecordLines(){
+    QFile f(dataPath + "/RunTimeStamp.dat");
+    if( !f.open(QIODevice::ReadOnly | QIODevice::Text) ) return QStringList();
+    return QString(f.readAll()).split("\n", Qt::SkipEmptyParts);
+  }
+  // every board: the run folders, concatenated, are exactly what the board handed out, and the
+  // board was read out to the end: nothing it had taken was dropped or cleared
+  void CheckAllSaved(const QStringList & runDirs, const char * what){
+    for( int s : Serials ){
+      std::vector<uint32_t> saved;
+      for( auto & d : runDirs ){ auto part = Saved(d, s); saved.insert(saved.end(), part.begin(), part.end()); }
+      const uint32_t * out; size_t n = fake_caen_handed_out(s, &out);
+      fake_caen_stats st; fake_caen_get_stats(s, &st);
+      CHECK(n > 0, "%s: Digi-%d handed out no data", what, s);
+      CHECK(saved.size() == n && memcmp(saved.data(), out, n * 4) == 0, "%s: Digi-%d saved %zu words, handed out %zu (or they differ)", what, s, saved.size(), n);
+      CHECK(st.aggRead == st.aggAcquired, "%s: Digi-%d took %ld aggregates, %ld were read", what, s, st.aggAcquired, st.aggRead);
+      CHECK(st.aggCleared == 0, "%s: Digi-%d: %ld aggregates were cleared without being read", what, s, st.aggCleared);
+      CHECK(!st.running, "%s: Digi-%d still running", what, s);
+    }
+  }
+
+  //=================================================================== scenarios
+  void OpenWithSettings(){
+    printf("== open w/ settings\n");
+    NewWorkDir(); AddBoards(); NewFSUDAQ();
+    dialogs.clear();
+    Open();
+    CHECK(w->nDigi == 6, "opened %u boards, expected 6", w->nDigi);
+    CHECK(dialogs.isEmpty(), "dialogs at open: %s", qPrintable(dialogs.join(" | ")));
+    CHECK(w->BoardsNotProgrammed().isEmpty(), "not programmed: %s", qPrintable(w->BoardsNotProgrammed().join(",")));
+    CHECK(w->bnStartACQ->isEnabled(), "Start not enabled after a good open");
+    if( nFail == 0 ) OK("six boards programmed from their files, Start enabled");
+    w->CloseDigitizers();
+  }
+
+  void MissingSettingsFile(){
+    printf("== a settings file is missing\n");
+    NewWorkDir(); AddBoards(); NewFSUDAQ();
+    QFile::remove(settingsPath + "/Digi-62839_PSD.bin");
+    dialogs.clear();
+    Open();
+    CHECK(Dialogs("Settings files") == 1, "no settings dialog at open (%s)", qPrintable(dialogs.join(" | ")));
+    CHECK(w->BoardsNotProgrammed() == QStringList("Digi-62839"), "not-programmed list: %s", qPrintable(w->BoardsNotProgrammed().join(",")));
+    w->chkSaveData->setChecked(true);
+    unsigned int runBefore = w->runID;
+    w->AutoRun();
+    CHECK(!w->inDataRun, "a run started with a board not programmed");
+    CHECK(Dialogs("Run not started") == 1, "no refusal dialog");
+    CHECK(w->runID == runBefore, "run number moved from %u to %u", runBefore, w->runID);
+    CHECK(QDir(dataPath).entryList(QStringList() << "temp_*", QDir::Dirs).isEmpty(), "a run folder was created");
+    for( int s : Serials ){ fake_caen_stats st; fake_caen_get_stats(s, &st); CHECK(!st.running && st.aggRead == 0, "Digi-%d ran", s); }
+    if( nFail == 0 ) OK("Start refused, nothing written, run number kept");
+    w->CloseDigitizers();
+  }
+
+  void SavedRunIsComplete(){
+    printf("== a saved run: every byte the boards took is on disk, across file roll-over\n");
+    NewWorkDir(); AddBoards(100, 2); NewFSUDAQ();
+    for( int s : Serials ) fake_caen_set_read_delay(s, 1000); // the readout falls behind: the boards hold data at Stop
+    Open();
+    w->chkSaveData->setChecked(true);
+    w->sbFileSizeMB->setValue(10);
+    dialogs.clear();
+    w->AutoRun();
+    CHECK(w->inDataRun, "the run did not start (%s)", qPrintable(dialogs.join(" | ")));
+    Pump(1500);
+    QString runDir = w->RunFolder();
+    fake_caen_stats st; fake_caen_get_stats(15880, &st);
+    long behind = st.aggAcquired - st.aggRead;
+    CHECK(behind > 0, "the readout did not fall behind; the test cannot see data left on the board");
+    w->StopPressed();
+    CHECK(!w->inDataRun, "still in a run after Stop");
+    CheckAllSaved(QStringList() << runDir, "run 1");
+    CHECK(NumFiles(runDir, 15880) >= 2, "no roll-over: %d file(s) for Digi-15880", NumFiles(runDir, 15880));
+    QStringList rec = RecordLines();
+    CHECK(rec.size() == 2 && rec[0].startsWith("Start Run | 1 |") && rec[1].startsWith(" Stop Run | 1 |"), "run record: %s", qPrintable(rec.join(" / ")));
+    for( int s : Serials ) CHECK(QFile::exists(runDir + "/temp_001_" + QString::number(s) + "_PSD.bin"), "no settings snapshot for Digi-%d", s);
+    CHECK(dialogs.isEmpty(), "dialogs: %s", qPrintable(dialogs.join(" | ")));
+    if( nFail == 0 ) OK("6 boards, %d files for Digi-15880, record and snapshots in place; %ld aggregates were still on Digi-15880 at Stop", NumFiles(runDir, 15880), behind);
+    w->CloseDigitizers();
+  }
+
+  void BoardThatCannotStart(){
+    printf("== a board without a readout buffer: no board starts\n");
+    NewWorkDir(); AddBoards(); NewFSUDAQ();
+    Open();
+    w->chkSaveData->setChecked(true);
+    fake_caen_fail(1443, "malloc");
+    dialogs.clear();
+    w->AutoRun();
+    CHECK(!w->inDataRun, "the run started");
+    CHECK(Dialogs("Run not started") == 1, "no refusal dialog (%s)", qPrintable(dialogs.join(" | ")));
+    for( int s : Serials ){ fake_caen_stats st; fake_caen_get_stats(s, &st); CHECK(!st.running, "Digi-%d is running", s); }
+    CHECK(w->runID == 0, "run number consumed: %u", w->runID);
+    CHECK(QDir(dataPath).entryList(QStringList() << "temp_*", QDir::Dirs).isEmpty(), "files of the refused run were left");
+    CHECK(RecordLines().isEmpty(), "the refused run was recorded");
+    fake_caen_fail(1443, "");
+    dialogs.clear();
+    w->AutoRun();
+    CHECK(w->inDataRun && w->runID == 1, "after the failure cleared, the run did not start as run 1");
+    Pump(300);
+    QString runDir = w->RunFolder();
+    w->StopPressed();
+    CheckAllSaved(QStringList() << runDir, "run after refused start");
+    if( nFail == 0 ) OK("refused, nothing left running or written; the next start is run 1");
+    w->CloseDigitizers();
+  }
+
+  void ReadFailureStopsRun(){
+    printf("== a board stops answering mid-run: the run is stopped and says why\n");
+    NewWorkDir(); AddBoards(); NewFSUDAQ();
+    Open();
+    w->chkSaveData->setChecked(true);
+    dialogs.clear();
+    w->AutoRun();
+    Pump(500);
+    fake_caen_fail(58918, "read");
+    bool stopped = WaitFor([&](){ return !w->inDataRun; }, 5000);
+    CHECK(stopped, "the run went on after Digi-58918 stopped answering");
+    CHECK(Dialogs("Run stopped") == 1 && dialogs.size() == 1, "not exactly one alarm (%s)", qPrintable(dialogs.join(" | ")));
+    QStringList rec = RecordLines();
+    CHECK(rec.size() == 2 && rec[1].contains("Run stopped by FSUDAQ") && rec[1].contains("58918"), "stop record: %s", qPrintable(rec.join(" / ")));
+    if( nFail == 0 ) OK("stopped within %s, alarm shown, the record says why", "5 s");
+    fake_caen_fail(58918, "");
+    w->CloseDigitizers();
+  }
+
+  void WriteFailureStopsRun(){
+    printf("== the next data file cannot be opened: the run is stopped and says why\n");
+    NewWorkDir(); AddBoards(100, 2); NewFSUDAQ();
+    Open();
+    w->chkSaveData->setChecked(true);
+    w->sbFileSizeMB->setValue(10);
+    dialogs.clear();
+    w->AutoRun();
+    QString runDir = w->RunFolder();
+    chmod(runDir.toStdString().c_str(), 0555);   // no new file can be created in the run folder
+    bool stopped = WaitFor([&](){ return !w->inDataRun; }, 8000);
+    chmod(runDir.toStdString().c_str(), 0755);
+    CHECK(stopped, "the run went on without saving");
+    CHECK(Dialogs("Run stopped") == 1 && dialogs.size() == 1, "not exactly one alarm (%s)", qPrintable(dialogs.join(" | ")));
+    QStringList rec = RecordLines();
+    CHECK(rec.size() == 2 && rec[1].contains("cannot open the next data file"), "stop record: %s", qPrintable(rec.join(" / ")));
+    if( nFail == 0 ) OK("stopped, alarm shown, the record says why");
+    w->CloseDigitizers();
+  }
+
+  void RepeatedRuns(){
+    printf("== repeated timed runs: locked controls in the pause, Stop Series ends it with no extra record\n");
+    NewWorkDir(); AddBoards(20, 1); NewFSUDAQ();
+    Open();
+    w->chkSaveData->setChecked(true);
+    w->sbRunTimeMin->setDecimals(3);
+    w->sbRunTimeMin->setValue(0.01);   // 0.6 s
+    w->chkRepeatRun->setChecked(true);
+    w->sbRepeatPauseSec->setValue(1);
+    dialogs.clear();
+    w->AutoRun();
+    QStringList runDirs;
+    runDirs << w->RunFolder();
+    CHECK(w->inDataRun && w->runID == 1, "run 1 did not start");
+    CHECK(WaitFor([&](){ return w->pauseTimer->isActive(); }, 3000), "no pause after run 1");
+    CHECK(!w->bnOpenScope->isEnabled() && !w->chkSaveData->isEnabled() && !w->chkRepeatRun->isEnabled() && !w->bnSetDataPath->isEnabled(),
+          "controls not locked in the pause");
+    CHECK(w->bnStopACQ->isEnabled() && w->bnStopACQ->text() == "Stop Series", "Stop Series not offered in the pause");
+    CHECK(WaitFor([&](){ return w->inDataRun; }, 3000) && w->runID == 2, "run 2 did not start after the pause");
+    runDirs << w->RunFolder();
+    CHECK(WaitFor([&](){ return w->pauseTimer->isActive(); }, 3000), "no pause after run 2");
+    w->StopPressed();             // in the pause
+    Pump(1500);
+    CHECK(!w->inDataRun && !w->series.active && !w->pauseTimer->isActive(), "series still going after Stop Series");
+    CHECK(w->runID == 2, "run number %u after two runs", w->runID);
+    QStringList rec = RecordLines();
+    CHECK(rec.size() == 4, "%lld record lines, expected 2 starts and 2 stops: %s", (long long) rec.size(), qPrintable(rec.join(" / ")));
+    CheckAllSaved(runDirs, "series");
+    CHECK(w->bnStartACQ->isEnabled() && w->bnOpenScope->isEnabled(), "controls not released after the series");
+    CHECK(dialogs.isEmpty(), "dialogs: %s", qPrintable(dialogs.join(" | ")));
+    if( nFail == 0 ) OK("two runs, pause locked, Stop Series clean, all data saved");
+
+    // Stop pressed during a run of a series: one stop record, series over
+    dialogs.clear();
+    w->AutoRun();
+    runDirs.clear(); runDirs << w->RunFolder();
+    Pump(200);
+    w->StopPressed();
+    Pump(1500);
+    CHECK(!w->inDataRun && !w->series.active, "series still going after Stop in a run");
+    CHECK(RecordLines().size() == 6, "%lld record lines after the third run", (long long) RecordLines().size());
+    if( nFail == 0 ) OK("Stop during a run of the series ends it with one stop record");
+    w->CloseDigitizers();
+  }
+
+  void ScopeKeepsSaveData(){
+    printf("== opening and closing the scope leaves Save Data as it was\n");
+    NewWorkDir(); AddBoards(); NewFSUDAQ();
+    Open();
+    w->chkSaveData->setChecked(true);
+    w->OpenScope();
+    CHECK(!w->bnStartACQ->isEnabled(), "Start enabled with the scope open");
+    w->scope->close();
+    Pump(100);
+    CHECK(w->chkSaveData->isChecked(), "Save Data was unticked by the scope");
+    CHECK(w->bnStartACQ->isEnabled(), "Start not enabled after the scope closed");
+    if( nFail == 0 ) OK("Save Data kept, Start back after the scope");
+    w->CloseDigitizers();
+  }
+};
+
+int main(int argc, char ** argv){
+  setvbuf(stdout, nullptr, _IOLBF, 0);
+  qputenv("QT_QPA_PLATFORM", "offscreen");
+  QApplication app(argc, argv);
+
+  Digitizer::programPauseMs = 0; // the fake boards need no pause between register writes
+  FSUDAQTest t;
+  t.fixtures = QDir(argc > 1 ? argv[1] : "tests/data/odin-runB").absolutePath();
+
+  // answer every modal dialog: record it, press the default button (else the first)
+  QTimer answer;
+  QObject::connect(&answer, &QTimer::timeout, [](){
+    QWidget * m = QApplication::activeModalWidget();
+    if( !m ) return;
+    if( auto * box = qobject_cast<QMessageBox *>(m) ){
+      dialogs << box->windowTitle() + ": " + box->text();
+      printf("         [dialog] %s: %s\n", qPrintable(box->windowTitle()), qPrintable(box->text().left(160).replace("\n", " ")));
+      QAbstractButton * b = box->defaultButton();
+      if( !b && !box->buttons().isEmpty() ) b = box->buttons().first();
+      if( b ) b->click(); else box->done(0);
+    }else if( auto * d = qobject_cast<QDialog *>(m) ){
+      dialogs << d->windowTitle() + ": (dialog)";
+      d->accept();
+    }
+  });
+  answer.start(20);
+
+  t.OpenWithSettings();
+  t.MissingSettingsFile();
+  t.SavedRunIsComplete();
+  t.BoardThatCannotStart();
+  t.ReadFailureStopsRun();
+  t.WriteFailureStopsRun();
+  t.RepeatedRuns();
+  t.ScopeKeepsSaveData();
+
+  delete t.w;
+  QDir(t.work).removeRecursively();
+  printf("\n%s: %d problem(s)\n", nFail ? "FAILED" : "PASSED", nFail);
+  return nFail ? 1 : 0;
+}

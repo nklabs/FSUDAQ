@@ -20,6 +20,7 @@
 #include <QNetworkRequest>
 #include <QNetworkReply>
 #include <QElapsedTimer>
+#include <QStorageInfo>
 
 // Run Monitor cell colours
 static const char * InputCellStyle = "background-color: #F0F0F0;";
@@ -48,15 +49,22 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
   digiSettings = nullptr;
   singleHistograms = nullptr;
   onlineAnalyzer = nullptr;
-  runTimer = new QTimer();
+  inDataRun = false;
+  scopeShown = false;
+  runTimer = new QTimer(this);
   runTimer->setTimerType(Qt::PreciseTimer); // the default coarse timer may fire up to 5 % early or late (3 s on a 60 s run)
+  runTimer->setSingleShot(true);
+  connect(runTimer, &QTimer::timeout, this, &FSUDAQ::RunTimeUp);
+  pauseTimer = new QTimer(this);
+  pauseTimer->setTimerType(Qt::PreciseTimer);
+  pauseTimer->setSingleShot(true);
+  connect(pauseTimer, &QTimer::timeout, this, &FSUDAQ::PauseOver);
   runClockTimer = new QTimer(this);
   runClockTimer->setInterval(100);
   connect(runClockTimer, &QTimer::timeout, this, [=](){
     if( lbRunTime ) lbRunTime->setText(runClockLabel + "   <b>" + ElapsedText(runClock.elapsed()) + "</b>");
   });
   lbRunTime = nullptr;
-  breakAutoRepeat = true;
   needManualComment = true;
   runRecord = nullptr;
   model = nullptr;
@@ -115,7 +123,7 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     connect(bnOpenDigitizers, &QPushButton::clicked, this, [this](){
       bnOpenDigitizers->setEnabled(false);
       if( digi == nullptr ) OpenDigitizers(); else CloseDigitizers();
-      bnOpenDigitizers->setEnabled(true);
+      UpdateRunControls();
     });
 
     bnDigiSettings = new QPushButton("Digitizers Settings", this);
@@ -265,17 +273,7 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     bnStartACQ = new QPushButton("Start ACQ", this);
     connect( bnStartACQ, &QPushButton::clicked, this, &FSUDAQ::AutoRun);
     bnStopACQ = new QPushButton("Stop ACQ", this);
-    connect( bnStopACQ, &QPushButton::clicked, this, [=](){
-        if( runTimer->isActive() ){
-          runTimer->stop();
-          runTimer->disconnect(runTimerConnection);
-        }else{
-          breakAutoRepeat = true;
-          runTimer->disconnect(runTimerConnection);
-        }
-        needManualComment = true;
-        StopACQ();
-    });
+    connect( bnStopACQ, &QPushButton::clicked, this, &FSUDAQ::StopPressed);
 
     layout->addWidget(lbPrefix, rowID, 0);
     layout->addWidget(lePrefix, rowID, 1);
@@ -473,15 +471,11 @@ void FSUDAQ::OpenDataPath(){
   int result = fileDialog.exec();
 
   //qDebug() << fileDialog.selectedFiles();
-  if( result > 0 ) {
-    leDataPath->setText(fileDialog.selectedFiles().at(0));
-    rawDataPath = leDataPath->text();
-  }else{
-    leDataPath->clear();
-    rawDataPath = "";
-  }
+  if( result <= 0 || fileDialog.selectedFiles().isEmpty() ) return; // cancelled: keep the current path
+  leDataPath->setText(fileDialog.selectedFiles().at(0));
+  rawDataPath = leDataPath->text();
 
-  if( !rawDataPath.isEmpty() ) chkSaveData->setEnabled(true);
+  UpdateRunControls();
 
   SaveProgramSettings();
 
@@ -892,17 +886,8 @@ void FSUDAQ::OpenDigitizers(){
     box.exec();
   }
 
+  if( rawDataPath == "" ) chkSaveData->setChecked(false);
   WaitForDigitizersOpen(false);
-  bnStartACQ->setStyleSheet("background-color: green;");
-  bnStopACQ->setEnabled(false);
-  bnStopACQ->setStyleSheet("");
-
-  bnSync->setEnabled( nDigi >= 1  );
-
-  if( rawDataPath == "" ) {
-    chkSaveData->setChecked(false);
-    chkSaveData->setEnabled(false);
-  }
 
   SetupScalar();
 
@@ -973,8 +958,6 @@ void FSUDAQ::CloseDigitizers(){
   openedWithSettings = false;
 
   WaitForDigitizersOpen(true);
-  bnStartACQ->setStyleSheet("");
-  bnStopACQ->setStyleSheet("");
 
   printf("End of FSUDAQ::%s\n", __func__);
 
@@ -999,16 +982,9 @@ void FSUDAQ::WaitForDigitizersOpen(bool onOff){
   cbOpenMethod->setEnabled(onOff);
   bnSetSettingsPath->setEnabled(onOff);
 
-  bnOpenScope->setEnabled(!onOff);
   bnDigiSettings->setEnabled(!onOff);
   bnOpenScaler->setEnabled(!onOff);
-  bnStartACQ->setEnabled(!onOff);
-  bnStopACQ->setEnabled(!onOff);
-  bnStopACQ->setStyleSheet("");
-  chkSaveData->setEnabled(!onOff);
-
-  EnableRunLengthControls(!onOff);
-  bnSync->setEnabled(false);
+  UpdateRunControls(); // Start, Stop, Scope, Save Data, run length, ... from the state
 
 }
 
@@ -1276,6 +1252,12 @@ void FSUDAQ::UpdateScalar(){
   if( digi == nullptr ) return;
   if( scalar == nullptr ) return;
   //if( !scalar->isVisible() ) return;
+
+  // a board that stopped reading or cannot write: the data are not taken as set up, stop the run
+  if( inDataRun ){
+    QStringList failures = RunFailures();
+    if( !failures.isEmpty() ) QTimer::singleShot(0, this, [this, failures](){ AbortRun(failures); });
+  }
   
   // digi[0]->GetData()->PrintAllData();
 
@@ -1549,7 +1531,7 @@ void FSUDAQ::OpenScalar(){
 //***************************************************************
 void FSUDAQ::StartACQ(){
   DebugPrint("%s", "FSUDAQ");
-  if( digi == nullptr ) return;
+  if( digi == nullptr || inDataRun ) return;
 
   // opened "w/ settings": a board that does not hold its settings file would take data with
   // whatever it had before, so no run starts until every board was programmed from its file
@@ -1561,24 +1543,47 @@ void FSUDAQ::StartACQ(){
     return;
   }
 
+  const bool save = chkSaveData->isChecked();
+
+  if( save ){
+    QStorageInfo disk(rawDataPath);
+    if( disk.isValid() && disk.bytesAvailable() < (qint64) 1024 * 1024 * 1024 ){
+      LogMsg("<font style=\"color: red;\">Run not started: less than 1 GB free on " + disk.rootPath() + ".</font>");
+      QMessageBox::warning(this, "Run not started", "Less than 1 GB is free on " + disk.rootPath() + " (" + rawDataPath + ").");
+      return;
+    }
+  }
+
   // the prefix typed in the field applies to this run (it used to take effect one run late)
-  if( chkSaveData->isChecked() && lePrefix->text() != prefix ) {
+  if( save && lePrefix->text() != prefix ) {
     prefix = lePrefix->text();
     lePrefix->setStyleSheet("");
   }
 
   bool commentResult = true;
-  if( chkSaveData->isChecked()) commentResult = CommentDialog(true);
+  if( save ) commentResult = CommentDialog(true);
   if( commentResult == false) return;
 
   QString runIDStr = QString::number(runID).rightJustified(3, '0');
   QString runDir = RunFolder();
 
-  if( chkSaveData->isChecked() ) {
+  // a start that does not happen gives the run number back
+  auto GiveBackRunNumber = [&](){
+    if( save && chkAutoIncrement->isChecked() ) runID --;
+    leRunID->setText(QString::number(runID));
+  };
+
+  if( save ) {
     // Data files are opened with overwrite, so never start a run whose number is already on disk.
     // This matters when auto-increment is off and a number is typed in by hand, but it also
     // catches a stale lastRun.sh.
     QStringList existing = ExistingRunFiles();
+    if( !existing.isEmpty() && series.active && !needManualComment ){
+      // the next run of a repeated series starts unattended: never ask, never delete a run
+      LogMsg("<font style=\"color: red;\">Start Run-" + runIDStr + " not started: " + QString::number(existing.size()) + " file(s) for this prefix and run number already exist in " + runDir + ".</font>");
+      GiveBackRunNumber();
+      return;
+    }
     if( !existing.isEmpty() ){
       QMessageBox box(this);
       box.setIcon(QMessageBox::Warning);
@@ -1591,8 +1596,7 @@ void FSUDAQ::StartACQ(){
       box.exec();
       if( box.clickedButton() != over ){
         LogMsg("<font style=\"color: red;\">Start Run-" + runIDStr + " not started: " + QString::number(existing.size()) + " file(s) for this prefix and run number already exist in " + runDir + ".</font>");
-        if( chkAutoIncrement->isChecked() ) runID --;
-        leRunID->setText(QString::number(runID));
+        GiveBackRunNumber();
         return;
       }
       // remove everything of that run, including files with indices a new run would not reach
@@ -1608,45 +1612,80 @@ void FSUDAQ::StartACQ(){
     if( !QDir().mkpath(runDir) ){
       QMessageBox::warning(this, "Cannot create run folder", "Cannot create\n" + runDir + "\n\nAccess rights? The run was not started.");
       LogMsg("<font style=\"color: red;\">Start Run-" + runIDStr + " refused: cannot create " + runDir + ".</font>");
-      if( chkAutoIncrement->isChecked() ) runID --;
-      leRunID->setText(QString::number(runID));
+      GiveBackRunNumber();
       return;
     }
+  }
+
+  //---- 1. every board: its settings as they are on the board now, and its data file; none starts yet
+  QStringList problems;
+  QStringList createdFiles;
+  for( unsigned int i = 0; i < nDigi; i++){
+    if( digi[i]->IsBoardDisabled() || !save ) continue;
+    QString digiName = "Digi-" + QString::number(digi[i]->GetSerialNumber());
+    QString snapshot = runDir + "/" + prefix + "_" + runIDStr + "_" + QString::number(digi[i]->GetSerialNumber()) + "_" + QString::fromStdString(digi[i]->GetData()->DPPTypeStr) + ".bin";
+    // read back, so the snapshot is what the board holds, not what the program remembers
+    if( digi[i]->ReadAllSettingsFromBoard(true) > 0 ) problems << digiName + ": its settings could not be read back for the run's snapshot.";
+    digi[i]->SaveAllSettingsAsTextForRun(snapshot.toStdString());
+    if( QFile::exists(snapshot) ) createdFiles << snapshot; else problems << digiName + ": cannot write the settings snapshot " + snapshot + ".";
+    digi[i]->GetData()->SetMaxFileSize((uint64_t) sbFileSizeMB->value() * 1024 * 1024);
+    if( digi[i]->GetData()->OpenSaveFile((runDir + "/" + prefix + "_" + runIDStr).toStdString()) ){
+      createdFiles << QString::fromStdString(digi[i]->GetData()->GetOutFileName());
+    }else{
+      problems << digiName + ": cannot open the data file " + QString::fromStdString(digi[i]->GetData()->GetOutFileName()) + ".";
+    }
+  }
+
+  //---- 2. start the boards, the master (the 0-th board) last; all of them or none
+  std::vector<unsigned int> started;
+  if( problems.isEmpty() ){
+    for( int i = (int) nDigi-1; i >= 0 ; i--){
+      if( digi[i]->IsBoardDisabled() ) continue;
+      readDataThread[i]->SetSaveData(save);
+      digi[i]->WriteRegister(DPP::SoftwareClear_W, 1);
+      if( !digi[i]->StartACQ() ){
+        problems << "Digi-" + QString::number(digi[i]->GetSerialNumber()) + " did not start (no readout buffer, or the start command failed).";
+        break;
+      }
+      readDataThread[i]->Start();
+      started.push_back(i);
+    }
+  }
+
+  if( !problems.isEmpty() ){
+    for( unsigned int i : started ){
+      readDataThread[i]->Stop();
+      readDataThread[i]->wait();
+      digiMTX[i].lock();
+      digi[i]->StopACQ();
+      digiMTX[i].unlock();
+    }
+    for( unsigned int i = 0; i < nDigi; i++) digi[i]->GetData()->CloseSaveFile();
+    for( const QString & f : createdFiles ) QFile::remove(f);
+    if( save ) QDir().rmdir(runDir); // only if empty
+    for( const QString & p : problems ) LogMsg("<font style=\"color: red;\">" + p + "</font>");
+    LogMsg("<font style=\"color: red;\">The run was not started; no board is running.</font>");
+    GiveBackRunNumber();
+    QMessageBox::warning(this, "Run not started", "The run was not started; no board is running.\n\n" + problems.join("\n"));
+    return;
+  }
+
+  //---- 3. the run is on: record it
+  if( save ){
     LogMsg("<font style=\"color: orange;\">===================== <b>Start a new Run-" + QString::number(runID) + "</b></font>");
     LogMsg("Run folder : <b>" + runDir + "</b>");
     TellDashboardRunFolder(runDir);
     WriteRunTimestamp(true, QDateTime::currentDateTime().toString("yyyy.MM.dd hh:mm:ss"));
+    SaveLastRunFile();
   }else{
     LogMsg("<font style=\"color: orange;\">===================== <b>Start a non-save Run</b></font>");
   }
-
-  //assume master board is the 0-th board
-  for( int i = (int) nDigi-1; i >= 0 ; i--){
-    if( digi[i]->IsBoardDisabled() ) continue;
-    if( chkSaveData->isChecked() ) {
-      std::string runSettingName =  (runDir + "/" + prefix + "_" + runIDStr + "_" + QString::number(digi[i]->GetSerialNumber())).toStdString();
-      runSettingName += "_" + digi[i]->GetData()->DPPTypeStr + ".bin";
-      digi[i]->SaveAllSettingsAsTextForRun(runSettingName);
-      digi[i]->GetData()->SetMaxFileSize((uint64_t) sbFileSizeMB->value() * 1024 * 1024);
-      if( digi[i]->GetData()->OpenSaveFile((runDir + "/" + prefix + "_" + runIDStr).toStdString()) == false ) {
-        LogMsg("Cannot open save file : " + QString::fromStdString(digi[i]->GetData()->GetOutFileName() ) + ". Probably read-only?");
-       continue; 
-      };
-    }
-    readDataThread[i]->SetSaveData(chkSaveData->isChecked());
-    LogMsg("Digi-" + QString::number(digi[i]->GetSerialNumber()) + " is starting ACQ." );
-    digi[i]->WriteRegister(DPP::SoftwareClear_W, 1);
-
-    digi[i]->StartACQ();
-
-    readDataThread[i]->start();
+  for( unsigned int i = 0; i < nDigi; i++){
+    if( !digi[i]->IsBoardDisabled() ) LogMsg("Digi-" + QString::number(digi[i]->GetSerialNumber()) + " is taking data." );
   }
-  if( chkSaveData->isChecked() ) SaveLastRunFile();
 
-  // printf("------------ wait for 2 sec \n");
-  // usleep(1000*1000);
-  // printf("------------ Go! \n");
-  // for( unsigned int i = 0; i < nDigi; i++) readDataThread[i]->go();
+  inDataRun = true;
+  isACQStarted = true;
 
   // if( scalar ) scalarTimer->start(ScalarUpdateinMiliSec); 
   if( scalar ) scalarTimingThread->start();
@@ -1661,19 +1700,8 @@ void FSUDAQ::StartACQ(){
   if( singleHistograms ) singleHistograms->startTimer();
   if( onlineAnalyzer ) onlineAnalyzer->startTimer();
 
-  bnStartACQ->setEnabled(false);
-  bnOpenDigitizers->setEnabled(false); // "Close Digitizers" only while no run is going
-  bnStartACQ->setStyleSheet("");
-  bnStopACQ->setEnabled(true);
-  bnStopACQ->setStyleSheet("background-color: red;");
-  bnOpenScope->setEnabled(false);
-  EnableRunLengthControls(false);
-  sbFileSizeMB->setEnabled(false);
   bnDashboard->setEnabled(true); // during a run: re-opens a running dashboard, or asks before starting one
-  bnSync->setEnabled(false);
-
-  if( digiSettings ) digiSettings->EnableButtons(false);
-
+  UpdateRunControls();
 
   {//^=== elog and database
     if( influx && chkInflux->isChecked() ){
@@ -1683,7 +1711,7 @@ void FSUDAQ::StartACQ(){
       influx->ClearDataPointsBuffer();
     }
 
-    if( elogID > 0 && chkElog->isChecked() && chkSaveData->isChecked() ){
+    if( elogID > 0 && chkElog->isChecked() && save ){
       QString msg = "================================= Run-" + QString::number(runID).rightJustified(3, '0') + "<p>" 
                     + QDateTime::currentDateTime().toString("MM.dd hh:mm:ss") + "<p>"
                     + startComment + "<p>"
@@ -1692,40 +1720,54 @@ void FSUDAQ::StartACQ(){
     }
   }
 
-  isACQStarted = true;
-  chkSaveData->setEnabled(false);
-  // bnDigiSettings->setEnabled(false);
-
-  StartRunClock(chkSaveData->isChecked() ? "Run " + QString::number(runID) : "Run (not saved)");
+  StartRunClock(save ? "Run " + QString::number(runID) : "Run (not saved)");
 
 }
 
 void FSUDAQ::StopACQ(){
   DebugPrint("%s", "FSUDAQ");
 
-  QCoreApplication::processEvents();
-
-  if( digi == nullptr ) return;
+  if( digi == nullptr || !inDataRun ) return; // nothing running: no second stop record
 
   // Stop the boards and close the files before anything else, so the recorded
   // stop time is when acquisition ended and the files stop growing while the
   // operator types the stop comment (the comment dialog comes further down).
   bnStopACQ->setEnabled(false);
+  const bool save = chkSaveData->isChecked();
+
+  // 1. each readout thread stops its board (master first), reads and saves what the board still
+  //    holds, then ends; a board whose readout already ended is stopped from here
+  for( unsigned int i = 0; i < nDigi; i++){
+    if( digi[i]->IsBoardDisabled() ) continue;
+    if( readDataThread[i]->isRunning() ){
+      readDataThread[i]->StopAfterDrain();
+    }else{
+      digiMTX[i].lock();
+      digi[i]->SWStopACQ();
+      digiMTX[i].unlock();
+    }
+  }
+  QString stopTime = QDateTime::currentDateTime().toString("yyyy.MM.dd hh:mm:ss");
 
   for( unsigned int i = 0; i < nDigi; i++){
     if( digi[i]->IsBoardDisabled() ) continue;
-    readDataThread[i]->Stop();
-    readDataThread[i]->quit();
-    readDataThread[i]->wait();
+    if( !readDataThread[i]->wait(10000) ){
+      LogMsg("<font style=\"color: red;\">Digi-" + QString::number(digi[i]->GetSerialNumber()) + ": its readout did not end 10 s after the stop; stopped without reading the rest.</font>");
+      readDataThread[i]->Stop();
+      readDataThread[i]->wait();
+    }
+  }
+
+  // 2. then the files
+  for( unsigned int i = 0; i < nDigi; i++){
+    if( digi[i]->IsBoardDisabled() ) continue;
     digiMTX[i].lock();
     digi[i]->StopACQ();
     digiMTX[i].unlock();
-    if( chkSaveData->isChecked() ) digi[i]->GetData()->CloseSaveFile();
+    if( save ) digi[i]->GetData()->CloseSaveFile();
     LogMsg("Digi-" + QString::number(digi[i]->GetSerialNumber()) + " ACQ is stopped." );
-    QCoreApplication::processEvents();
   }
-
-  QString stopTime = QDateTime::currentDateTime().toString("yyyy.MM.dd hh:mm:ss");
+  inDataRun = false;
 
   if( scalarTimingThread->isRunning()){
     scalarTimingThread->Stop();
@@ -1740,17 +1782,6 @@ void FSUDAQ::StopACQ(){
   
   lbScalarACQStatus->setText("<font style=\"color: red;\"><b>ACQ Off</b></font>");
 
-  bnStartACQ->setEnabled(true);
-  bnOpenDigitizers->setEnabled(true); // "Close Digitizers" only while no run is going
-  bnStartACQ->setStyleSheet("background-color: green;");
-  bnStopACQ->setEnabled(false);
-  bnStopACQ->setStyleSheet("");
-  bnOpenScope->setEnabled(true);
-  EnableRunLengthControls(true);
-  sbFileSizeMB->setEnabled(true);
-  bnDashboard->setEnabled(true);
-  bnSync->setEnabled(true);
-
   if( scalar ){
     for( unsigned int iDigi = 0; iDigi < nDigi; iDigi ++){
       uint32_t acqStatus = digi[iDigi]->ReadRegister(DPP::AcquisitionStatus_R);
@@ -1759,16 +1790,12 @@ void FSUDAQ::StopACQ(){
       }else{
         runStatus[iDigi]->setStyleSheet("");
       }
-      QCoreApplication::processEvents();
     }
   }
 
-  if( digiSettings ) {
-    digiSettings->EnableButtons(true);
-    digiSettings->ReadSettingsFromBoard();
-  }
+  if( digiSettings ) digiSettings->ReadSettingsFromBoard();
 
-  if( chkSaveData->isChecked() ) {
+  if( save ) {
     CommentDialog(false); // acquisition has already stopped; Cancel only means "no comment"
     LogMsg("===================== Stop Run-" + QString::number(runID));
     WriteRunTimestamp(false, stopTime);
@@ -1783,7 +1810,7 @@ void FSUDAQ::StopACQ(){
       influx->ClearDataPointsBuffer();
     }
 
-    if( elogID > 0 && chkElog->isChecked() && chkSaveData->isChecked()){
+    if( elogID > 0 && chkElog->isChecked() && save){
       QString msg = QDateTime::currentDateTime().toString("MM.dd hh:mm:ss") + "<p>" + stopComment + "<p>";
       uint64_t totalFileSize = 0;
       for(unsigned int i = 0 ; i < nDigi; i++){
@@ -1798,15 +1825,72 @@ void FSUDAQ::StopACQ(){
     }
   }
 
-  chkSaveData->setEnabled(true);
-  // bnDigiSettings->setEnabled(true);
   isACQStarted = false;
 
   StopRunClock();
+  UpdateRunControls();
+
+  // a file that failed to close, or anything the last refresh did not see (AbortRun says it itself)
+  QStringList failures = RunFailures();
+  if( !failures.isEmpty() && abortComment.isEmpty() ){
+    for( const QString & f : failures ) LogMsg("<font style=\"color: red;\">" + f + "</font>");
+    QMessageBox::warning(this, "Problems in the run", "The run had problems:\n\n" + failures.join("\n"));
+  }
 
   repaint();
-  // printf("================ end of %s \n", __func__);
 
+}
+
+QStringList FSUDAQ::RunFailures() const {
+  QStringList list;
+  if( digi == nullptr ) return list;
+  for( unsigned int i = 0; i < nDigi; i++ ){
+    if( digi[i]->IsBoardDisabled() ) continue;
+    QString digiName = "Digi-" + QString::number(digi[i]->GetSerialNumber());
+    if( readDataThread[i]->Failed() ) list << digiName + " stopped taking data: " + readDataThread[i]->FailReason() + ".";
+    uint64_t notSaved = digi[i]->GetData()->SaveFailed.load();
+    if( notSaved > 0 ) list << digiName + ": " + QString(digi[i]->GetData()->SaveError) + " (" + QString::number(notSaved) + " read(s) not saved).";
+  }
+  return list;
+}
+
+void FSUDAQ::AbortRun(const QStringList & failures){
+  if( !inDataRun ) return;
+  for( const QString & f : failures ) LogMsg("<font style=\"color: red;\">" + f + "</font>");
+  LogMsg("<font style=\"color: red;\"><b>The run is stopped: the data are not being taken as set up.</b></font>");
+  runTimer->stop();
+  pauseTimer->stop();
+  needManualComment = false;
+  abortComment = "Run stopped by FSUDAQ: " + failures.join(" ");
+  StopACQ();
+  abortComment.clear();
+  needManualComment = true;
+  EndSeries("a board failed");
+  QMessageBox::critical(this, "Run stopped", "The run was stopped because:\n\n" + failures.join("\n"));
+}
+
+void FSUDAQ::UpdateRunControls(){
+  const bool open = (digi != nullptr);
+  const bool pausing = pauseTimer->isActive();
+  const bool busy = inDataRun || pausing || series.active;   // a run, or a series between its runs
+  const bool idle = open && !busy && !scopeShown;
+
+  bnStartACQ->setEnabled(idle);
+  bnStartACQ->setStyleSheet(idle ? "background-color: green;" : "");
+  bnStopACQ->setEnabled(busy);
+  bnStopACQ->setStyleSheet(busy ? "background-color: red;" : "");
+  bnStopACQ->setText(pausing ? "Stop Series" : "Stop ACQ");
+  bnOpenDigitizers->setEnabled(!busy && !scopeShown); // "Close Digitizers" only while no run is going
+  bnOpenScope->setEnabled(open && !busy);
+  bnSync->setEnabled(idle);
+  chkSaveData->setEnabled(open && !busy && !rawDataPath.isEmpty());
+  chkAutoIncrement->setEnabled(!busy);
+  leRunID->setReadOnly(busy || chkAutoIncrement->isChecked());
+  lePrefix->setReadOnly(busy);
+  bnSetDataPath->setEnabled(!busy);
+  EnableRunLengthControls(open && !busy);
+  sbFileSizeMB->setEnabled(!busy);
+  if( digiSettings && !scopeShown ) digiSettings->EnableButtons(!busy);
 }
 
 void FSUDAQ::EnableRunLengthControls(bool enable){
@@ -1821,7 +1905,23 @@ QString FSUDAQ::RunLengthText() const {
 
 void FSUDAQ::AutoRun(){
   DebugPrint("%s", "FSUDAQ");
-  runTimer->disconnect(runTimerConnection);
+  if( inDataRun || series.active ) return;
+
+  // the run length, repeat and pause of a series are fixed here, for all of its runs
+  series = Series();
+  const qint64 runTimeMs = qRound64(sbRunTimeMin->value() * 60. * 1000.);
+  if( runTimeMs > 0 ){
+    series.active = true;
+    series.repeat = chkRepeatRun->isChecked();
+    series.save = chkSaveData->isChecked();
+    series.runMs = runTimeMs;
+    series.pauseMs = qRound64(sbRepeatPauseSec->value() * 1000.);
+  }
+  if( series.repeat && series.save && !chkAutoIncrement->isChecked() ){
+    series = Series();
+    QMessageBox::warning(this, "Run not started", "Repeated runs need \"Auto-increment run no.\": every run of the series takes the next number.");
+    return;
+  }
 
   // the dashboard is started before the boards, never while they run
   if( chkAutoDashboard->isChecked() && !rawDataPath.isEmpty() && digi != nullptr ){
@@ -1829,70 +1929,64 @@ void FSUDAQ::AutoRun(){
     else StartDashboardProcess();   // it opens the browser itself once its server is up
   }
 
-  const qint64 runTimeMs = qRound64(sbRunTimeMin->value() * 60. * 1000.);
-  if( runTimeMs <= 0 ){ // until Stop
-    StartACQ();
-    return;
-  }
-
-  //---- timed run, optionally repeated
-  const bool repeat = chkRepeatRun->isChecked();
-  const qint64 pauseMs = qRound64(sbRepeatPauseSec->value() * 1000.);
-
   needManualComment = true;
   StartACQ();
-  if( !isACQStarted ) return; // start was cancelled or refused; nothing to time
+  if( !inDataRun ){ // start was cancelled or refused; nothing to time
+    series = Series();
+    UpdateRunControls();
+    return;
+  }
+  if( series.active ) runTimer->start(series.runMs);
+  UpdateRunControls();
 
-  runTimerConnection =  connect( runTimer, &QTimer::timeout, this, [=](){
-    needManualComment = false;
-    LogMsg("Time Up, Stopping ACQ...");
-    StopACQ();
-    if( repeat ){
+}
 
-      bnStartACQ->setEnabled(false);
-      bnOpenDigitizers->setEnabled(false); // "Close Digitizers" only while no run is going
-      bnStartACQ->setStyleSheet("");
-      bnStopACQ->setEnabled(true);
-      bnStopACQ->setStyleSheet("background-color : red;");
+void FSUDAQ::RunTimeUp(){
+  if( !inDataRun ) return;
+  LogMsg("Time up, stopping the run ...");
+  needManualComment = false;
+  StopACQ();
+  needManualComment = true;
+  if( series.active && series.repeat ){
+    pauseTimer->start(series.pauseMs);
+    LogMsg("Next run in " + QString::number(series.pauseMs / 1000.) + " s (Stop Series ends the series).");
+    UpdateRunControls();
+  }else{
+    EndSeries("");
+  }
+}
 
-      LogMsg("Wait for " + QString::number(pauseMs / 1000.) + " sec for next Run ...." );
-      QElapsedTimer elapsedTimer;
-      elapsedTimer.invalidate();
-      elapsedTimer.start();
-      while( elapsedTimer.elapsed() < pauseMs) {
-        
-        if( breakAutoRepeat ) {
-          LogMsg("Break Auto repeat.");
-          bnStartACQ->setEnabled(true);
-          bnOpenDigitizers->setEnabled(true); // "Close Digitizers" only while no run is going
-          bnStartACQ->setStyleSheet("background-color : green");
-          bnStopACQ->setEnabled(false);
-          bnStopACQ->setStyleSheet("");
-          return;
-        }
-        QCoreApplication::processEvents();
-      }
-      
-      needManualComment = false;
-      StartACQ();
-      if( !isACQStarted ) { // e.g. files for the next run number already exist
-        LogMsg("Auto repeat stopped: the next run could not be started.");
-        bnStartACQ->setEnabled(true);
-        bnOpenDigitizers->setEnabled(true); // "Close Digitizers" only while no run is going
-        bnStartACQ->setStyleSheet("background-color : green");
-        bnStopACQ->setEnabled(false);
-        bnStopACQ->setStyleSheet("");
-        return;
-      }
-      runTimer->setSingleShot(true);
-      runTimer->start(runTimeMs);
-    }
-  });
+void FSUDAQ::PauseOver(){
+  if( !series.active ) return;
+  needManualComment = false;
+  StartACQ();
+  needManualComment = true;
+  if( !inDataRun ){ // e.g. files for the next run number already exist
+    EndSeries("the next run could not be started");
+    return;
+  }
+  runTimer->start(series.runMs);
+  UpdateRunControls();
+}
 
-  runTimer->setSingleShot(true);
-  runTimer->start(runTimeMs);
-  breakAutoRepeat = false;
+void FSUDAQ::StopPressed(){
+  runTimer->stop();
+  if( pauseTimer->isActive() ){
+    pauseTimer->stop();
+    EndSeries("Stop pressed during the pause");
+    return;
+  }
+  needManualComment = true;
+  StopACQ();
+  EndSeries(series.active ? "Stop pressed" : "");
+}
 
+void FSUDAQ::EndSeries(const QString & why){
+  if( series.active && !why.isEmpty() ) LogMsg("Run series ended: " + why + ".");
+  series = Series();
+  runTimer->stop();
+  pauseTimer->stop();
+  UpdateRunControls();
 }
 
 void FSUDAQ::SetSyncMode(){
@@ -2163,7 +2257,9 @@ bool FSUDAQ::CommentDialog(bool isStartRun){
     lineEdit->setFocus();
     result = dOpen->exec();
   }else{
-    if( !needManualComment ){ // automatic start/stop of a timed run
+    if( !needManualComment && !isStartRun && !abortComment.isEmpty() ){ // FSUDAQ stopped the run
+      lineEdit->setText(abortComment);
+    }else if( !needManualComment ){ // automatic start/stop of a timed run
       if( isStartRun ){
         lineEdit->setText("Auto Start, repeat every " + RunLengthText() + ".");
       }else{
@@ -2371,11 +2467,8 @@ void FSUDAQ::OpenScope(){
     connect(scope, &Scope::SendLogMsg, this, &FSUDAQ::LogMsg);
     
     connect(scope, &Scope::CloseWindow, this, [=](){
-      bnStartACQ->setEnabled(true);
-      bnOpenDigitizers->setEnabled(true); // "Close Digitizers" only while no run is going
-      bnStartACQ->setStyleSheet("background-color: green;");
-      bnStopACQ->setEnabled(false);  
-      bnStopACQ->setStyleSheet("");
+      scopeShown = false;
+      UpdateRunControls();
     });
 
     connect(scope, &Scope::TellACQOnOff, this, [=](bool onOff){
@@ -2425,12 +2518,10 @@ void FSUDAQ::OpenScope(){
     scope->activateWindow();
   }
 
-  bnStartACQ->setEnabled(false);
-  bnOpenDigitizers->setEnabled(false); // "Close Digitizers" only while no run is going
-  bnStartACQ->setStyleSheet("");
-  bnStopACQ->setEnabled(false);  
-  bnStopACQ->setStyleSheet("");
-  chkSaveData->setChecked(false);
+  // no Start while the scope is open (it runs the boards itself); Save Data is left as it is,
+  // the scope's readout never saves
+  scopeShown = true;
+  UpdateRunControls();
 
 }
 

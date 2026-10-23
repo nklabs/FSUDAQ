@@ -27,6 +27,7 @@ class ScalarWorker; //Forward declaration
 //^#===================================================== FSUDAQ
 class FSUDAQ : public QMainWindow{
   Q_OBJECT
+  friend class FSUDAQTest; // tests/test_daq.cpp drives the run control without a display
 public:
   FSUDAQ(QWidget *parent = nullptr);
   ~FSUDAQ();
@@ -137,10 +138,26 @@ private:
   QProcess * dashboardProc;
   QNetworkAccessManager * net;
 
-  QTimer * runTimer;
-  bool breakAutoRepeat;
+  QTimer * runTimer;            // a timed run ends when it fires
+  QTimer * pauseTimer;          // the pause before the next run of a repeated series
   bool needManualComment;
-  QMetaObject::Connection runTimerConnection;
+  bool inDataRun;               // between StartACQ and StopACQ of a run (the scope's acquisition is not one)
+  bool scopeShown;              // the scope window is open (from OpenScope until it closes)
+  QString abortComment;         // the stop comment when FSUDAQ stops a run because a board failed
+  struct Series {               // a timed (and maybe repeated) run started by Start ACQ, fixed when it starts
+    bool active = false;
+    bool repeat = false;
+    bool save = false;
+    qint64 runMs = 0;
+    qint64 pauseMs = 0;
+  } series;
+  void UpdateRunControls();     // enable the run widgets for the present state (open, running, pausing, scope)
+  void RunTimeUp();
+  void PauseOver();
+  void StopPressed();
+  void EndSeries(const QString & why);
+  QStringList RunFailures() const;      // boards that stopped reading or could not save since the run started
+  void AbortRun(const QStringList & failures);
 
   //@----- influx
   InfluxDB * influx;

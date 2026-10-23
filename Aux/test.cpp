@@ -344,7 +344,6 @@ void SimpleDAQ(){
 
     digi->ReadData();
     data->DecodeBuffer(true, 0);
-    data->SetDecimationFactor(3);
     data->SaveData();
 
     data->PrintStat();

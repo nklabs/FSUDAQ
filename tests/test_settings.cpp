@@ -130,6 +130,7 @@ static void CheckRefused(const std::string & dir) {
 }
 
 int main(int argc, char ** argv) {
+  Digitizer::programPauseMs = 0; // the fake boards need no pause between register writes
   std::string dir = argc > 1 ? argv[1] : "tests/data/odin-runB";
   std::vector<std::pair<int, std::string>> files;
   if( DIR * d = opendir(dir.c_str()) ){

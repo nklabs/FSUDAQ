@@ -39,7 +39,16 @@ uint32_t fake_caen_reg(int serial, uint32_t address);          // the register a
 void fake_caen_set_reg(int serial, uint32_t address, uint32_t value);
 int  fake_caen_get_stats(int serial, fake_caen_stats * stats);
 int  fake_caen_is_sentinel(uint32_t address, uint32_t value);
-// Make the next calls fail: what = "malloc" (MallocReadoutBuffer) or "write" (WriteRegister), 0 to clear.
+// Generate DPP-PSD data instead: every board aggregate holds eventsPerCouple events in each couple
+// (3 words each: time tag, extras option 2, charges), like odin's files.
+int  fake_caen_set_synthetic(int serial, int eventsPerCouple, double aggPerMs);
+// Each ReadData that returns data takes this long, like a block transfer, so the readout can fall
+// behind and the board holds data when it is stopped.
+void fake_caen_set_read_delay(int serial, int microseconds);
+// Every byte ReadData handed out since the board was added, to compare with the saved files.
+size_t fake_caen_handed_out(int serial, const uint32_t ** words);
+// Make the next calls fail: what = "malloc" (MallocReadoutBuffer), "write" (WriteRegister) or
+// "read" (ReadData), 0 or "" to clear.
 void fake_caen_fail(int serial, const char * what);
 
 #ifdef __cplusplus

@@ -545,16 +545,6 @@ void DigiSettingsPanel::SetUpSpinBox(RSpinBox * &sb, QString label, QGridLayout 
       return;
     }
 
-    if( para == DPP::DecimationFactor ){
-      int deci = pow(2, sb->value());
-      if( sbRecordLength[ID][0]->value() / digi[ID]->GetTick2ns() <= 2 * deci ){
-        SendLogMsg("Tried to set waveform decimation to be " +  QString::number(deci) + ", which make the number of trace less than 2. Abort.");
-        sbSWDecimation[ID]->setValue(0);
-      }else{
-        SendLogMsg("Set waveform decimation to be " +  QString::number(deci) + ".");
-      }
-    }
-
     uint32_t bit = para.GetPartialStep() == -1 ? sb->value() : sb->value() / para.GetPartialStep() / digi[ID]->GetTick2ns();
 
     if( para.IsCoupled() == true  && chID >= 0 ) {
@@ -2513,9 +2503,8 @@ void DigiSettingsPanel::SetUpBoard_QDC(){
   SetUpSpinBox(sbNumEventAgg[ID][0],    "Event pre Agg. : ", bdCfgLayout[ID], 5, 0, DPP::QDC::NumberEventsPerAggregate, -1, true);
   SetUpSpinBox(sbRecordLength[ID][0],   "Record Length [ns] : ", bdCfgLayout[ID], 6, 0, DPP::QDC::RecordLength_W, -1, true);
 
-  SetUpSpinBox( sbSWDecimation[ID], "SW Decimation Factor : ", bdCfgLayout[ID], 7, 0, DPP::DecimationFactor, -1, true);
-  QLabel * lbDeci = new QLabel("This average trace.", this);
-  bdCfgLayout[ID]->addWidget(lbDeci, 7, 2, 1, 2);
+  // no "SW Decimation Factor": the decimating file writer gave every aggregate with more than one
+  // group a header that did not match its content, so the files could not be read back
 
 }
 
@@ -4021,7 +4010,6 @@ void DigiSettingsPanel::UpdateSettings_QDC(){
 
   UpdateSpinBox(sbNumEventAgg[ID][0],        DPP::QDC::NumberEventsPerAggregate, -1);
 
-  UpdateSpinBox(sbSWDecimation[ID], DPP::DecimationFactor, -1);
 
   for(int grp = 0; grp < digi[ID]->GetNumRegChannels(); grp ++){
 

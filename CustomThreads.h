@@ -12,6 +12,7 @@
 #include <QWaitCondition>
 #include <QMessageBox>
 #include <QCoreApplication>
+#include <atomic>
 
 #include "macro.h"
 #include "ClassDigitizer.h"
@@ -29,8 +30,16 @@ public:
     isScope = false;
     readCount = 0;
     stop = false;
+    drain = false;
+    failed = false;
   }
-  void Stop() { this->stop = true;}
+  /// start the readout. Use this, not start(): the stop request is cleared here, before the thread
+  /// runs; cleared in run(), a Stop() right after the start was lost and the thread never ended
+  void Start() { stop = false; drain = false; failed = false; failReason.clear(); start(); }
+  void Stop() { this->stop = true;}                          /// leave at once; what the board still holds is not read
+  void StopAfterDrain() { drain = true; this->stop = true; }  /// stop the board (from this thread), read and save what it still holds, then leave
+  bool Failed() const { return failed; }                     /// the last run of this thread ended on a read error, not on Stop
+  QString FailReason() const { return failReason; }
   void SetSaveData(bool onOff)  {this->isSaveData = onOff;}
   void SetScopeMode(bool onOff) {this->isScope = onOff;}
 
@@ -71,7 +80,6 @@ public:
       pthread_sigmask(SIG_BLOCK, &set, nullptr);
     }
 
-    stop = false;
     readCount = 0;
     if( isScope ){ QMutexLocker locker(&scopeMTX); for( auto & t : scopeTrace ) t = ScopeTrace(); }
     clock_gettime(CLOCK_REALTIME, &t0);
@@ -83,23 +91,49 @@ public:
     digiMTX[ID].unlock();
 
     printf("ReadDataThread for digi-%d running.\n", digi->GetSerialNumber());
+    int emptyReads = 0;                                   // reads in a row that found nothing, once the board is stopped
+    bool boardStopped = false;                            // this thread stopped the board for the drain
+    std::chrono::steady_clock::time_point drainStart{};
     do{
       
-      if( stop) break;
+      // drain is set before stop: whoever sees stop also sees drain (both atomic)
+      if( stop && !drain ) break;                         // Stop(): leave at once
+      if( drain && !boardStopped ){
+        // the board is stopped here, by the thread that reads it: no CAEN call on this board from
+        // another thread while it reads (the board mutexes are per file, they do not exclude this one)
+        digiMTX[ID].lock();
+        digi->SWStopACQ();
+        digiMTX[ID].unlock();
+        boardStopped = true;
+        drainStart = std::chrono::steady_clock::now();
+      }
 
       digiMTX[ID].lock();
       int ret = digi->ReadData();
+      uint32_t nByte = digi->GetData()->nByte;
       digiMTX[ID].unlock();
       readCount ++;
 
-      if( stop) break;
+      if( stop && !drain ) break;
 
-      if( ret == CAEN_DGTZ_Success && !stop){
-        digiMTX[ID].lock();
-        digi->GetData()->DecodeBuffer(!isScope, 0);
-        if( isSaveData ) digi->GetData()->SaveData();
-        if( isScope ) CopyScopeTraces(digi->GetData());
-        digiMTX[ID].unlock();
+      if( ret == CAEN_DGTZ_Success ){
+        if( nByte > 0 ){
+          emptyReads = 0;
+          digiMTX[ID].lock();
+          digi->GetData()->DecodeBuffer(!isScope, 0);
+          if( isSaveData ) digi->GetData()->SaveData();
+          if( isScope ) CopyScopeTraces(digi->GetData());
+          digiMTX[ID].unlock();
+        }else if( boardStopped ){
+          // empty twice, 10 ms apart: the stopped board has nothing left
+          if( ++emptyReads >= 2 ) break;
+          usleep(10000);
+        }
+        if( boardStopped && std::chrono::steady_clock::now() - drainStart > std::chrono::seconds(5) ){
+          printf("\033[31mDigi-%d: still reading data 5 s after the stop; the rest is left on the board.\033[0m\n", digi->GetSerialNumber());
+          emit sendMsg("<font style=\"color: red;\">Digi-" + QString::number(digi->GetSerialNumber()) + ": still reading data 5 s after the stop; the rest is left on the board.</font>");
+          break;
+        }
 
       }else{
         printf("ReadDataThread::%s------------ ret : %d \n", __func__, ret);
@@ -110,7 +144,9 @@ public:
           digi->GetData()->ClearData();
         }
         digiMTX[ID].unlock();
-        emit sendMsg("Digi-" + QString::number(digi->GetSerialNumber()) + " ACQ off.");
+        failReason = "board read failed (CAEN error " + QString::number(ret) + ")";
+        failed = true;
+        emit sendMsg("<font style=\"color: red;\">Digi-" + QString::number(digi->GetSerialNumber()) + " ACQ off: " + failReason + ".</font>");
         stop = true;
         break;
       }
@@ -120,7 +156,7 @@ public:
         digiMTX[ID].lock();
         digi->ReadACQStatus();
         digiMTX[ID].unlock();
-        t2 = t1;
+        t1 = t2;
         // QCoreApplication::processEvents();
       }
 
@@ -135,7 +171,7 @@ public:
       //     ta = tb;
       //   }
       // }
-    }while(!stop);
+    }while(true); // every way out is above: Stop(), the end of a drain, a read error
     printf("ReadDataThread for digi-%d stopped.\n", digi->GetSerialNumber());
   }
 signals:
@@ -167,7 +203,10 @@ private:
   ScopeTrace scopeTrace[MaxNChannels];
 
   Digitizer * digi; 
-  bool stop;
+  std::atomic<bool> stop;
+  std::atomic<bool> drain;
+  std::atomic<bool> failed;
+  QString failReason;      // written before failed is set
   int ID;
   timespec ta, tb, t1, t2, t0;
   bool isSaveData;

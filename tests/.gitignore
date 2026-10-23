@@ -1,6 +1,9 @@
 *.o
+*.d
 *.log
+build/
 test_settings
+test_daq
 # the top-level .gitignore drops qmake Makefiles and data folders; these belong to the tests
 !Makefile
 !data

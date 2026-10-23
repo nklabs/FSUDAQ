@@ -14,6 +14,7 @@
 #include <vector>
 #include <sys/stat.h>
 #include <cerrno>
+#include <atomic>
 
 #include "macro.h"
 
@@ -64,7 +65,8 @@ class Data{
     bool           lossFlagsAvailable; /// the board writes extras with flags (PSD extras option 1 or 2)
     uint64_t       ReadBytesSinceRate; /// bytes read from the board (Digitizer::ReadData), reset after trig-rate calculation
     uint64_t       DecodeTruncated;    /// buffers whose last aggregate was cut off (decode stopped there, the file still has the raw bytes)
-    uint64_t       SaveFailed;         /// buffers not written because the next data file could not be opened
+    std::atomic<uint64_t> SaveFailed;  /// buffers not (completely) written to the data file this run; the run must stop
+    char           SaveError[256];     /// why the first of them failed; written before SaveFailed leaves 0
     uint64_t       DecodeBadChannel;   /// events skipped because the channel number is not one this board has
     bool           decodeOverrun;      /// set by ReadBuffer() when a read goes past nByte
     unsigned int   aggTime; /// update every decode
@@ -96,7 +98,7 @@ class Data{
     ~Data();
   
     void Allocate80MBMemory();
-    void AllocateMemory(uint32_t size);
+    bool AllocateMemory(uint32_t size);
     
     void AllocateDataSize(int dataSize);
     void ClearDataPointer();
@@ -122,10 +124,9 @@ class Data{
     //^================= Saving data
     bool OpenSaveFile(std::string fileNamePrefix); // return false when fail
     std::string GetOutFileName() const {return outFileName;}
-    void SetDecimationFactor(unsigned short factor) { decimation = factor; printf("Set Decimation Factor to be %d\n", factor);}
     void SaveData(); 
     void CloseSaveFile();
-    unsigned int GetFileSize() const {return outFileSize;}
+    uint64_t GetFileSize() const {return outFileSize;}
     uint64_t GetTotalFileSize() const {return FinishedOutFilesSize + outFileSize;}
     void ZeroTotalFileSize() { FinishedOutFilesSize = 0; }
     void SetMaxFileSize(uint64_t bytes) { maxFileSize = bytes; } // a file is closed and the next index opened once it exceeds this
@@ -158,14 +159,12 @@ class Data{
     std::vector<bool> tempDigiWaveform3;
     std::vector<bool> tempDigiWaveform4;
 
-    unsigned short decimation;
-
     FILE * outFile;
     uint64_t FinishedOutFilesSize; // sum of files size.
     unsigned int outFileIndex;
     std::string outFilePrefix;
     std::string outFileName;
-    unsigned int outFileSize; // should be max at 2 GB
+    uint64_t outFileSize;
     uint64_t maxFileSize;     // roll-over size, default MaxSaveFileSize
 
     ullong t0[MaxNChannels]; // for trigger rate calculation
@@ -173,6 +172,8 @@ class Data{
     short calIndexes[MaxNChannels][2]; /// the index for trigger rate calculation
 
     unsigned int ReadBuffer(unsigned int nWord, int verbose = 0);
+    std::string SaveFileName(unsigned int index) const;
+    void RecordSaveFailure(const std::string & what);
 
     int DecodePHADualChannelBlock(unsigned int ChannelMask, bool fastDecode, int verbose);
     int DecodePSDDualChannelBlock(unsigned int ChannelMask, bool fastDecode, int verbose);
@@ -200,20 +201,19 @@ inline Data::Data(unsigned short numCh, uInt dataSize): numInputCh(numCh){
   ClearNumEventsDecoded();
   nw = 0;
 
-  decimation = 0;
-
   DecodeTruncated = 0;
   DecodeBadChannel = 0;
   lossFlagsAvailable = false;
   for( int i = 0; i < MaxNChannels; i++ ){ CountsSinceRate[i] = 0; Flag1024SinceRate[i] = 0; LostFlagSinceRate[i] = 0; LostNFlagSinceRate[i] = 0; CountsAtFlagSinceRate[i] = 0; }
   SaveFailed = 0;
+  SaveError[0] = '\0';
   decodeOverrun = false;
 
   outFileIndex = 0;
   outFilePrefix = "";
   outFileName = "";
   outFile = nullptr;
-  outFileSize = 0; // should be max at 2 GB
+  outFileSize = 0;
   FinishedOutFilesSize = 0; // sum of files size.
   maxFileSize = (uint64_t) MaxSaveFileSize;
 
@@ -301,11 +301,13 @@ inline void Data::ClearDataPointer(){
 
 }
 
-inline void Data::AllocateMemory(uint32_t size){
+inline bool Data::AllocateMemory(uint32_t size){
   ClearBuffer();
+  buffer = (char *) malloc(size);
+  if( buffer == nullptr ) return false;
   AllocatedSize = size;
-  buffer = (char *) malloc( AllocatedSize); 
   printf("Allocated %u byte ( %.2f MB) for buffer = %u words\n", AllocatedSize, AllocatedSize/1024./1024.,  AllocatedSize / 4);
+  return true;
 }
 
 inline void Data::Allocate80MBMemory(){
@@ -333,8 +335,9 @@ inline void Data::ClearNumEventsDecoded(){
 
 inline void Data::ClearData(){
   nByte = 0;
-  AllocatedSize = 0;
   TotalAggCount = 0;
+  DecodeTruncated = 0;
+  DecodeBadChannel = 0;
   for( int ch = 0 ; ch < MaxNChannels; ch++){
     LoopIndex[ch] = 0;
     DataIndex[ch] = -1;
@@ -455,32 +458,43 @@ inline void Data::CalTriggerRate(){ // this method is called by FSUDAQ::UpdateSc
 
 //^###############################################
 //^############################################### Save fsu file
-inline bool Data::OpenSaveFile(std::string fileNamePrefix){
-
-  outFilePrefix = fileNamePrefix;
-  outFileIndex = 0; // every run starts at _000; SaveData() rolls to _001, _002, ... within the run
-
+inline std::string Data::SaveFileName(unsigned int index) const {
   std::ostringstream oss;
   oss << outFilePrefix << "_"
       << std::setfill('0') << std::setw(3) << boardSN << "_"
       << DPPTypeStr << "_"
       << std::fixed << std::setprecision(0) << tick2ns << "_"
-      << std::setfill('0') << std::setw(3) << outFileIndex << ".fsu";
-  std::string saveFileName = oss.str();
+      << std::setfill('0') << std::setw(3) << index << ".fsu";
+  return oss.str();
+}
 
-  //char saveFileName[100];
-  //sprintf(saveFileName, "%s_%03d_%3s_%03u.fsu", outFilePrefix.c_str() , boardSN, DPPTypeStr.c_str(), outFileIndex);
+inline void Data::RecordSaveFailure(const std::string & what){
+  if( SaveFailed.load() == 0 ){
+    snprintf(SaveError, sizeof(SaveError), "%s", what.c_str());
+    printf("\033[31mDigi-%d: %s. Data of this board are not saved from here on.\033[0m\n", boardSN, what.c_str());
+  }
+  SaveFailed ++;
+}
 
-  outFileName = saveFileName;
-  outFile = fopen(saveFileName.c_str(), "wb"); // overwrite binary
+inline bool Data::OpenSaveFile(std::string fileNamePrefix){
+
+  outFilePrefix = fileNamePrefix;
+  outFileIndex = 0; // every run starts at _000; SaveData() rolls to _001, _002, ... within the run
+  outFileSize = 0;
+  FinishedOutFilesSize = 0;
+  SaveFailed = 0;
+  SaveError[0] = '\0';
+
+  outFileName = SaveFileName(outFileIndex);
+  outFile = fopen(outFileName.c_str(), "wb"); // overwrite binary
   
   if (outFile == NULL) {
-    printf("Failed to open the file. Probably Read-ONLY.\n");
+    printf("Failed to open %s: %s\n", outFileName.c_str(), strerror(errno));
     return false;
   } 
-
-  fseek(outFile, 0L, SEEK_END);
-  outFileSize = ftell(outFile);
+  // unbuffered: each read buffer goes to the file in one write, nothing waits in a stdio buffer
+  // (the online dashboard reads the growing file; a crash leaves only whole buffers)
+  setvbuf(outFile, nullptr, _IONBF, 0);
     
   return true;
 }
@@ -492,181 +506,38 @@ inline void Data::SaveData(){
     return;
   }
 
-  if( outFile == nullptr ) return;
+  if( outFile == nullptr ){
+    RecordSaveFailure("no data file is open (" + outFileName + ")");
+    return;
+  }
 
-  if( (uint64_t) outFileSize > maxFileSize ){
-    FinishedOutFilesSize += ftell(outFile);
+  if( outFileSize > maxFileSize ){
+    FinishedOutFilesSize += outFileSize;
     CloseSaveFile();
     outFileIndex ++;
 
-    // char saveFileName[100];
-    // sprintf(saveFileName, "%s_%03d_%3s_%03u.fsu", outFilePrefix.c_str() , boardSN, DPPTypeStr.c_str(), outFileIndex);
-
-    std::ostringstream oss;
-    oss << outFilePrefix << "_"
-        << std::setfill('0') << std::setw(3) << boardSN << "_"
-        << DPPTypeStr << "_"
-        << std::fixed << std::setprecision(0) << tick2ns << "_"
-        << std::setfill('0') << std::setw(3) << outFileIndex << ".fsu";
-    std::string saveFileName = oss.str();
-
-    outFileName = saveFileName;
+    outFileName = SaveFileName(outFileIndex);
     outFile = fopen(outFileName.c_str(), "wb"); //overwrite binary
     if( outFile == nullptr ){
       // Never write through a null FILE*: that is a segfault in the readout thread.
-      // The board keeps running; its data is lost from here on, and the message says so.
-      printf("\033[31mDigi-%d: cannot open the next data file %s (%s). Saving stops for this board!\033[0m\n",
-             boardSN, outFileName.c_str(), strerror(errno));
-      SaveFailed ++;
+      RecordSaveFailure("cannot open the next data file " + outFileName + " (" + strerror(errno) + ")");
       return;
     }
+    setvbuf(outFile, nullptr, _IONBF, 0);
+    outFileSize = 0;
   }
 
-  if( outFile == nullptr ) return;
-
-  if( decimation == 0){
-    fwrite(buffer, nByte, 1, outFile);
-  }else{
-    
-    int Deci = pow(2, decimation);
-
-    // printf("Decimation Factor : %d | Deci : %d | nByte %d | nWord %d\n", decimation, Deci, nByte, nByte / 4);
-
-    const size_t chunkSize = 4;
-    size_t numChunk = nByte / chunkSize;
-
-    uint32_t word = 0;
-
-    int bdAggWordCount = 0;
-    int groupWordCount = 0;
-    int chWordCount = 0;
-    int sampleWordCount = 0;
-
-    int bdAggSize = 0;
-    int groupAggSize = 0;
-    int sampleSize = 0;
-    int chAggSize = 0;
-
-    uint32_t oldHeader1 = 0;
-    uint32_t oldHeader2 = 0;
-    uint32_t oldHeader3 = 0;
-
-    uint16_t average = 0; // to calculate Decimation average
-
-    for( size_t i = 0; i < numChunk; i++ ){
-
-      bdAggWordCount ++;
-      memcpy(&word, buffer + i * chunkSize, chunkSize);
-
-      if( bdAggWordCount <= 4) {
-        
-        if( bdAggWordCount == 1 ) {
-          bdAggSize = word & 0x0FFFFFFF;
-          // printf("###################### Bd Agg Size : %d\n", bdAggSize);
-        }
-
-        // fwrite(buffer + i * chunkSize, sizeof(char), chunkSize, outFile);
-        // fwrite(&word, sizeof(word), 1, outFile);
-
-        if( bdAggWordCount == 2 ) oldHeader1 = word;
-        if( bdAggWordCount == 3 ) oldHeader2 = word;
-        if( bdAggWordCount == 4 ) oldHeader3 = word;
-      
-      }else{
-
-        groupWordCount ++;
-
-        if( groupWordCount == 1 ) {
-          groupAggSize = word & 0x3FFFFFFF;
-          // printf("============= Coupled Channel Agg Size : %d \n", groupAggSize);
-        }
-        if( groupWordCount == 2 ) {
-          sampleSize = (word & 0xFFF) * 8;
-          bool isExtra = ( (word >> 28 ) & 0x1 );
-          chAggSize = 2 + sampleSize / 2 + isExtra;
-          uint32_t newSampleSize = sampleSize / Deci;
-          // uint32_t oldWord = word;
-          // word = (word & 0xFFFFF000) + (newSampleSize / 8 ); // change the number of sample
-          // printf("============= Sample Size : %d | Ch Size : %d | old %08X new %08X\n", sampleSize, chAggSize, oldWord, word);
-
-          int nEvent = (groupAggSize - 2 ) / chAggSize;
-          int newGroupAggSize = 2 + nEvent * ( 2 + newSampleSize / 2 + isExtra );
-          int newBdAggSize = 4 + newGroupAggSize;
-
-          //Write board header and Agg header
-          uint32_t newHeader0 = (0xA << 28) + newBdAggSize;
-          fwrite(&newHeader0, sizeof(uint32_t), 1, outFile);
-          fwrite(&oldHeader1, sizeof(uint32_t), 1, outFile);
-          fwrite(&oldHeader2, sizeof(uint32_t), 1, outFile);
-          fwrite(&oldHeader3, sizeof(uint32_t), 1, outFile);
-
-          uint32_t newAggHeader0 = (0x8 << 28) + newGroupAggSize ; // add decimation factor in the word
-          uint32_t newAggHeader1 = (word & 0xFFFFF000) + (newSampleSize / 8 ) + (decimation << 12); // add decimation factor in the word
-          fwrite(&newAggHeader0, sizeof(uint32_t), 1, outFile);
-          fwrite(&newAggHeader1, sizeof(uint32_t), 1, outFile);
-
-          // printf(" New Board Agg Size : %d \n", newBdAggSize);
-          // printf(" New Group Agg Size : %d \n", newGroupAggSize);
-          // printf("             nEvent : %d \n", nEvent);
-          // printf(" New Event Agg Size : %d \n", 2 + sampleSize / Deci / 2 + isExtra);
-
-          // printf("%3d | %08X \n", 1,  newHeader0); 
-          // printf("%3d | %08X \n", 2,  oldHeader1); 
-          // printf("%3d | %08X \n", 3,  oldHeader2); 
-          // printf("%3d | %08X \n", 4,  oldHeader3); 
-          // printf("%3d | %3d | %08X \n", 5, 1, newAggHeader0); 
-          // printf("%3d | %3d | %08X \n", 6, 2, newAggHeader1); 
-        }
-
-        if( groupWordCount > 2 ) {
-          chWordCount ++;
-
-          if( 1 < chWordCount && chWordCount <= chAggSize - 2 ){ // trace
-            sampleWordCount ++;
-            uint16_t S0 = word & 0xFFFF;
-            uint16_t S1 = (word >> 16) & 0xFFFF;
-
-            if( decimation == 1 ){
-              average = S0/2 + S1/2;
-              // printf("%3d | %3d | %3d | %3d | %08X | %4X \n", bdAggWordCount, groupWordCount, chWordCount, sampleWordCount, word, average); 
-              fwrite(&average, sizeof(average), 1, outFile);
-            }else{
-              average += S0/Deci + S1/Deci;
-              // printf("%3d | %3d | %3d | %3d | %08X | %4X \n", bdAggWordCount, groupWordCount, chWordCount, sampleWordCount, word, average); 
-              if( sampleWordCount % (Deci/2) == 0)  {
-                // fwrite(&S0, sizeof(S0), 1, outFile);
-                // printf("                       --> %4X \n", average);
-                fwrite(&average, sizeof(average), 1, outFile);
-                average = 0;
-              }
-            }
-
-          }else{
-            // printf("%3d | %3d | %3d | %08X \n", bdAggWordCount, groupWordCount, chWordCount, word); 
-            fwrite(&word, sizeof(word), 1, outFile);
-          }
-        }
-
-        if( sampleWordCount == sampleSize / 2 ) sampleWordCount = 0;
-
-        if( chAggSize == chWordCount) chWordCount = 0;
-
-        if( groupWordCount == groupAggSize ) groupWordCount = 0;
-
-      }
-
-      if( bdAggWordCount == bdAggSize ) bdAggWordCount = 0; 
-
-    }
-    
+  if( nByte > 0 && fwrite(buffer, nByte, 1, outFile) != 1 ){
+    RecordSaveFailure("cannot write " + outFileName + " (" + strerror(errno) + ")");
   }
 
-  outFileSize = ftell(outFile);
+  off_t pos = ftello(outFile);
+  if( pos >= 0 ) outFileSize = (uint64_t) pos;
 }
 
 inline void Data::CloseSaveFile(){
   if( outFile != nullptr ){
-    fclose(outFile);
+    if( fclose(outFile) != 0 ) RecordSaveFailure("closing " + outFileName + " failed (" + strerror(errno) + ")");
     outFile = nullptr;
     int result = chmod(outFileName.c_str(), S_IRUSR | S_IRGRP | S_IROTH);
     if( result != 0 ) printf("somewrong when set file (%s) to read only.", outFileName.c_str());

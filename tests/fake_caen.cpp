@@ -8,6 +8,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <climits>
+#include <unistd.h>
 #include <map>
 #include <string>
 #include <vector>
@@ -30,6 +32,9 @@ struct Board {
   double aggPerMs = 0;
   std::chrono::steady_clock::time_point t0;
   long startIndex = 0;
+  int synthEvents = 0;                   // > 0: generate the data
+  int readDelayUs = 0;                   // time a ReadData with data takes
+  std::vector<uint32_t> handedOut;       // everything ReadData gave
 };
 
 std::vector<Board> boards;
@@ -83,7 +88,7 @@ long Acquired(Board & b) {
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - b.t0).count();
     n += (long)(ms * b.aggPerMs);
   }
-  long total = (long) b.aggStart.size();
+  long total = b.synthEvents > 0 ? LONG_MAX : (long) b.aggStart.size();
   return n < total ? n : total;
 }
 
@@ -119,6 +124,26 @@ void Write(Board & b, uint32_t a, uint32_t v) {
     return;
   }
   b.reg[a] = v;
+}
+
+// Board aggregate k of a generated stream: every couple has synthEvents events, 10 us apart.
+void Generate(Board & b, long k, std::vector<uint32_t> & out) {
+  int nCouple = b.nCh / 2, nEv = b.synthEvents;
+  out.clear();
+  out.push_back(0xA0000000u | (uint32_t)(4 + nCouple * (2 + 3 * nEv)));
+  out.push_back((8u << 27) | ((1u << nCouple) - 1));            // board ID 8 (DPP-PSD), couple mask
+  out.push_back((uint32_t) k & 0x7FFFFF);                        // board aggregate counter
+  out.push_back((uint32_t)(k * 1000));                           // board time tag
+  for( int c = 0; c < nCouple; c++ ){
+    out.push_back(0x80000000u | (uint32_t)(2 + 3 * nEv));
+    out.push_back(0x72000000u);                                  // time tag, extras (option 2), charges; no waveform
+    for( int e = 0; e < nEv; e++ ){
+      uint64_t ts = (uint64_t) k * nEv * 5000 + (uint64_t) e * 5000 + c; // 2 ns ticks
+      out.push_back(((uint32_t)(e & 1) << 31) | (uint32_t)(ts & 0x7FFFFFFF));
+      out.push_back((uint32_t)((ts >> 31) & 0xFFFF) << 16 | (uint32_t)(e & 0x3FF));
+      out.push_back(((uint32_t)(1000 + c * 100 + e) << 16) | (uint32_t)(500 + e));
+    }
+  }
 }
 
 uint32_t BufferSize(Board & b) { // what FSUDAQ's CalByteForBuffer computes from the registers
@@ -172,6 +197,26 @@ extern "C" int fake_caen_set_data(int serial, const char * fsuFile, double aggPe
   b->aggPerMs = aggPerMs;
   b->st.aggTotal = (long) b->aggStart.size();
   return 0;
+}
+
+extern "C" int fake_caen_set_synthetic(int serial, int eventsPerCouple, double aggPerMs) {
+  Board * b = FromSerial(serial);
+  if( !b || eventsPerCouple <= 0 ) return -1;
+  b->synthEvents = eventsPerCouple;
+  b->aggPerMs = aggPerMs;
+  return 0;
+}
+
+extern "C" void fake_caen_set_read_delay(int serial, int microseconds) {
+  Board * b = FromSerial(serial);
+  if( b ) b->readDelayUs = microseconds;
+}
+
+extern "C" size_t fake_caen_handed_out(int serial, const uint32_t ** words) {
+  Board * b = FromSerial(serial);
+  if( !b ){ *words = nullptr; return 0; }
+  *words = b->handedOut.data();
+  return b->handedOut.size();
 }
 
 extern "C" void fake_caen_reset_all(void) { boards.clear(); }
@@ -329,23 +374,29 @@ CAEN_DGTZ_ErrorCode CAEN_DGTZ_ClearData(int handle) { BOARD_OR_FAIL; Clear(*b); 
 // Hands out up to MaxAggregatePerBlockTransfer board aggregates the board has taken and not yet given.
 CAEN_DGTZ_ErrorCode CAEN_DGTZ_ReadData(int handle, CAEN_DGTZ_ReadMode_t mode, char * buffer, uint32_t * bufferSize) {
   (void) mode; BOARD_OR_FAIL;
+  if( b->fail == "read" ){ *bufferSize = 0; return CAEN_DGTZ_CommError; }
   long acq = b->st.running ? Acquired(*b) : b->st.aggAcquired;
   long perBLT = Read(*b, 0xEF1C) & 0x3FF;
   if( perBLT <= 0 ) perBLT = 1;
   uint32_t bytes = 0;
   long n = 0;
+  std::vector<uint32_t> agg;
   while( b->st.aggRead + n < acq && n < perBLT ){
-    size_t i = b->aggStart[b->st.aggRead + n];
-    uint32_t size = (b->words[i] & 0x0FFFFFFF) * 4;
+    long k = b->st.aggRead + n;
+    if( b->synthEvents > 0 ) Generate(*b, k, agg);
+    else agg.assign(b->words.begin() + b->aggStart[k], b->words.begin() + b->aggStart[k] + (b->words[b->aggStart[k]] & 0x0FFFFFFF));
+    uint32_t size = (uint32_t) agg.size() * 4;
     if( bytes + size > b->allocated ){
       if( n == 0 ){ b->st.overflows++; *bufferSize = 0; return CAEN_DGTZ_OutOfMemory; }
       break;
     }
-    memcpy(buffer + bytes, &b->words[i], size);
+    memcpy(buffer + bytes, agg.data(), size);
+    b->handedOut.insert(b->handedOut.end(), agg.begin(), agg.end());
     bytes += size;
     n++;
   }
   b->st.aggRead += n;
   *bufferSize = bytes;
+  if( n > 0 && b->readDelayUs > 0 ) usleep(b->readDelayUs);
   return CAEN_DGTZ_Success;
 }

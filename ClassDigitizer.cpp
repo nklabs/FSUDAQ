@@ -1,5 +1,7 @@
 #include "ClassDigitizer.h"
 
+int Digitizer::programPauseMs = 20;
+
 Digitizer::Digitizer(){
   DebugPrint("%s", "Digitizer");
   Initalization();
@@ -592,23 +594,25 @@ int Digitizer::ProgramChannel_QDC(short group){
 }
 
 //========================================================= ACQ control
-void Digitizer::StartACQ(){
+bool Digitizer::StartACQ(){
   DebugPrint("%s", "Digitizer");
-  if( softwareDisable ) return;
-  if ( AcqRun ) return;
+  if( softwareDisable ) return false;
+  if ( AcqRun ) return true;
 
-  // ret |= CAEN_DGTZ_SetDPPEventAggregation(handle, 0, 0); // Auto set
-
-  unsigned int bufferSize = CalByteForBufferCAEN();
-  if( bufferSize == 0 ){
+  // The library sizes its buffer from its own idea of the aggregation, which it no longer
+  // chooses (4cc1350); the registers give one block transfer. Take the larger.
+  unsigned int caenSize = CalByteForBufferCAEN();
+  if( caenSize == 0 ){
     printf("\033[31mDigi-%d: not started, no readout buffer (board not ready; reopen the digitizers).\033[0m\n", GetSerialNumber());
-    return;
+    return false;
   }
-  // unsigned int bufferSize = 200 * 1024 * 1024;
-  // if( DPPType == DPPTypeCode::DPP_QDC_CODE ) bufferSize = 500 * 1024 * 1024;
-  // if( bufferSize  > 160 * 1024 * 1024 ) printf("============= buffer size bigger than 160 MB (%u)\n", bufferSize );
-
-  data->AllocateMemory(bufferSize);
+  uint64_t registerSize = CalByteForBuffer();
+  uint64_t bufferSize = std::max<uint64_t>(caenSize, registerSize);
+  if( registerSize > caenSize ) printf("Digi-%d: the library's readout buffer (%u byte) is smaller than one block transfer (%lu byte); using the latter.\n", GetSerialNumber(), caenSize, (unsigned long) registerSize);
+  if( bufferSize > 0xFFFFFFFFull || !data->AllocateMemory((uint32_t) bufferSize) ){
+    printf("\033[31mDigi-%d: not started, cannot allocate a readout buffer of %lu byte.\033[0m\n", GetSerialNumber(), (unsigned long) bufferSize);
+    return false;
+  }
 
   unsigned int acqID = ExtractBits(GetSettingFromMemory(DPP::AcquisitionControl), DPP::Bit_AcquistionControl::StartStopMode);
   unsigned int trgOutID = ExtractBits(GetSettingFromMemory(DPP::FrontPanelIOControl), DPP::Bit_FrontPanelIOControl::TRGOUTConfig);
@@ -655,12 +659,19 @@ void Digitizer::StartACQ(){
   ret = CAEN_DGTZ_SWStartAcquisition(handle);
   if( ret != 0 ) {
     ErrorMsg("Start ACQ");
-    return;
+    AcqRun = false;
+    return false;
   }
   
   printf("\e[1m\e[33m======= Acquisition Started for %d | Board %d, Port %d\e[0m\n", BoardInfo.SerialNumber, boardID, portID);
+  return true;
 
+}
 
+void Digitizer::SWStopACQ(){
+  if( !AcqRun ) return;
+  ret = CAEN_DGTZ_SWStopAcquisition(handle);
+  if( ret != 0 ) ErrorMsg("SW stop");
 }
 
 void Digitizer::StopACQ(){
@@ -676,12 +687,11 @@ void Digitizer::StopACQ(){
   data->ClearNumEventsDecoded();
   data->ClearBuffer();
   data->ClearReferenceTime();
-  data->ZeroTotalFileSize();
 
   ReadACQStatus();
 }
 
-unsigned int Digitizer::CalByteForBuffer(bool verbose){
+uint64_t Digitizer::CalByteForBuffer(bool verbose){
   DebugPrint("%s", "Digitizer");
   unsigned int numAggBLT;
   unsigned int chMask   ;    
@@ -724,11 +734,11 @@ unsigned int Digitizer::CalByteForBuffer(bool verbose){
     printf("==============================================================\n");
   }
 
-  unsigned int bufferSize = aggOrgan; // just for get rip of the warning in complier
+  uint64_t bufferSize = aggOrgan; // just for get rip of the warning in complier
   bufferSize = 0;
   for( int pCh = 0; pCh < NumInputCh/2 ; pCh++){
     if( (chMask & ( 3 << (2 * pCh) )) == 0 ) continue; 
-    bufferSize +=  2 + ( 2  + ((boardCfg >> 17) & 0x1) + ((boardCfg >> 16) & 0x1)*recordLength[pCh]*4 ) * eventAgg[pCh] ;
+    bufferSize +=  2 + ( 2  + ((boardCfg >> 17) & 0x1) + ((boardCfg >> 16) & 0x1)*(uint64_t)recordLength[pCh]*4 ) * eventAgg[pCh] ;
   }
   bufferSize += 4; /// Bd. Agg Header
   bufferSize = bufferSize * numAggBLT * 4; /// 1 words = 4 byte
@@ -764,6 +774,12 @@ int Digitizer::ReadData(){
   }
   
   ret = CAEN_DGTZ_ReadData(handle, CAEN_DGTZ_SLAVE_TERMINATED_READOUT_MBLT, data->buffer, &(data->nByte));
+  if( ret == CAEN_DGTZ_Success && data->nByte > data->AllocatedSize ){
+    printf("\033[31mDigi-%d: read %u byte into a %u-byte buffer.\033[0m\n", GetSerialNumber(), data->nByte, data->AllocatedSize);
+    data->nByte = 0;
+    ret = CAEN_DGTZ_OutOfMemory;
+    return ret;
+  }
   if( ret == CAEN_DGTZ_Success ) data->ReadBytesSinceRate += data->nByte;
   //uint32_t EventSize = ReadRegister(DPP::EventSize); // Is it as same as data->nByte?
   // if( data->nByte > 0 ) printf("Read Buffer size %d byte \n", data->nByte);
@@ -820,8 +836,6 @@ void Digitizer::WriteRegister (Reg registerAddress, uint32_t value, int ch, bool
   
   ret = CAEN_DGTZ_WriteRegister(handle, registerAddress.ActualAddress(ch), value);
 
-  if( registerAddress == DPP::DecimationFactor ) data->SetDecimationFactor(value);
-
   if( ret == 0 && isSave2MemAndFile && !AcqRun && registerAddress.GetRWType() == RW::ReadWrite ) {
     if( ch < 0 ) {
       if( registerAddress.GetAddress() < 0x8000 ){
@@ -870,8 +884,6 @@ uint32_t Digitizer::ReadRegister(Reg registerAddress, unsigned short ch, bool is
     SetSettingToMemory(registerAddress, returnData, ch);
     SaveSettingToFile(registerAddress, returnData, ch);
   }
-
-  if( registerAddress == DPP::DecimationFactor ) data->SetDecimationFactor( returnData );
 
   std::stringstream ss;
   ss << std::hex << registerAddress.ActualAddress(ch);
@@ -1005,7 +1017,7 @@ std::vector<std::pair<Reg, int>> Digitizer::ProgrammedRegisters(){
 
   }else{
     for( const Reg & r : {DPP::BoardConfiguration, DPP::AcquisitionControl, DPP::GlobalTriggerMask, DPP::FrontPanelIOControl,
-                          DPP::FrontPanelTRGOUTEnableMask, DPP::QDC::GroupEnableMask, DPP::QDC::RecordLength_W, DPP::DecimationFactor} ){
+                          DPP::FrontPanelTRGOUTEnableMask, DPP::QDC::GroupEnableMask, DPP::QDC::RecordLength_W} ){
       list.push_back({r, -1});
     }
 
@@ -1033,13 +1045,12 @@ int Digitizer::ProgramSettingsToBoard(){
 
   printf("========== %s \n", __func__);
 
-  const short pauseMilliSec = 20;
   int nFailed = 0;
 
   for( auto & [reg, ch] : ProgrammedRegisters() ){
     WriteRegister(reg, GetSettingFromMemory(reg, ch < 0 ? 0 : ch), ch, false);
     if( ret != 0 ) nFailed++;
-    if( ch >= 0 ) usleep(pauseMilliSec * 1000);
+    if( ch >= 0 && programPauseMs > 0 ) usleep(programPauseMs * 1000);
   }
 
   if( nFailed > 0 ) printf("\033[31mDigi-%d: %d register write(s) failed while programming the settings.\033[0m\n", GetSerialNumber(), nFailed);

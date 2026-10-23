@@ -418,7 +418,7 @@ void Scope::StartScope(){
     readDataThread[ID]->SetSaveData(false);
 
     digi[ID]->StartACQ();
-    readDataThread[ID]->start();
+    readDataThread[ID]->Start();
 
   }else{
 
@@ -443,7 +443,7 @@ void Scope::StartScope(){
       //   readDataThread[iDigi]->quit();
       //   readDataThread[iDigi]->wait();
       // }
-      readDataThread[iDigi]->start();
+      readDataThread[iDigi]->Start();
   //    printf("----- readDataThread running ? %d.\n", readDataThread[iDigi]->isRunning());
     }
 
