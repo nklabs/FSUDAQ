@@ -1944,9 +1944,10 @@ void FSUDAQ::AutoRun(){
   }
 
   // the dashboard is started before the boards, never while they run
+  // (a dashboard already running is left as it is: asking it to open the page made a new browser
+  // tab at every Start)
   if( chkAutoDashboard->isChecked() && !rawDataPath.isEmpty() && digi != nullptr ){
-    if( dashboardProc && dashboardProc->state() != QProcess::NotRunning ) AskDashboardToOpenPage();
-    else StartDashboardProcess();   // it opens the browser itself once its server is up
+    if( !dashboardProc || dashboardProc->state() == QProcess::NotRunning ) StartDashboardProcess();   // it opens the browser itself once its server is up
   }
 
   needManualComment = true;
@@ -2431,8 +2432,9 @@ void FSUDAQ::TellDashboardRunFolder(const QString & folder, int attempt){
   // run number is recorded again in the same folder. HTTP only: nothing is spawned during a run.
   QNetworkReply * r = net->get(QNetworkRequest(QUrl("http://localhost:8050/run?folder=" + QString::fromLatin1(QUrl::toPercentEncoding(folder)))));
   connect(r, &QNetworkReply::finished, this, [=](){
-    // a dashboard started just before this run may not be listening yet: retry for a few seconds
-    if( r->error() == QNetworkReply::ConnectionRefusedError && attempt < 10 && dashboardProc && dashboardProc->state() != QProcess::NotRunning ){
+    // a dashboard started just before this run may not be listening yet, or the request may be lost:
+    // retry for a few seconds (it would otherwise keep showing the previous run)
+    if( r->error() != QNetworkReply::NoError && attempt < 10 && dashboardProc && dashboardProc->state() != QProcess::NotRunning ){
       QTimer::singleShot(1000, this, [=](){ TellDashboardRunFolder(folder, attempt + 1); });
     }
     r->deleteLater();
