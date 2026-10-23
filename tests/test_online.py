@@ -96,6 +96,9 @@ class Board:
                 self.write(c, self.buf[c]); self.buf[c] = []
 
     def write(self, c, events, damage=False):
+        # a real board interleaves the pair's two channels out of time order (each channel is in order):
+        # the even channel's events, then the odd one's
+        events = sorted(events, key=lambda e: (e[1] & 1, e[0]))
         words = [0x80000000 | (2 + 3 * len(events)), 0x72000000 if self.opt == 2 else (0x70000000 | (self.opt << 24))]
         for t, ch, tick, fine, ql, qs in events:
             words += [((ch & 1) << 31) | (tick & 0x7FFFFFFF), ((tick >> 31) << 16) | fine, (ql << 16) | qs]
@@ -185,7 +188,7 @@ def check_daq(online, boards, serials, what):
 
 def check_partition(online, boards, what):
     total = sum(len(b.truth) for b in boards)
-    in_finder, late = int(online.acc.n_hits), int(online.daq.late.sum())
+    in_finder, late = int(online.owned), int(online.daq.late.sum())
     check(in_finder + late == total, f"{what}: finder {in_finder:,} + late {late:,} != written {total:,}")
     return in_finder, late, total
 
@@ -344,6 +347,7 @@ def scenario_live_start(tmp):
     for b in boards:
         b.truth = b.truth[before[id(b)]:]
     good = check_daq(online, boards, SERIALS, "live start")
+    check_partition(online, boards, "live start")
     good &= check(online.state()["live_start"], "live start: not said on the page")
     if good:
         ok("counts exactly the hits written after the start; the page says it started mid-run")
@@ -371,11 +375,89 @@ def scenario_worker_killed(tmp):
         ok(f"{tot:,} hits: the dead worker's tasks were run again; DAQ exact, finder + late = all")
 
 
+def scenario_offsets(tmp):
+    print("== cable time offsets up to +-60 ns (beyond the 25 ns window) and a slow channel: finder + late = all")
+    folder = os.path.join(tmp, "offsets"); os.makedirs(folder)
+    clock = Clock(); boards = boards_for(folder, slow=[(1443, 6, 2.0), (1443, 7, 2.0)])
+    rng = np.random.default_rng(5)
+    path = os.path.join(tmp, "offsets.csv")
+    with open(path, "w") as f:
+        f.write("serial,channel,offset_ns\n")
+        for sn in SERIALS:
+            for c in range(8 if sn in EIGHT else 16):
+                f.write(f"{sn},{c},{rng.uniform(-60, 60):.3f}\n")
+    online = make_online(folder, SERIALS, EIGHT, clock, extra=["--time-offsets", path, "--hold-s", "8"])
+    drive(online, clock, boards, 0, 30)
+    finish(online, clock, boards)
+    good = check_daq(online, boards, SERIALS, "offsets")
+    fin, late, tot = check_partition(online, boards, "offsets")
+    if good:
+        ok(f"{tot:,} hits: DAQ exact; {fin:,} in the finder + {late:,} late = all")
+
+
+def scenario_replay(tmp):
+    print("== replay of a finished run that rolled over: DAQ exact, finder + late = all, no step fails")
+    folder = os.path.join(tmp, "replay"); os.makedirs(folder)
+    boards = boards_for(folder, roll=200_000)
+    for t in range(20):
+        for b in boards:
+            b.hits(t * PS, (t + 1) * PS)
+    for b in boards:
+        b.flush(); b.f.close()
+    clock = Clock()
+    online = make_online(folder, SERIALS, EIGHT, clock, extra=["--replay", "--replay-speed", "2"])
+    errors = 0
+    for _ in range(40):
+        clock.t += 1
+        try:
+            online.step()
+        except Exception as ex:                       # noqa: BLE001
+            errors += 1
+    good = check(errors == 0, f"replay: {errors} steps failed")
+    good &= check_daq(online, boards, SERIALS, "replay")
+    fin, late, tot = check_partition(online, boards, "replay")
+    if good:
+        ok(f"{tot:,} hits over {sum(len(b.scans) for b in online.boards.values())} files replayed: DAQ exact, finder + late = all")
+
+
+def scenario_idle_worker_killed(tmp):
+    print("== a worker process killed while idle: the pool is rebuilt, nothing lost")
+    folder = os.path.join(tmp, "idlekill"); os.makedirs(folder)
+    clock = Clock(); boards = boards_for(folder)
+    online = make_online(folder, SERIALS, EIGHT, clock, workers=2)
+    t = drive(online, clock, boards, 0, 5, settle=True)
+    wait_tasks(online)
+    os.kill(list(online.pool._processes.values())[0].pid, signal.SIGKILL)
+    time.sleep(0.5)
+    t = drive(online, clock, boards, t, t + 5, settle=True)
+    finish(online, clock, boards)
+    good = check_daq(online, boards, SERIALS, "idle kill")
+    check_partition(online, boards, "idle kill")
+    good &= check(online.lost == 0 and online.step_error is None, f"idle kill: lost {online.lost}, error {online.step_error}")
+    online._kill_pool()
+    if good:
+        ok("the broken pool was noticed at the next submit and rebuilt; DAQ exact")
+
+
+def scenario_short_hold(tmp):
+    print("== --hold-s shorter than --stall-s: works")
+    folder = os.path.join(tmp, "hold"); os.makedirs(folder)
+    clock = Clock(); boards = boards_for(folder, slow=[(15880, 0, 1.0)])
+    online = make_online(folder, SERIALS, EIGHT, clock, extra=["--hold-s", "2", "--stall-s", "5"])
+    drive(online, clock, boards, 0, 15)
+    finish(online, clock, boards)
+    good = check_daq(online, boards, SERIALS, "short hold")
+    check_partition(online, boards, "short hold")
+    if good:
+        ok("no failure, DAQ exact, finder + late = all")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="fsudaq_test_online_")
     try:
         for sc in (scenario_steady, scenario_slow, scenario_pause, scenario_damage_rollover, scenario_run_switch,
-                   scenario_live_start, scenario_worker_killed):
+                   scenario_live_start, scenario_offsets, scenario_replay, scenario_short_hold, scenario_worker_killed,
+                   scenario_idle_worker_killed):
             sc(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

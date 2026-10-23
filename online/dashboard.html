@@ -282,7 +282,7 @@ document.getElementById('btn_clear').onclick = async ()=>{ await fetch('/clear')
 let lastOK = null, PREV = null, MBPS = null;   // when /state last answered; the previous answer, for the MB/s
 async function tick(){
   let r = null;
-  try { const res = await fetch('/state', {cache:'no-store'}); if(res.ok) r = await res.json(); } catch(e){ r = null; }
+  try { const res = await fetch('/state', {cache:'no-store', signal:AbortSignal.timeout(5000)}); if(res.ok) r = await res.json(); } catch(e){ r = null; }
   if(!r){ document.body.classList.add('stale'); banner(); return; }
   document.body.classList.remove('stale');
   if(S && r.folder===S.folder && r.server_time>S.server_time){

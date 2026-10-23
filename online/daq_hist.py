@@ -133,15 +133,20 @@ def _exact_kernel(ts, slot, e, qs, late_before, pxlut, counts, q, psd, psd_out, 
                 iat[s, int(x)] += 1
 
 
-def process_exact(ts, slot, e, qs, late_before, n_slots):
+def process_exact(ts, slot, e, qs, late_before, n_slots, ts_late=None):
     """DaqResult (counts, q, psd, iat, late) of a batch of hits in file order, and the hits per
-    (slot, second of data time) as (seconds, slots, counts)."""
+    (slot, second of data time) as (seconds, slots, counts). ts_late: the times "late" is decided on
+    (the finder's: time offsets removed), default ts."""
     r = DaqResult(n_slots, np.uint32)
     if ts.size == 0:
         return r, (np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros(0, np.int64))
     ts = np.ascontiguousarray(ts, np.int64); slot = np.ascontiguousarray(slot, np.int64)
     _exact_kernel(ts, slot, np.ascontiguousarray(e, np.int64), np.ascontiguousarray(qs, np.int64), np.int64(late_before),
                   PXLUT, r.counts, r.q, r.psd, r.psd_out, r.iat, r.late)
+    if ts_late is not None:                    # late by the finder's time
+        r.late[...] = 0
+        ok = (slot >= 0) & (slot < n_slots)
+        np.add.at(r.late, slot[ok & (np.asarray(ts_late) < late_before)], 1)
     ok = (slot >= 0) & (slot < n_slots)
     key, cnt = np.unique((ts[ok] // 1_000_000_000_000) * n_slots + slot[ok], return_counts=True)
     return r, (key // n_slots, key % n_slots, cnt.astype(np.int64))

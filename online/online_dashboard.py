@@ -186,13 +186,19 @@ def _init_worker(tables, chans, window_ps):
     _G.update(tables=tables, chans=chans, window_ps=window_ps)
 
 
+def _toff_of(slot):
+    """The time offset (ps) of each hit's channel."""
+    return _G["chans"].toff_ps.reshape(-1)[slot]
+
+
 def ingest_task(task: dict) -> dict:
     """The DAQ tab's exact part for some couple aggregates of one file, each decoded once."""
     t_start = time.perf_counter()
     A = task["aggs"]
     ts, ch, e, qs = fsu_fast.decode_aggs(task["path"], A["ev_start"], A["nev"], A["couple"], A["wpe"])
     slot = task["bi"] * task["board_channels"] + ch.astype(np.int64)
-    r, (secs, slots, cnt) = dh.process_exact(ts, slot, e, qs, task["late_before"], task["n_slots"])
+    # late: by the finder's time (offsets removed), as the slices own their hits
+    r, (secs, slots, cnt) = dh.process_exact(ts, slot, e, qs, task["late_before"], task["n_slots"], ts - _toff_of(slot))
     return dict(daq=r.to_dict(), secs=(secs, slots, cnt), n=int(ts.size), bi=task["bi"], dt=time.perf_counter() - t_start)
 
 
@@ -213,10 +219,13 @@ def slice_task(task: dict) -> dict:
         res = ff.process_hits(tables, chans, ts, bd, ch, e.astype(np.float64), window_ps, t0, t1)
         slot = bd * chans.board_channels + ch
         daq = dh.process_ordered(ts, slot, np.argsort(ts, kind="stable"), t0, t1, task["ref"], chans.n_slots)
+        tc = ts - _toff_of(slot)
+        owned = int(np.count_nonzero((tc >= t0) & (tc < t1)))   # hits whose own time (offset removed) is in the slice
     else:
         res = ff.Result(chans.n_slots)
         daq = dh.DaqResult(chans.n_slots, np.uint32)
-    return dict(t0=t0, t1=t1, res=res.to_dict(), daq=daq.to_dict(), ref=task["ref"], dt=time.perf_counter() - t_start)
+        owned = 0
+    return dict(t0=t0, t1=t1, res=res.to_dict(), daq=daq.to_dict(), ref=task["ref"], owned=owned, dt=time.perf_counter() - t_start)
 
 
 class _Done:
@@ -325,14 +334,14 @@ class BoardStream:
             fs = self.scans[p]
             A = fs.arrays()
             if self.done[p] == A["nev"].size and (A["nev"].size == 0 or int(A["t_last"].max()) < before):
-                fs.parts = {k: [] for k in fs.FIELDS}
+                fs.release()
                 self.released.add(p)
 
     def summary(self):
         f = [self.scans[p] for p in self.order]
         return dict(files=len(f), bytes=sum(s.size for s in f), indexed=sum(s.pos * 4 for s in f),
                     skipped_words=sum(s.skipped for s in f), other_format=sum(s.other for s in f),
-                    malformed=sum(s.malformed for s in f))
+                    unread_tail=sum(s.tail_bytes() for s in f[:-1]))   # finished files: what could not be read
 
 
 # ---------------------------------------------------------------- the analysis
@@ -350,7 +359,7 @@ class Online:
         self.follow = a.follow                  # run folder FSUDAQ named (--follow or GET /run); None = newest in the data path
         self.restart = False                    # set by GET /run: a new run starts, even in the same folder
         self.wake = threading.Event()
-        self.lost = 0                           # tasks that failed twice
+        self.step_error = None
         self.folder = None
         self.reset(None, from_start=bool(a.replay or a.from_start))
 
@@ -372,12 +381,26 @@ class Online:
             self.pool = cf.ProcessPoolExecutor(self.a.workers, mp_context=mp.get_context("fork"), initializer=_init_worker,
                                                initargs=(self.setup.tables, self.setup.chans, self.window_ps))
         else:
-            _init_worker(self.setup.tables, self.setup.chans, self.window_ps)
+            _G.update(tables=self.setup.tables, chans=self.setup.chans, window_ps=self.window_ps)
 
     def _submit(self, kind, task, tries=0, epoch=None):
         fn = ingest_task if kind == "ingest" else slice_task
-        fut = _Done(fn, task) if self.pool is None else self.pool.submit(fn, task)
-        self.pending[fut] = (kind, task, self.clock(), tries, self.epoch if epoch is None else epoch)
+        epoch = self.epoch if epoch is None else epoch
+        if self.pool is None:
+            fut = _Done(fn, task)
+        else:
+            try:
+                fut = self.pool.submit(fn, task)
+            except (BrokenProcessPool, RuntimeError):
+                # a worker died while the pool was idle: new workers, and every task out goes again
+                say("the worker pool is broken; the workers are restarted")
+                again = [(k, t, tr, ep) for k, t, _, tr, ep in self.pending.values()]
+                self.pending = {}
+                self._make_pool()
+                for k, t, tr, ep in again:
+                    self._submit(k, t, tr, ep)
+                fut = self.pool.submit(fn, task)
+        self.pending[fut] = (kind, task, self.clock(), tries, epoch)
 
     # ------------------------------------------------------------ a run
     def reset(self, folder, from_start):
@@ -404,6 +427,9 @@ class Online:
         self.secs = {}                          # second of data time -> hits per slot
         self.slices = []                        # (t0, t1, bunches, statuses, tracks) of every folded slice
         self.proc_s = 0.0; self.steps = 0
+        self.lost = 0                           # tasks that failed twice, this run
+        self.owned = 0                          # hits the finder's slices took (by their own time)
+        self.replay_first = None                # replay: the run's first time, fixed once
         self.ingested_hits = np.zeros(len(self.serials), np.int64)
         self.flushed = False
         self.last_fold_wall = None
@@ -445,7 +471,12 @@ class Online:
     # ------------------------------------------------------------ one step of the loop
     def step(self):
         with self.lock:
-            self._step()
+            try:
+                self._step()
+                self.step_error = None
+            except Exception as ex:             # noqa: BLE001  shown on the page; the loop goes on
+                self.step_error = repr(ex)
+                raise
 
     def _step(self):
         a = self.a
@@ -472,19 +503,23 @@ class Online:
             for b in self.boards.values():
                 b.skip_all(now)
             tops = [int(b.newest.max()) for b in self.boards.values() if b.newest.max() >= 0]
-            self.since = max(tops) if tops else None
             self.skip_existing = False
+            if tops:                            # read from just after the newest hit on disk: what is older is late
+                self.since = max(tops) + 1
+                self.t_first = self.W = self.since
 
         # 2. the DAQ tab: every couple aggregate once, as it reaches the disk
         limit = None
         if a.replay:
-            firsts = [s.arrays()["t_first"].min() for b in self.boards.values() for s in b.scans.values() if s.n]
-            if firsts:
-                if self.replay_t0 is None:
-                    self.replay_t0 = now
-                limit = int(min(firsts)) + int((now - self.replay_t0) * a.replay_speed * PS)
+            if self.replay_first is None:
+                firsts = [int(s.arrays()["t_first"].min()) for b in self.boards.values() for s in b.scans.values() if s.n]
+                if firsts:
+                    self.replay_first = min(firsts); self.replay_t0 = now
+            if self.replay_first is not None:
+                limit = self.replay_first + int((now - self.replay_t0) * a.replay_speed * PS)
         late_before = self.W if self.W is not None else -(1 << 62)
-        for b in self.boards.values():
+        n_ingest = sum(1 for k, *_ in self.pending.values() if k == "ingest")
+        for b in (self.boards.values() if n_ingest < 4 * max(1, a.workers) else []):   # else: it stays on disk for later
             for path, sel in b.take_new(now, limit):
                 cum = np.cumsum(sel["nev"])
                 cuts = np.searchsorted(cum, np.arange(BATCH_HITS, int(cum[-1]), BATCH_HITS))
@@ -507,8 +542,8 @@ class Online:
             if any(b.newest.max() < 0 for b in boards) and now - self.first_data_wall < a.hold_s:
                 self.status = "waiting for every board's first data"
                 return
-            self.t_first = self.since if self.since is not None else min(b.first for b in boards if b.first is not None)
-            self.W = self.t_first
+            self.t_first = min(b.first for b in boards if b.first is not None)
+            self.W = self.t_first - self.setup.max_offset_ps   # a hit's time on the finder's clock can be that much earlier
         top = max(int(b.newest[c]) for b, c in seen)
         writing = [(b, c) for b, c in seen if now - b.newest_wall[c] < a.stall_s]
         margin = self.margin_ps()
@@ -516,7 +551,7 @@ class Online:
             target = top + margin + 1
             self.status = "run ended or paused: everything on disk processed" if self.W >= target else "no new data: processing what is on disk"
         else:
-            holding = [(b, c) for b, c in seen if now - b.newest_wall[c] < a.hold_s]
+            holding = [(b, c) for b, c in seen if now - b.newest_wall[c] < max(a.hold_s, a.stall_s)]
             target = min(int(b.newest[c]) for b, c in holding) - margin
             self.status = "running"
         n_slices = sum(1 for k, *_ in self.pending.values() if k == "slice")
@@ -591,6 +626,7 @@ class Online:
                     if r["ref"] != self.ref_slot:   # made before the reference channel changed: keep all but dt
                         d = dict(d); d["dt"] = np.zeros_like(d["dt"])
                     self.daq.add(d)
+                self.owned += r["owned"]
                 n_trk = int((res["h_ntrk"] * np.arange(ff.NTRK)).sum())
                 status = {ff.STATUS[i]: int(c) for i, c in enumerate(res["h_status"]) if c}
                 self.slices.append((r["t0"], r["t1"], int(res["n_bunches"]), status, n_trk))
@@ -652,8 +688,10 @@ class Online:
                 if b["other_format"]:
                     health.append(f"Digi-{b['serial']}: {b['other_format']:,} couple aggregates in a format the online "
                                   "decoder does not read (extras option 2 with time tag and charges needed); left out")
-                if b["malformed"]:
-                    health.append(f"Digi-{b['serial']}: {b['malformed']:,} malformed couple aggregates left out")
+                if b["unread_tail"]:
+                    health.append(f"Digi-{b['serial']}: {b['unread_tail']:,} bytes at the end of finished files could not be read")
+            if self.step_error:
+                health.append(f"the analysis loop fails: {self.step_error}")
             n_late = int(late.sum())
             return dict(
                 server_time=now, folder=self.folder, status=self.status, kernels="numba" if FAST else "numpy",
@@ -663,7 +701,7 @@ class Online:
                 live_start=self.since is not None, since_wall=self.reset_wall,
                 processed_s=None if done is None or self.t_first is None else (done - self.t_first) / PS,
                 newest_s=None if newest is None else (newest - self.t_first) / PS,
-                hits=A.n_hits, late=n_late, bunches=A.n_bunches, unmapped=A.n_bad,
+                hits=self.owned, late=n_late, bunches=A.n_bunches, unmapped=A.n_bad,
                 proc_s=self.proc_s, steps=self.steps, health=health,
                 warnings=S.warnings, problems=S.problems,
                 boards=boards,
