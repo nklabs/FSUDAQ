@@ -1761,7 +1761,7 @@ void FSUDAQ::StartACQ(){
   if( save ){
     LogMsg("<font style=\"color: orange;\">===================== <b>Start a new Run-" + QString::number(runID) + "</b></font>");
     LogMsg("Run folder : <b>" + runDir + "</b>");
-    TellDashboardRunFolder(runDir);
+    TellDashboard("run", runDir);
     WriteRunTimestamp(true, QDateTime::currentDateTime().toString("yyyy.MM.dd hh:mm:ss"));
     SaveLastRunFile();
   }else{
@@ -1865,6 +1865,7 @@ void FSUDAQ::StopACQ(){
   }
   inDataRun = false;
   StopRunClock();   // the acquisition time ends here, not after the comment dialog
+  if( save ) TellDashboard("stopped", RunFolder());
 
   // everything that went wrong in this run, before it is recorded
   QStringList failures = RunFailures() + stopProblems;
@@ -2538,15 +2539,17 @@ void FSUDAQ::AskDashboardToOpenPage(){
   connect(r, &QNetworkReply::finished, r, &QNetworkReply::deleteLater);
 }
 
-void FSUDAQ::TellDashboardRunFolder(const QString & folder, int attempt){
-  // The dashboard follows the run being recorded (data path + prefix + run number), also when a
-  // run number is recorded again in the same folder. HTTP only: nothing is spawned during a run.
-  QNetworkReply * r = net->get(QNetworkRequest(QUrl("http://localhost:8050/run?folder=" + QString::fromLatin1(QUrl::toPercentEncoding(folder)))));
+void FSUDAQ::TellDashboard(const QString & what, const QString & folder, int attempt){
+  // "run": the dashboard follows the run being recorded (data path + prefix + run number), also when
+  // a run number is recorded again in the same folder. "stopped": the run's files are closed, all its
+  // data are on disk, so the dashboard finishes the run now instead of waiting in case it is a beam
+  // pause. HTTP only: nothing is spawned during a run.
+  QNetworkReply * r = net->get(QNetworkRequest(QUrl("http://localhost:8050/" + what + "?folder=" + QString::fromLatin1(QUrl::toPercentEncoding(folder)))));
   connect(r, &QNetworkReply::finished, this, [=](){
     // a dashboard started just before this run may not be listening yet, or the request may be lost:
     // retry for a few seconds (it would otherwise keep showing the previous run)
     if( r->error() != QNetworkReply::NoError && attempt < 10 && dashboardProc && dashboardProc->state() != QProcess::NotRunning ){
-      QTimer::singleShot(1000, this, [=](){ TellDashboardRunFolder(folder, attempt + 1); });
+      QTimer::singleShot(1000, this, [=](){ TellDashboard(what, folder, attempt + 1); });
     }
     r->deleteLater();
   });

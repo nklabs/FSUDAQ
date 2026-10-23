@@ -34,7 +34,23 @@ pair's events when that pair's buffer is full, so a quiet channel reaches the di
 aggregate is counted on the DAQ tab exactly once whenever it arrives; the track finder takes time
 slices only up to where every pair still writing is on disk, and a hit that arrives after its
 time was processed is counted as late and shown, never dropped silently. Damaged data is stepped
-over and reported. The page greys out with NO CONNECTION when the analysis stops answering.
+over and reported, so are aggregates missing from a file (gaps in the aggregate counter). The page
+greys out with NO CONNECTION when the analysis stops answering.
+
+What the status line means:
+
+| status | |
+|---|---|
+| running | data are being written and the analysis keeps up |
+| falling behind: reading the files / the DAQ part / every worker is busy | data come in faster than they are analysed; the page lags, nothing is lost or counted late for it |
+| no new data for N s (a pause?) | nothing written for `--stall-s` (5 s): the boards may still hold partly filled buffers, so the finder waits up to `--hold-s` (30 s) |
+| no new data for N s: ... | waited `--hold-s`: the finder went on; hits still in the buffers come late when the beam is back |
+| run stopped: ... | FSUDAQ said the run stopped (its files are closed): everything is processed at once |
+| last run (finished before the dashboard started) | started after the run ended: the run is read whole |
+
+Started during a run, the dashboard reads from then on (hits from before then that a slow pair
+writes later are counted apart, not as late). The hit rate is the newest second whose hits are all
+counted; a pair that has not written for `--hold-s` (or not yet) has no rate shown until it does.
 
     ./setup-venv.sh                      # once: numpy, numba into online/venv
     python online_dashboard.py --data-path /path/to/data          # what the button runs
@@ -49,5 +65,6 @@ and their momentum_map.csv) were superseded by the finder in finder/ and removed
 the history before Oct 2026.
 
 Tests: `python3 ../tests/test_online.py` runs the file following against simulated boards
-(late channels, pauses, roll-over, damage, a run recorded again, a killed worker) and checks
-every number against the hits written.
+(late channels, pauses, roll-over, damage, counter gaps and wrap, a run recorded again, a start
+mid-run or after the run, the analysis falling behind, a killed worker) and checks every number,
+and every rate shown, against the hits written.

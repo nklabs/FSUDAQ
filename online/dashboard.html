@@ -28,6 +28,7 @@
   table { border-collapse:collapse; width:100%; font-variant-numeric:tabular-nums; }
   th, td { text-align:right; padding:2px 6px; border-bottom:1px solid var(--line); white-space:nowrap; }
   th:first-child, td:first-child { text-align:left; }
+  td.l { text-align:left; white-space:normal; }       /* text cells wrap: a warning at the end of a row stays visible */
   th { color:var(--muted); font-weight:600; }
   .big { font-size:22px; font-weight:600; font-variant-numeric:tabular-nums; }
   .tiles { display:flex; gap:22px; flex-wrap:wrap; margin-bottom:10px; }
@@ -63,7 +64,7 @@
   .banner div { border-radius:6px; padding:5px 10px; background:var(--card); border:1px solid var(--line); }
   .banner .bad { border-color:var(--heavy); color:var(--heavy); font-weight:600; }
   .banner .ph { border-color:#c77700; }
-  body.stale .tiles, body.stale section { opacity:.45; filter:grayscale(1); }
+  body.stale .tiles, body.stale section, body.stale h1 .st { opacity:.45; filter:grayscale(1); }
 </style>
 </head>
 <body>
@@ -71,11 +72,10 @@
   <button id="layout_reset" title="Put every card back to its original place and size">reset layout</button></h1>
 <div class="banner" id="banner"></div>
 <div class="tiles">
-  <div class="tile"><span class="big" id="t_hits">–</span><small>hits / s, all channels</small></div>
+  <div class="tile"><span class="big" id="t_hits">–</span><small id="t_hits_note">hits / s, all channels</small></div>
   <div class="tile"><span class="big" id="t_mb">–</span><small>MB / s written</small></div>
   <div class="tile"><span class="big" id="t_gb">–</span><small>this run, GB in files</small></div>
   <div class="tile"><span class="big" id="t_disk">–</span><small>disk free</small></div>
-  <div class="tile"><span class="big" id="t_proc">–</span><small>of the data in the track finder</small></div>
   <div class="tile"><span class="big" id="t_lag">–</span><small>track finder behind by (s of data)</small></div>
 </div>
 <div class="tabs"><button data-tab="daq" class="on">DAQ channels</button><button data-tab="trk">Tracker (track finder)</button></div>
@@ -285,6 +285,7 @@ async function tick(){
   try { const res = await fetch('/state', {cache:'no-store', signal:AbortSignal.timeout(5000)}); if(res.ok) r = await res.json(); } catch(e){ r = null; }
   if(!r){ document.body.classList.add('stale'); banner(); return; }
   document.body.classList.remove('stale');
+  if(S && r.folder!==S.folder) document.getElementById('clear_note').textContent = '';   // a new run: nothing cleared in it yet
   if(S && r.folder===S.folder && r.server_time>S.server_time){
     const db = r.daq.run_bytes - S.daq.run_bytes, dt = r.server_time - S.server_time;
     MBPS = db>=0 ? db/dt/1e6 : null; }
@@ -302,8 +303,9 @@ function banner(){
       out.push(['bad', `No analysis result for ${S.last_result_s.toFixed(0)} s (${S.in_flight} tasks out): the plots are not updating.`]);
     for(const h of S.health) out.push(['bad', h]);
     for(const p of S.problems) out.push(['bad', 'Setup: '+p]);
-    for(const w of S.warnings) out.push(['ph', 'Placeholder: '+w]);
-    if(S.live_start) out.push(['', `Started while this run was going (${new Date(S.since_wall*1000).toLocaleTimeString()}): counts and histograms are from then on.`]);
+    if(S.warnings.length) out.push(['ph', `Placeholders (${S.warnings.length}): ` + S.warnings.join('; ') + ' — fill online/experiment.json.']);
+    if(S.live_start) out.push(['', `Started while this run was going (${new Date(S.since_wall*1000).toLocaleTimeString()}): counts and histograms are from then on` +
+      (S.early ? `; ${S.early.toLocaleString()} hits from before then reached the disk later (counted on the DAQ tab, not in the finder, not as late).` : '.')]);
   }
   document.getElementById('banner').innerHTML = out.map(([c,t])=>`<div class="${c}">${t}</div>`).join('');
 }
@@ -324,13 +326,14 @@ function draw(){
   document.getElementById('folder').textContent = S.folder ? S.folder.split('/').slice(-1)[0] : '';
   document.getElementById('status').textContent = `${S.status} · ${S.workers} workers · ${S.kernels}${S.replay?' · REPLAY':''}`;
   document.getElementById('t_hits').textContent = fmt(D.total_rate);
+  const slowN = D.total_rate==null ? 0 : D.slots.filter(s=>s.rate==null && s.written).length;
+  document.getElementById('t_hits_note').textContent = 'hits / s, all channels' + (slowN ? ` (without ${slowN} slow channels, not known yet)` : '');
   document.getElementById('t_mb').textContent = MBPS==null ? '–' : MBPS.toFixed(1);
   document.getElementById('t_gb').textContent = (D.run_bytes/1e9).toFixed(2);
   document.getElementById('t_disk').textContent = D.disk ? (D.disk.free_gb/1e3).toFixed(2)+' TB' : '–';
-  const tp=document.getElementById('t_proc'); tp.textContent = D.processed_pct==null ? '–' : D.processed_pct.toFixed(1)+' %';
   const behind = D.backpressure || (D.lag_s!=null && D.lag_s>30);
-  tp.className = 'big' + (behind ? ' warn' : '');
-  document.getElementById('t_lag').textContent = D.lag_s==null ? '–' : D.lag_s.toFixed(1);
+  const tl=document.getElementById('t_lag'); tl.textContent = D.lag_s==null ? '–' : D.lag_s.toFixed(1);
+  tl.className = 'big' + (behind ? ' warn' : '');
   if(tab==='daq') drawDaq(); else drawTrk();
 }
 
@@ -343,7 +346,7 @@ function drawDaq(){
   const edges = slots.map((_,i)=>i).concat([slots.length]);
   const colors = slots.map(s=>s.slot===selSlot ? css('--sel') : BOARD_COLOR[boardIndex(s.board)%BOARD_COLOR.length]);
   const A = plot('c_chan', {x0:0, x1:slots.length, ylog, xticks:false, series:[{kind:'bars', edges, y:vals, colors, gap:1}],
-                            empty: mode==='rate' && D.total_rate==null ? 'no rate now: no data are coming in (show "hits since Clear" for the counts)' : 'no hits yet',
+                            empty: mode==='rate' && D.total_rate==null ? (S.mode==='running' ? 'no complete second yet' : 'no rate: no data are being written now (show "hits since Clear" for the counts)') : 'no hits yet',
                             ylabel: mode==='rate'?'Hz':'hits'});
   if(A){ const g=document.getElementById('c_chan').getContext('2d'); g.fillStyle=css('--muted'); g.font='10px system-ui'; g.textAlign='center';
     let start=0; for(let i=1;i<=slots.length;i++){ if(i===slots.length || slots[i].board!==slots[start].board){
@@ -351,8 +354,14 @@ function drawDaq(){
   document.getElementById('c_chan').onclick = ev=>{ if(!A) return; const r=ev.target.getBoundingClientRect(); const x=ev.clientX-r.left;
     const i=Math.floor((x-A.L)/((A.w-A.L-A.R)/slots.length)); if(i>=0 && i<slots.length){ selSlot=slots[i].slot; store.set('fsudaq-sel-slot', selSlot); fillSelects(); fetchChannel(); } };
   legend('leg_chan', S.boards.map((b,i)=>({name:'Digi-'+b.serial, color:BOARD_COLOR[i%BOARD_COLOR.length]})).concat([{name:'selected channel', color:css('--sel')}]));
-  document.getElementById('note_chan').innerHTML = (mode==='rate' ? 'Rate: the newest second all of whose hits are on disk. ' : '') +
-    (S.late ? warn(`${S.late.toLocaleString()} hits reached the disk after the track finder had passed their time`) + ' (in these counts, not in the finder: a channel pair whose buffer fills slowly writes late; fewer events per aggregate on the board shortens it).' : '');
+  const slowCh = D.total_rate==null ? [] : slots.filter(s=>s.rate==null && s.written);
+  const pauseLate = S.pause_flush_s!=null;
+  document.getElementById('note_chan').innerHTML = (mode==='rate' && D.rate_second!=null ? `Rate: second ${D.rate_second} of the run, the newest whose hits are all counted. ` : '') +
+    (mode==='rate' && slowCh.length ? `Not shown: ${slowCh.map(slotName).join(', ')} (their channel pair has not written for over ${S.hold_s} s: its buffer fills slowly, the count is not known yet). ` : '') +
+    (S.late ? warn(`${S.late.toLocaleString()} hits reached the disk after the track finder had passed their time`) +
+      (S.late_recent ? ` (${S.late_recent.toLocaleString()} in the last minute)` : ' (none in the last minute)') +
+      ': in these counts, not in the finder. ' + (pauseLate ? `After a pause of over ${S.hold_s} s the finder went on without the hits still in the boards' buffers; they come late when the beam is back. ` :
+      'A channel pair whose buffer fills slowly writes late; fewer events per aggregate on the board shortens it.') : '');
   // total rate over time, and per board: hits in each second of data time
   const secs=D.seconds, ser=[];
   ser.push({kind:'line', x:secs.map(s=>s.t), y:secs.map(s=>s.boards.reduce((a,b)=>a+b,0)), color:css('--fg'), width:2});
@@ -391,20 +400,22 @@ function drawDaq(){
   else message('c_spec', 'needs a full 0.33 s window of data');
   document.getElementById('note_spec').textContent = `Hits counted in 10 µs bins, Fourier transformed over ${D.n_windows} windows of 0.33 s. Random hits give 1; a pulser or a modulated beam gives peaks at its frequency and harmonics (12 Hz resolution, up to 50 kHz).`;
   // data and processing
-  const row=(k,v)=>`<tr><td>${k}</td><td style="text-align:left">${v}</td></tr>`;
+  const row=(k,v)=>`<tr><td>${k}</td><td class="l">${v}</td></tr>`;
   const mbps = parseFloat(document.getElementById('t_mb').textContent);
   const hoursLeft = D.disk && mbps>0 ? D.disk.free_gb*1e3/mbps/3600 : null;
   document.getElementById('t_data').innerHTML =
     row('run folder', S.folder||'–') + row('files', D.files.toLocaleString()) + row('data', (D.run_bytes/1e9).toFixed(2)+' GB') +
     row('disk', D.disk ? `${(D.disk.free_gb).toFixed(0)} GB free of ${(D.disk.total_gb).toFixed(0)} GB` + (hoursLeft!==null ? ` · full in ${hoursLeft<2?warn(hoursLeft.toFixed(1)+' h'):hoursLeft.toFixed(1)+' h'} at the current rate` : '') : '–') +
-    row('track finder', D.processed_pct==null ? '–' : `${D.processed_pct.toFixed(1)} % of the data time on disk · ${D.lag_s.toFixed(1)} s behind`) +
-    row('analysis', `${S.workers} workers (${S.kernels}), ${D.in_flight} tasks out` + (S.oldest_task_s!=null ? `, oldest ${S.oldest_task_s.toFixed(0)} s` : '') +
-        (S.last_result_s!=null ? ` · last result ${S.last_result_s.toFixed(0)} s ago` : '') +
-        (D.backpressure ? ' · '+warn('falling behind: every worker is busy') : (D.lag_s>60 ? ' · '+warn('more than a minute behind') : ' · keeping up')));
+    row('track finder', D.lag_s==null ? '–' : `${D.lag_s.toFixed(1)} s of data behind the newest on disk`) +
+    row('analysis', (D.backpressure ? warn(S.status) : (D.lag_s>60 ? warn('more than a minute behind') : 'keeping up')) +
+        ` · ${S.workers} workers (${S.kernels}), ${D.in_flight} tasks out` + (S.oldest_task_s!=null ? `, oldest ${S.oldest_task_s.toFixed(0)} s` : '') +
+        (S.last_result_s!=null ? ` · last result ${S.last_result_s.toFixed(0)} s ago` : ''));
+  const live = S.mode==='running' || S.mode==='paused';
   document.getElementById('t_boards').innerHTML = '<tr><th>board</th><th>files</th><th>MB</th><th>read</th><th>newest (s)</th><th>late hits</th><th></th></tr>' +
     S.boards.map((b,i)=>`<tr><td>${sw(BOARD_COLOR[i%BOARD_COLOR.length])}Digi-${b.serial}</td><td>${b.files}</td><td>${(b.bytes/1e6).toFixed(0)}</td>` +
       `<td>${b.bytes ? (100*b.indexed/b.bytes).toFixed(0)+' %' : '–'}</td><td>${b.newest_s==null?'–':b.newest_s.toFixed(2)}</td><td>${b.late?warn(b.late.toLocaleString()):0}</td>` +
-      `<td>${b.newest_s==null ? warn('no data') : (b.quiet_s!=null && b.quiet_s>10 ? warn(`quiet ${b.quiet_s.toFixed(0)} s`) : '')}</td></tr>`).join('');
+      `<td class="l">${!b.has_data ? (live ? warn('no data') : 'no data') : b.quiet_alarm ? warn(`nothing written for ${b.quiet_s.toFixed(0)} s`) :
+        (b.slow_couples.length ? 'slow pairs: ' + b.slow_couples.map(c=>`ch${2*c}/${2*c+1}`).join(', ') : '')}</td></tr>`).join('');
 }
 
 // every channel's Qlong spectrum over the shown range: one row per board, one panel per channel
@@ -445,7 +456,7 @@ const ST_NOTE = {unique:'one track accepted', tracks:'2+ tracks accepted', ambig
                  dropped:'too many combinations or candidates', none:'no triplet in the map fits', incomplete:'a plane has no hit'};
 function drawTrk(){
   const F=S.finder, SC=S.status_counts, H=S.history;
-  const last=H[H.length-1], dt = last ? last.t1-last.t0 : 0;
+  const last=H[H.length-1], dt = last && S.mode==='running' ? last.t1-last.t0 : 0;   // a rate only while data are written
   document.getElementById('rate_bunch').textContent = dt>0 ? fmt(last.bunches/dt) : '–';
   document.getElementById('rate_trk').textContent = dt>0 ? fmt(last.tracks/dt, 1) : '–';
   const complete = S.bunches - (SC.incomplete||0), accepted = (SC.unique||0)+(SC.tracks||0);
@@ -480,11 +491,11 @@ function drawTrk(){
   plot('c_nh', {x0:-0.5, x1:S.hist_nhit.length-0.5, ylog:true, series:[{kind:'bars', edges:[...Array(S.hist_nhit.length+1).keys()].map(v=>v-0.5), y:S.hist_nhit, color:'#9467bd', gap:0}], ylabel:'bunches (last bin: 40+)'});
   const tot = Math.max(1, S.bunches);
   document.getElementById('t_status').innerHTML = '<tr><th>result</th><th>bunches</th><th>share</th><th>meaning</th></tr>' +
-    STATUS_ORDER.map(n=>`<tr><td>${sw(ST_COLOR[n])}${n}</td><td>${(SC[n]||0).toLocaleString()}</td><td>${(100*(SC[n]||0)/tot).toFixed(2)} %</td><td style="text-align:left;color:var(--muted)">${ST_NOTE[n]}</td></tr>`).join('') +
-    `<tr><td>bunches</td><td>${S.bunches.toLocaleString()}</td><td></td><td style="text-align:left;color:var(--muted)">${S.hits.toLocaleString()} hits${S.unmapped?', '+fmt(S.unmapped)+' on uncabled channels':''}</td></tr>` +
-    `<tr><td>accepted tracks</td><td>${S.hist_ntrk.reduce((a,c,i)=>a+c*i,0).toLocaleString()}</td><td></td><td style="text-align:left;color:var(--muted)">lucite ${F.installed.includes('lucite')?`yes ${S.lucite.yes.toLocaleString()} · no ${S.lucite.no.toLocaleString()}`:'not cabled'}</td></tr>` +
-    `<tr><td>decided by</td><td>${fmt(F.fast)}</td><td></td><td style="text-align:left;color:var(--muted)">fast path · ${fmt(F.reference)} by the reference finder (${F.reference_s.toFixed(1)} s CPU)${F.overflow?' · '+warn(F.overflow+' bunches over 1024 hits'):''}</td></tr>`;
-  const row = (k,v) => `<tr><td>${k}</td><td style="text-align:left">${v}</td></tr>`;
+    STATUS_ORDER.map(n=>`<tr><td>${sw(ST_COLOR[n])}${n}</td><td>${(SC[n]||0).toLocaleString()}</td><td>${(100*(SC[n]||0)/tot).toFixed(2)} %</td><td class="l" style="color:var(--muted)">${ST_NOTE[n]}</td></tr>`).join('') +
+    `<tr><td>bunches</td><td>${S.bunches.toLocaleString()}</td><td></td><td class="l" style="color:var(--muted)">${S.hits.toLocaleString()} hits${S.unmapped?', '+fmt(S.unmapped)+' on uncabled channels':''}</td></tr>` +
+    `<tr><td>accepted tracks</td><td>${S.hist_ntrk.reduce((a,c,i)=>a+c*i,0).toLocaleString()}</td><td></td><td class="l" style="color:var(--muted)">lucite ${F.installed.includes('lucite')?`yes ${S.lucite.yes.toLocaleString()} · no ${S.lucite.no.toLocaleString()}`:'not cabled'}</td></tr>` +
+    `<tr><td>decided by</td><td>${fmt(F.fast)}</td><td></td><td class="l" style="color:var(--muted)">fast path · ${fmt(F.reference)} by the reference finder (${F.reference_s.toFixed(1)} s CPU)${F.overflow?' · '+warn(F.overflow+' bunches over 1024 hits'):''}</td></tr>`;
+  const row = (k,v) => `<tr><td>${k}</td><td class="l">${v}</td></tr>`;
   document.getElementById('t_setup').innerHTML =
     row('setting', (F.setting_src ? `${F.setting} (from ${F.setting_src})` : warn(`${F.setting}: not given, assumed`)) + ' · T1/T2 position, from the run, not the data') +
     row('momentum map', `${F.map.split('/').slice(-1)[0]}: ${F.map_rows.toLocaleString()} triplets`) +
@@ -495,7 +506,9 @@ function drawTrk(){
     row('timing', (F.timing==='no offsets'?warn('no cable offsets'):F.timing + ', removed before bunching') + ` · accepted within ${F.nsig} σ · no bunch clock: the ${S.window_ns} ns window is the gate` +
         ' · counters (veto, Cherenkov) count anywhere in the bunch, at any charge') +
     row('bunch window', `${S.window_ns} ns gap`) +
-    row('late hits', S.late ? warn(`${S.late.toLocaleString()} hits reached the disk after their time was processed: not in the finder`) : 'none');
+    row('late hits', S.late ? warn(`${S.late.toLocaleString()} hits reached the disk after their time was processed: not in the finder`) +
+        ` · ${S.late_recent.toLocaleString()} in the last minute` : 'none') +
+    (S.early ? row('before the start', `${S.early.toLocaleString()} hits from before the dashboard started: not in the finder`) : '');
 }
 
 // ---------------------------------------------------------------- card layout (per tab)

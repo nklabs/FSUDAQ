@@ -726,18 +726,25 @@ def selftest(n=200000, seed=1):
 
 def selftest_stream(n=50000, seed=2):
     """The whole kernel (bunch building, cabling, gains, offsets, slow export, histograms) against
-    bunches built in plain Python and decided by the reference alone: every histogram must agree."""
+    bunches built in plain Python and decided by the reference alone: every histogram must agree.
+    Bunches 250 ns - 2 us apart, and 60 - 400 ns apart (the cable offsets then reorder hits of
+    neighbouring bunches: they must be removed before the bunches are built); calibrated, also
+    with three tracker channels missing from the gains (their hits are left out)."""
     rng = np.random.default_rng(seed)
     serials = [15880, 15879, 58918, 62839, 1443, 30508, 11111, 22222, 33333]   # 9 boards: 113 channels fit
     nch = {s: (8 if s in (1443, 30508) else 16) for s in serials}
     rows = default_cabling(serials, nch)
     ok_all = True
-    for calibrated in (False, True):
+    for calibrated, spacing, n_nogain in ((False, (250_000, 2_000_000), 0), (True, (250_000, 2_000_000), 0),
+                                          (False, (60_000, 400_000), 0), (True, (60_000, 400_000), 3)):
         tb = Tables("high", calibrated=calibrated)
         T = tb.T
         gains = {(s, c): float(rng.uniform(0.002, 0.004)) for s, c, *_ in rows}
         offs = {(s, c): float(rng.normal(0, 30.0)) for s, c, *_ in rows}   # cable delays: larger than the window
-        chans = Channels(serials, rows, gains if calibrated else None, offs)
+        given = dict(gains)
+        for s, c, kind, *_ in [r for r in rows if r[2] == "trk"][:n_nogain]:
+            del given[(s, c)]                    # not in the gains file
+        chans = Channels(serials, rows, given if calibrated else None, offs)
         where = {}                               # (kind, plane, ch) -> (board index, channel)
         for s, c, kind, p, ch in rows:
             where[(kind, p, ch)] = (serials.index(s), c)
@@ -763,7 +770,7 @@ def selftest_stream(n=50000, seed=2):
             tmin = min(h[0] for h in hl)
             for t, b, c, e in hl:                # spread inside 60 ns, so a bunch stays one bunch
                 ts.append(t_bunch + int(round((t - tmin + 20.0) * 1000))); bd.append(b); chv.append(c); en.append(e)
-            t_bunch += int(rng.integers(250_000, 2_000_000))
+            t_bunch += int(rng.integers(*spacing))
         ts = np.asarray(ts, np.int64); bd = np.asarray(bd, np.int64); chv = np.asarray(chv, np.int64)
         en = np.asarray(en, np.float64)
         res = process_hits(tb, chans, ts, bd, chv, en, window)
@@ -785,7 +792,7 @@ def selftest_stream(n=50000, seed=2):
                 if p == -1:
                     aux |= 1 << int(chans.counter[bi, c]); continue
                 q = en[x] * chans.gain[bi, c] if calibrated else 1.0
-                if calibrated and q < tb.threshold:
+                if calibrated and not (q >= tb.threshold):   # also a channel without a gain (NaN)
                     continue
                 hits[int(p)].append((int(chans.ch[bi, c]), float(q), (tc[x] - first) * 1e-3))
             r = of.find(T, hits, veto=bool(aux & 1), cherenkov=bool(aux & 2), lucite=bool(aux & 4))
@@ -804,7 +811,8 @@ def selftest_stream(n=50000, seed=2):
                              "h_lucite") if not np.array_equal(getattr(res, a), getattr(ref, a))]
         ok = not diffs and res.n_bunches == len(bounds) - 1
         ok_all &= ok
-        print(f"stream calibrated={calibrated!s:5s}: {res.n_bunches} bunches ({len(bounds) - 1} in Python), "
+        print(f"stream calibrated={calibrated!s:5s} {spacing[0] // 1000}-{spacing[1] // 1000} ns apart"
+              + (f", {n_nogain} without gain" if n_nogain else "") + f": {res.n_bunches} bunches ({len(bounds) - 1} in Python), "
               f"{res.n_fast[0]} fast / {res.n_slow} reference ({res.slow_s:.2f} s), statuses "
               + ", ".join(f"{STATUS[i]} {c}" for i, c in enumerate(res.h_status) if c)
               + ("" if ok else f"  DIFFERENT: {diffs}"))

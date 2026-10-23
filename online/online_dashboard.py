@@ -7,21 +7,28 @@
 
 Follows the run folder FSUDAQ names when a saving run starts (GET /run?folder=..., or --follow at
 start-up), else the newest run folder in the data path; a run recorded again under the same number
-(old files replaced) starts over. Serves http://localhost:<port>/ (the page) and /state (JSON).
+(old files replaced) starts over. FSUDAQ says when the run has stopped and its files are closed
+(GET /stopped?folder=...). Started mid-run, the dashboard reads from then on; started after the run
+ended, it reads the whole run. Serves http://localhost:<port>/ (the page) and /state (JSON).
 
 How the data are read. A board writes a couple's (channel pair's) events when that couple's buffer
 is full, so a quiet channel's hits reach the disk long after a busy channel's newer ones. Every
-board file is indexed as it grows (fsu_fast.FileScan: only the new bytes, each couple aggregate
-with its first and last time; damage is stepped over and counted, a format the decoders do not
-read is counted and left out). Then two things happen:
+board file is indexed as it grows (fsu_fast.FileScan: only the new bytes, at most INDEX_WORDS per
+step, outside the lock so the page is served meanwhile; each couple aggregate with its first and
+last time; damage is stepped over and counted, so are aggregates missing from the file (counter
+gaps); a format the decoders do not read is counted and left out). What is "written" and how long a
+couple has been silent come from this index. Then two things happen:
 
 * the DAQ tab: every couple aggregate is decoded once when it reaches the disk, in any time order
-  (counts, pulse height, PSD, time since the previous hit, hits per second): exact;
+  (counts, pulse height, PSD, time since the previous hit, hits per second): exact. At most 4
+  tasks per worker are out; the rest waits on disk, and the finder does not pass it;
 * the track finder needs all boards in time order: it takes time slices up to the oldest newest
   time among the couples still writing (a couple silent for --hold-s no longer holds it back), so
   every hit of those couples up to there is on disk. A hit that still arrives behind a slice
-  already taken is counted as "late" and shown, never silently dropped. When no couple has
-  written for --stall-s (the run ended, or a pause), everything up to the newest hit is taken.
+  already taken is counted as "late" and shown, never silently dropped. When FSUDAQ says the run
+  stopped, everything up to the newest hit is taken. When nothing is written for --stall-s without
+  that word, it is a pause: the boards still hold partly filled buffers, so the finder waits, for
+  up to --hold-s, then takes everything (hits that come after are late).
 
 Slices go to worker processes (results are added in any order; a worker that dies is replaced
 and its task run again once). The run's setting, cabling, gains and time offsets come from
@@ -75,6 +82,9 @@ HISTORY_S = 600                               # seconds of rate history kept
 PS = 1_000_000_000_000                        # ps per second
 FILE_RE = re.compile(r"_(\d+)_(PSD|PHA|QDC)_\d+_(\d+)\.fsu$")   # <prefix>_<run>_<serial>_<DPP>_<tick>_<index>.fsu
 BATCH_HITS = 4_000_000                        # hits per DAQ task
+INDEX_WORDS = 32 << 20                        # words of a file indexed per step at most (128 MB): a big run
+                                              # already on disk is read over several steps
+LATE_RECENT_S = 60                            # the page shows late hits of the last minute too
 
 
 # ---------------------------------------------------------------- run configuration
@@ -198,7 +208,8 @@ def ingest_task(task: dict) -> dict:
     ts, ch, e, qs = fsu_fast.decode_aggs(task["path"], A["ev_start"], A["nev"], A["couple"], A["wpe"])
     slot = task["bi"] * task["board_channels"] + ch.astype(np.int64)
     # late: by the finder's time (offsets removed), as the slices own their hits
-    r, (secs, slots, cnt) = dh.process_exact(ts, slot, e, qs, task["late_before"], task["n_slots"], ts - _toff_of(slot))
+    r, (secs, slots, cnt) = dh.process_exact(ts, slot, e, qs, task["late_before"], task["n_slots"], ts - _toff_of(slot),
+                                             task.get("early_before"))
     return dict(daq=r.to_dict(), secs=(secs, slots, cnt), n=int(ts.size), bi=task["bi"], dt=time.perf_counter() - t_start)
 
 
@@ -248,16 +259,23 @@ class _Done:
 
 # ---------------------------------------------------------------- the files of one board
 class BoardStream:
+    """One board's files: the index (what is on disk), what of it has been seen (a replay shows it at
+    the replay's pace), and what has been given to the DAQ part."""
+
     def __init__(self, serial: int, bi: int):
         self.serial, self.bi = serial, bi
         self.scans: dict[str, fsu_fast.FileScan] = {}
         self.order: list[str] = []            # file paths by index
+        self.seen: dict[str, int] = {}        # couple aggregates of the index seen (all, or up to the replay time)
         self.done: dict[str, int] = {}        # couple aggregates already given to the DAQ part
         self.released: set[str] = set()       # rolled-over files read and passed: index dropped
         self.newest = np.full(8, -1, np.int64)        # per couple: newest time on disk
         self.newest_wall = np.zeros(8)                # when it last moved
         self.first = None                     # oldest time seen
         self.hits = 0                         # hits indexed (all files)
+
+    def _live(self):
+        return [p for p in self.order if p not in self.released]
 
     def discover(self, folder):
         names = []
@@ -267,57 +285,104 @@ class BoardStream:
                 names.append((int(m.group(3)), p))
         for _, p in sorted(names):
             if p not in self.scans:
+                self.seen[p] = 0
+                self.done[p] = 0
                 self.scans[p] = fsu_fast.FileScan(p)
                 self.order.append(p)
-                self.done[p] = 0
 
-    def update(self):
-        for p in self.order:
-            if p not in self.released:
-                fs = self.scans[p]
-                n0 = fs.hits
-                fs.update()
-                self.hits += fs.hits - n0
+    def index(self, now, max_words=None):
+        """Index what was written since the last call (at most max_words words per file)."""
+        for p in self._live():
+            fs = self.scans[p]
+            n0 = fs.hits
+            fs.update(now, max_words)
+            self.hits += fs.hits - n0
+
+    def behind(self):
+        """More is written than indexed (the indexing reads a limited amount per step)."""
+        return any(self.scans[p].behind for p in self._live())
 
     def replaced(self):
-        return any(self.scans[p].replaced() for p in self.order if p not in self.released)
+        return any(self.scans[p].replaced() for p in self._live())
 
-    def take_new(self, now, limit=None):
-        """The couple aggregates not yet given to the DAQ part, per file, in file order; with a limit
-        (replay) only up to the first one ending after it."""
-        out = []
-        for p in self.order:
-            if p in self.released:
-                continue
+    def observe(self, now, limit=None):
+        """The couple aggregates indexed since the last look (a replay: up to limit) move the couples'
+        newest time on disk, and when it last moved."""
+        for p in self._live():
             A = self.scans[p].arrays()
-            a, b = self.done[p], A["nev"].size
+            a, b = self.seen[p], A["nev"].size
             if limit is not None and b > a:
                 over = np.flatnonzero(A["t_last"][a:b] > limit)
                 if over.size:
                     b = a + int(over[0])
             if b <= a:
                 continue
-            sel = {k: A[k][a:b] for k in A}
-            self.done[p] = b
-            for c in np.unique(sel["couple"]):
-                t = int(sel["t_last"][sel["couple"] == c].max())
+            cpl, tl = A["couple"][a:b], A["t_last"][a:b]
+            for c in np.unique(cpl):
+                t = int(tl[cpl == c].max())
                 if t > self.newest[c]:
                     self.newest[c] = t; self.newest_wall[c] = now
-            t = int(sel["t_first"].min())
+            t = int(A["t_first"][a:b].min())
             self.first = t if self.first is None else min(self.first, t)
+            self.seen[p] = b
+
+    def all_seen(self):
+        return all(self.seen[p] == self.scans[p].n for p in self._live())
+
+    def untaken_first(self):
+        """The oldest time among the couple aggregates seen but not yet given to the DAQ part (None: none)."""
+        m = None
+        for p in self._live():
+            a, b = self.done[p], self.seen[p]
+            if b > a:
+                t = int(self.scans[p].arrays()["t_first"][a:b].min())
+                m = t if m is None else min(m, t)
+        return m
+
+    def take_new(self, max_hits=None):
+        """Couple aggregates seen and not yet given to the DAQ part, per file, in file order: about
+        max_hits hits of them (at least one aggregate)."""
+        out = []
+        left = max_hits
+        for p in self._live():
+            a, b = self.done[p], self.seen[p]
+            if b <= a:
+                continue
+            if left is not None and left <= 0:
+                break
+            A = self.scans[p].arrays()
+            if left is not None:
+                k = int(np.searchsorted(np.cumsum(A["nev"][a:b]), left, side="right"))
+                b = a + max(1, min(k, b - a))
+            sel = {k: A[k][a:b] for k in A}
+            self.done[p] = b
+            if left is not None:
+                left -= int(sel["nev"].sum())
             out.append((p, sel))
         return out
 
-    def skip_all(self, now):
-        """Mark everything written so far as seen (a live start: the dashboard reads from now)."""
-        for p, sel in self.take_new(now):
-            pass
+    def ready_to_skip(self, marks):
+        """Every file indexed up to its size at the start (or as far as it can be)."""
+        return all(self.scans[p].pos >= marks.get(p, 0) or not self.scans[p].behind for p in self._live())
+
+    def skip_to(self, marks):
+        """A live start: mark the couple aggregates that were on disk at the start (before marks[path]
+        words) as given; returns the newest time among them (None: none)."""
+        top = None
+        for p in self._live():
+            A = self.scans[p].arrays()
+            k = int(np.searchsorted(A["ev_start"][:self.seen[p]], marks.get(p, 0)))
+            if k > self.done[p]:
+                t = int(A["t_last"][self.done[p]:k].max())
+                top = t if top is None else max(top, t)
+                self.done[p] = k
+        return top
 
     def overlapping(self, lo, hi):
         """(path, couple aggregates given to the DAQ part that overlap [lo, hi)) per file."""
         out = []
-        for p in self.order:
-            if p in self.released or self.done[p] == 0:
+        for p in self._live():
+            if self.done[p] == 0:
                 continue
             A = self.scans[p].arrays()
             n = self.done[p]
@@ -337,11 +402,24 @@ class BoardStream:
                 fs.release()
                 self.released.add(p)
 
-    def summary(self):
-        f = [self.scans[p] for p in self.order]
+    def gaps(self):
+        """Board aggregates missing from the files: counter gaps inside a file and between files."""
+        f = [self.scans[p] for p in list(self.order)]
+        n = sum(s.gaps for s in f)
+        for x, y in zip(f, f[1:]):
+            if x.last_ctr >= 0 and y.first_ctr >= 0:
+                step = (y.first_ctr - x.last_ctr) & fsu_fast.CTR_MASK
+                if 1 <= step <= fsu_fast.FORWARD:
+                    n += step - 1
+        return n
+
+    def summary(self, now):
+        f = [self.scans[p] for p in list(self.order)]
+        stuck = [(s, s.stuck_s(now)) for s in f if s.stuck_since is not None]
         return dict(files=len(f), bytes=sum(s.size for s in f), indexed=sum(s.pos * 4 for s in f),
-                    skipped_words=sum(s.skipped for s in f), other_format=sum(s.other for s in f),
-                    unread_tail=sum(s.tail_bytes() for s in f[:-1]))   # finished files: what could not be read
+                    skipped_words=sum(s.skipped for s in f), other_format=sum(s.other for s in f), gaps=self.gaps(),
+                    behind=self.behind(),
+                    stuck=[dict(file=os.path.basename(s.path), bytes=int(s.tail_bytes()), s=float(t)) for s, t in stuck])
 
 
 # ---------------------------------------------------------------- the analysis
@@ -358,6 +436,8 @@ class Online:
         self.ref_slot = a.ref_slot
         self.follow = a.follow                  # run folder FSUDAQ named (--follow or GET /run); None = newest in the data path
         self.restart = False                    # set by GET /run: a new run starts, even in the same folder
+        self.stop_notice = False                # FSUDAQ stopped this run and closed its files
+        self.stopped_folder = None              # the folder GET /stopped named (it may come before we follow it)
         self.wake = threading.Event()
         self.step_error = None
         self.folder = None
@@ -421,6 +501,7 @@ class Online:
         self.t_first = None
         self.first_data_wall = None
         self.skip_existing = not from_start
+        self.skip_marks = None                  # live start: each file's size (words) when the dashboard started
         self.since = None                       # live start: the time from which data are read
         self.acc = ff.Result(S.chans.n_slots)   # the finder's histograms and counters
         self.daq = dh.DaqResult(S.chans.n_slots)
@@ -431,11 +512,19 @@ class Online:
         self.owned = 0                          # hits the finder's slices took (by their own time)
         self.replay_first = None                # replay: the run's first time, fixed once
         self.ingested_hits = np.zeros(len(self.serials), np.int64)
-        self.flushed = False
         self.last_fold_wall = None
         self.replay_t0 = None
         self.reset_wall = self.clock()
         self.status = "waiting for data"
+        self.mode = "waiting"                   # running, paused, stopped, quiet (see _advance)
+        self.stop_notice = False
+        self.finished_at_start = False          # the folder was already finished when the dashboard started
+        self.quiet_s = 0.0                      # how long no couple has written
+        self.behind = False                     # more is written than indexed
+        self.untaken_t = None                   # oldest time seen on disk and not yet given to the DAQ part
+        self.late_log = collections.deque()     # (wall time, late hits) of each result, for the recent count
+        self.flush_wall = None                  # when the finder last went on without couples silent in a pause
+        self.rr = 0                             # the board the DAQ part takes from first (round robin)
         self.first_files = {}
         self.others = set()                     # serials with files in the folder that are not analysed
         self.labels = {}
@@ -465,106 +554,214 @@ class Online:
             self.first_files.update(now)
         return replaced or any(b.replaced() for b in self.boards.values())
 
+    def run_started(self, folder):
+        """GET /run: FSUDAQ starts a saving run in this folder (also the same folder again)."""
+        self.follow = folder
+        self.stopped_folder = None
+        self.restart = True
+        self.wake.set()
+
+    def run_stopped(self, folder):
+        """GET /stopped: FSUDAQ stopped the run in this folder and closed its files."""
+        self.stopped_folder = os.path.abspath(folder)
+        self.wake.set()
+
     def margin_ps(self):
         return self.window_ps + 2 * self.setup.max_offset_ps + 1_000_000   # + 1 us
 
     # ------------------------------------------------------------ one step of the loop
     def step(self):
+        """Index what was written (outside the lock: the numba scan releases the GIL, so the page is
+        served while a big run is read), then everything else under the lock."""
         with self.lock:
             try:
-                self._step()
-                self.step_error = None
+                ctx = self._begin()
             except Exception as ex:             # noqa: BLE001  shown on the page; the loop goes on
                 self.step_error = repr(ex)
                 raise
+        if ctx is None:
+            return
+        boards, folder, stopped = ctx
+        try:
+            now = self.clock()
+            for b in boards:
+                b.discover(folder)
+                b.index(now, INDEX_WORDS)
+        except Exception as ex:                 # noqa: BLE001
+            with self.lock:
+                self.step_error = repr(ex)
+            raise
+        with self.lock:
+            if self.folder != folder or list(self.boards.values()) != boards:
+                return                          # a new run began meanwhile
+            try:
+                self._advance(stopped)
+                self.step_error = None
+            except Exception as ex:             # noqa: BLE001
+                self.step_error = repr(ex)
+                raise
 
-    def _step(self):
+    def _begin(self):
         a = self.a
         folder = a.run or self.follow or newest_run_folder(a.data_path)
         if folder != self.folder or self.restart or (folder and self._run_replaced(folder)):
             # a run that starts while we watch is read from its start; the one running when the
-            # dashboard started only from then on (unless --from-start)
+            # dashboard started only from then on (unless --from-start); a run already finished then
+            # is read whole
             from_start = bool(a.replay or a.from_start or self.restart or self.folder is not None)
+            finished = (not from_start and folder is not None and self.folder is None
+                        and folder_quiet(folder, a.stall_s))
             self.restart = False
-            self.reset(folder, from_start)
+            self.reset(folder, from_start or finished)
+            if finished:
+                self.finished_at_start = self.stop_notice = True
+        if folder is not None and self.stopped_folder == os.path.abspath(folder):
+            self.stop_notice = True
         if folder is None:
             self.status = f"no run folder under {a.data_path}"
-            return
+            return None
+        if self.skip_existing and self.skip_marks is None:
+            self.skip_marks = {}
+            for p in glob.glob(os.path.join(folder, "*.fsu")):
+                try:
+                    self.skip_marks[p] = os.stat(p).st_size // 4
+                except OSError:
+                    pass
         self._collect()
+        return list(self.boards.values()), folder, self.stop_notice
+
+    def _holding(self, now, boards):
+        """Couples that hold the finder back: written within --hold-s (or --stall-s), or of a board
+        whose files are not all indexed yet."""
+        span = max(self.a.hold_s, self.a.stall_s)
+        return [(b, c) for b in boards for c in range(8)
+                if b.newest[c] >= 0 and (now - b.newest_wall[c] < span or b.behind())]
+
+    def _advance(self, stopped):
+        a = self.a
         now = self.clock()
-
-        # 1. index what was written since the last step
-        for b in self.boards.values():
-            b.discover(folder)
-            b.update()
-        self.others = {int(m.group(1)) for p in glob.glob(os.path.join(folder, "*.fsu"))
+        S = self.setup
+        boards = list(self.boards.values())
+        self.others = {int(m.group(1)) for p in glob.glob(os.path.join(self.folder, "*.fsu"))
                        if (m := FILE_RE.search(p)) and int(m.group(1)) not in self.boards}
-        if self.skip_existing:
-            for b in self.boards.values():
-                b.skip_all(now)
-            tops = [int(b.newest.max()) for b in self.boards.values() if b.newest.max() >= 0]
-            self.skip_existing = False
-            if tops:                            # read from just after the newest hit on disk: what is older is late
-                self.since = max(tops) + 1
-                self.t_first = self.W = self.since
+        self.behind = any(b.behind() for b in boards)
 
-        # 2. the DAQ tab: every couple aggregate once, as it reaches the disk
+        # 1. what the index shows (a replay: up to the replay time)
         limit = None
         if a.replay:
             if self.replay_first is None:
-                firsts = [int(s.arrays()["t_first"].min()) for b in self.boards.values() for s in b.scans.values() if s.n]
+                firsts = [int(s.arrays()["t_first"].min()) for b in boards for s in b.scans.values() if s.n]
                 if firsts:
                     self.replay_first = min(firsts); self.replay_t0 = now
             if self.replay_first is not None:
                 limit = self.replay_first + int((now - self.replay_t0) * a.replay_speed * PS)
+        for b in boards:
+            b.observe(now, limit)
+        if a.replay and self.replay_first is not None and not self.behind and all(b.all_seen() for b in boards):
+            stopped = True                      # the replay has shown the whole run
+        if self.skip_existing:
+            if not all(b.ready_to_skip(self.skip_marks) for b in boards):
+                self.status = f"reading what is already on disk ({sum(self.skip_marks.values()) * 4 / 1e9:.1f} GB)"
+                return
+            tops = [t for t in (b.skip_to(self.skip_marks) for b in boards) if t is not None]
+            self.skip_existing = False
+            if tops:
+                # read from just after the newest hit on disk, on the finder's clock (offsets removed): a hit
+                # skipped there is before this, whatever its channel's offset; what is older and comes later
+                # is counted apart ("before the dashboard started"), not as late
+                self.since = max(tops) + 1 + S.max_offset_ps
+                self.t_first = self.W = self.since
+
+        # 2. the DAQ tab: every couple aggregate once, as it reaches the disk; at most 4 tasks per worker
+        #    out (the rest waits on disk: the finder does not pass it, see untaken_t)
         late_before = self.W if self.W is not None else -(1 << 62)
-        n_ingest = sum(1 for k, *_ in self.pending.values() if k == "ingest")
-        for b in (self.boards.values() if n_ingest < 4 * max(1, a.workers) else []):   # else: it stays on disk for later
-            for path, sel in b.take_new(now, limit):
+        room = 4 * max(1, a.workers) - sum(1 for k, *_ in self.pending.values() if k == "ingest")
+        for i in range(len(boards)):
+            if room <= 0:
+                break
+            b = boards[(self.rr + i) % len(boards)]
+            for path, sel in b.take_new(room * BATCH_HITS):
                 cum = np.cumsum(sel["nev"])
                 cuts = np.searchsorted(cum, np.arange(BATCH_HITS, int(cum[-1]), BATCH_HITS))
                 for lo, hi in zip(np.r_[0, cuts], np.r_[cuts, sel["nev"].size]):
                     if hi > lo:
                         self._submit("ingest", dict(path=path, aggs={k: v[lo:hi] for k, v in sel.items()}, bi=b.bi,
-                                                    late_before=late_before, n_slots=self.setup.chans.n_slots,
-                                                    board_channels=self.setup.chans.board_channels))
+                                                    late_before=late_before, early_before=self.since,
+                                                    n_slots=S.chans.n_slots, board_channels=S.chans.board_channels))
+                        room -= 1
+        self.rr += 1
+        untaken = [t for t in (b.untaken_first() for b in boards) if t is not None]
+        self.untaken_t = min(untaken) if untaken else None
 
         # 3. the track finder: time slices up to where every couple still writing is on disk
-        boards = list(self.boards.values())
         seen = [(b, c) for b in boards for c in range(8) if b.newest[c] >= 0]
         if not seen:
-            self.status = "no data yet"
+            self.status = "no data yet" + ("" if self.behind else f" (no files of {', '.join(f'Digi-{b.serial}' for b in boards)})")
+            self.mode = "waiting"
             return
         if self.first_data_wall is None:
             self.first_data_wall = now
         if self.t_first is None:
             # wait a moment for every board's first data, so a slower board's first hits are not late
-            if any(b.newest.max() < 0 for b in boards) and now - self.first_data_wall < a.hold_s:
-                self.status = "waiting for every board's first data"
+            missing = [b.serial for b in boards if b.newest.max() < 0]
+            if missing and now - self.first_data_wall < a.hold_s and not stopped:
+                self.status = (f"waiting up to {a.hold_s:.0f} s for the first data of "
+                               + ", ".join(f"Digi-{x}" for x in missing))
+                self.mode = "waiting"
                 return
             self.t_first = min(b.first for b in boards if b.first is not None)
-            self.W = self.t_first - self.setup.max_offset_ps   # a hit's time on the finder's clock can be that much earlier
+            self.W = self.t_first - S.max_offset_ps   # a hit's time on the finder's clock can be that much earlier
         top = max(int(b.newest[c]) for b, c in seen)
-        writing = [(b, c) for b, c in seen if now - b.newest_wall[c] < a.stall_s]
+        writing = any(now - b.newest_wall[c] < a.stall_s for b, c in seen)
+        self.quiet_s = float(now - max(b.newest_wall[c] for b, c in seen))
+        holding = self._holding(now, boards)
         margin = self.margin_ps()
-        if not writing:                         # nothing written for a while: the run ended, or a pause
+        if stopped and not self.behind:
+            mode = "stopped"                    # FSUDAQ stopped the run (or it was over): all of it is on disk
             target = top + margin + 1
-            self.status = "run ended or paused: everything on disk processed" if self.W >= target else "no new data: processing what is on disk"
-        else:
-            holding = [(b, c) for b, c in seen if now - b.newest_wall[c] < max(a.hold_s, a.stall_s)]
+        elif writing or self.behind:
+            mode = "running"
             target = min(int(b.newest[c]) for b, c in holding) - margin
-            self.status = "running"
+        elif self.quiet_s < a.hold_s:
+            mode = "paused"                     # nothing written for a while: a beam pause holds data in the
+            target = min(int(b.newest[c]) for b, c in holding) - margin   # boards' buffers; wait for them
+        else:
+            mode = "quiet"                      # nothing written for --hold-s: process all that is on disk
+            target = top + margin + 1
+            if self.mode != "quiet":
+                self.flush_wall = now           # the finder goes on without the couples silent in the pause
+        self.mode = mode
+        if self.untaken_t is not None:          # nothing the DAQ part has not had: its hits would count twice
+            target = min(target, self.untaken_t - margin)
         n_slices = sum(1 for k, *_ in self.pending.values() if k == "slice")
+        n_ingest = len(self.pending) - n_slices
         max_slice = int(a.max_slice_s * PS); min_step = int(a.min_step_s * PS)
         while self.W < target and n_slices < 2 * max(1, a.workers):
-            if target - self.W < min_step and writing:
+            if target - self.W < min_step and mode == "running":
                 break                           # too thin a slice: wait for more
             t1 = min(target, self.W + max_slice)
             files = [(b.bi, p, A) for b in boards for p, A in b.overlapping(self.W - margin, t1 + margin)]
             self._submit("slice", dict(t0=int(self.W), t1=int(t1), margin=int(margin), files=files, ref=self.ref_slot))
             self.W = t1; n_slices += 1
-        if self.W < target and n_slices >= 2 * max(1, a.workers):
-            self.status = "falling behind: every worker is busy"
+        all_done = self.W >= target and not self.pending and self.untaken_t is None and not self.behind
+        if mode == "running":
+            if self.behind:
+                self.status = "falling behind: reading the files"
+            elif self.untaken_t is not None or n_ingest >= 4 * max(1, a.workers):
+                self.status = "falling behind: the DAQ part"
+            elif self.W < target and n_slices >= 2 * max(1, a.workers):
+                self.status = "falling behind: every worker is busy"
+            else:
+                self.status = "running"
+        elif mode == "stopped":
+            what = "last run (finished before the dashboard started)" if self.finished_at_start else "run stopped"
+            self.status = f"{what}: " + ("everything processed" if all_done else "processing what is on disk")
+        elif mode == "paused":
+            self.status = (f"no new data for {self.quiet_s:.0f} s (a pause?): the finder waits up to {a.hold_s:.0f} s "
+                           "for hits still in the boards' buffers")
+        else:
+            self.status = f"no new data for {self.quiet_s:.0f} s: " + ("everything on disk processed" if all_done
+                                                                      else "processing what is on disk")
         for b in boards:
             b.release(self.W - margin - int(a.hold_s * PS))
         # tasks that never come back (a hung worker) are said on the page, see state()
@@ -615,6 +812,9 @@ class Online:
                         del self.secs[s]
                 if epoch == self.epoch:
                     self.daq.add(r["daq"])
+                    n_late = int(np.asarray(r["daq"]["late"]).sum())
+                    if n_late:
+                        self.late_log.append((self.clock(), n_late))
             else:
                 res = r["res"]
                 if epoch == self.epoch:
@@ -626,7 +826,7 @@ class Online:
                     if r["ref"] != self.ref_slot:   # made before the reference channel changed: keep all but dt
                         d = dict(d); d["dt"] = np.zeros_like(d["dt"])
                     self.daq.add(d)
-                self.owned += r["owned"]
+                    self.owned += r["owned"]
                 n_trk = int((res["h_ntrk"] * np.arange(ff.NTRK)).sum())
                 status = {ff.STATUS[i]: int(c) for i, c in enumerate(res["h_status"]) if c}
                 self.slices.append((r["t0"], r["t1"], int(res["n_bunches"]), status, n_trk))
@@ -646,16 +846,22 @@ class Online:
             now = self.clock()
             S, A, ch = self.setup, self.acc, self.setup.chans
             boards = []
-            late = self.daq.late
+            late, early = self.daq.late, self.daq.early
             pending = list(self.pending.values())
+            running = self.mode == "running"
             for sn, b in self.boards.items():
                 seen = b.newest >= 0
                 top = int(b.newest.max()) if seen.any() else None
-                boards.append(dict(serial=sn, id=b.bi, **b.summary(), hits=int(b.hits), read_hits=int(self.ingested_hits[b.bi]),
-                                   late=int(late[b.bi * ch.board_channels:(b.bi + 1) * ch.board_channels].sum()),
-                                   newest_s=None if top is None or self.t_first is None else (top - self.t_first) / PS,
-                                   quiet_s=None if not seen.any() else float(now - b.newest_wall[seen].max()),
-                                   slow_couples=[int(c) for c in range(8) if seen[c] and now - b.newest_wall[c] >= self.a.stall_s
+                t_ref = self.t_first if self.t_first is not None else min((x.first for x in self.boards.values() if x.first is not None), default=None)
+                quiet = None if not seen.any() else float(now - b.newest_wall[seen].max())
+                sl = slice(b.bi * ch.board_channels, (b.bi + 1) * ch.board_channels)
+                boards.append(dict(serial=sn, id=b.bi, **b.summary(now), hits=int(b.hits), read_hits=int(self.ingested_hits[b.bi]),
+                                   late=int(late[sl].sum()), early=int(early[sl].sum()), has_data=top is not None,
+                                   newest_s=None if top is None or t_ref is None else (top - t_ref) / PS,
+                                   quiet_s=quiet,
+                                   # silent while the others write: worth a look (not after the run ended)
+                                   quiet_alarm=bool(running and quiet is not None and quiet >= self.a.stall_s),
+                                   slow_couples=[int(c) for c in range(8) if running and seen[c] and now - b.newest_wall[c] >= self.a.stall_s
                                                  and now - b.newest_wall.max() < self.a.stall_s]))
             occ = [[0] * (int(n) + 1) for n in (ch.ch[ch.plane == p].max(initial=0) for p in range(3))]
             counters = {}
@@ -682,26 +888,43 @@ class Online:
             if self.others:
                 health.append("files of boards not analysed: " + ", ".join(str(s) for s in sorted(self.others))
                               + " (not in --boards)")
+            if self.status.startswith("falling behind"):
+                health.append(f"the analysis is {self.status}: what the page shows lags the data")
             for b in boards:
+                if self.t_first is not None and not b["has_data"] and (running or self.mode == "paused"):
+                    health.append(f"Digi-{b['serial']}: no data in this run")
+                elif b["quiet_alarm"]:
+                    health.append(f"Digi-{b['serial']}: nothing written for {b['quiet_s']:.0f} s while the other boards write")
+                if b["gaps"]:
+                    health.append(f"Digi-{b['serial']}: {b['gaps']:,} board aggregates missing from the files (counter gaps): "
+                                  "data lost before they reached the disk")
                 if b["skipped_words"]:
                     health.append(f"Digi-{b['serial']}: {b['skipped_words'] * 4:,} bytes of damaged data stepped over")
                 if b["other_format"]:
                     health.append(f"Digi-{b['serial']}: {b['other_format']:,} couple aggregates in a format the online "
                                   "decoder does not read (extras option 2 with time tag and charges needed); left out")
-                if b["unread_tail"]:
-                    health.append(f"Digi-{b['serial']}: {b['unread_tail']:,} bytes at the end of finished files could not be read")
+                for x in b["stuck"]:
+                    if x["s"] > self.a.stall_s:
+                        health.append(f"Digi-{b['serial']}: the last {x['bytes']:,} bytes of {x['file']} cannot be read "
+                                      f"(for {x['s']:.0f} s)")
             if self.step_error:
                 health.append(f"the analysis loop fails: {self.step_error}")
+            while self.late_log and now - self.late_log[0][0] > LATE_RECENT_S:
+                self.late_log.popleft()
             n_late = int(late.sum())
             return dict(
-                server_time=now, folder=self.folder, status=self.status, kernels="numba" if FAST else "numpy",
+                server_time=now, folder=self.folder, status=self.status, mode=self.mode, kernels="numba" if FAST else "numpy",
                 workers=self.a.workers, in_flight=len(self.pending), oldest_task_s=max(ages) if ages else None,
                 last_result_s=None if self.last_fold_wall is None else now - self.last_fold_wall,
-                replay=bool(self.a.replay), window_ns=self.a.window,
+                replay=bool(self.a.replay), window_ns=self.a.window, hold_s=self.a.hold_s, stall_s=self.a.stall_s,
+                quiet_s=self.quiet_s, finished_at_start=self.finished_at_start,
                 live_start=self.since is not None, since_wall=self.reset_wall,
                 processed_s=None if done is None or self.t_first is None else (done - self.t_first) / PS,
                 newest_s=None if newest is None else (newest - self.t_first) / PS,
-                hits=self.owned, late=n_late, bunches=A.n_bunches, unmapped=A.n_bad,
+                hits=self.owned, late=n_late, late_recent=int(sum(n for _, n in self.late_log)), late_recent_s=LATE_RECENT_S,
+                early=int(early.sum()),
+                pause_flush_s=None if self.flush_wall is None else now - self.flush_wall,
+                bunches=A.n_bunches, unmapped=A.n_bad,
                 proc_s=self.proc_s, steps=self.steps, health=health,
                 warnings=S.warnings, problems=S.problems,
                 boards=boards,
@@ -743,31 +966,44 @@ class Online:
                      status=o["status"], tracks=o["tracks"]) for o in out]
 
     def _complete_seconds(self):
-        """Whole seconds of data time inside the run, all of whose hits from the couples still writing
-        are on disk (a second the run starts or ends in is left out: its rate would read low)."""
+        """Whole seconds of data time inside the run whose hits from the couples still writing are all
+        counted: on disk, given to the DAQ part, and its results back (a second the run starts or ends
+        in is left out: its rate would read low). Also the couples that do not hold this back (silent
+        for --hold-s, or not written yet: a slow couple's first buffer may still be filling): their count
+        in those seconds is not known yet. Returns (seconds, those couples as (board index, couple))."""
         now = self.clock()
-        tops = [int(b.newest[c]) for b in self.boards.values() for c in range(8)
-                if b.newest[c] >= 0 and now - b.newest_wall[c] < self.a.hold_s]
-        if not tops:
-            tops = [int(b.newest.max()) for b in self.boards.values() if b.newest.max() >= 0]
-            if not tops:
-                return []
-            last = max(tops) // PS - 1        # nothing writing: all is on disk, but the last second is cut
+        boards = list(self.boards.values())
+        holding = self._holding(now, boards)
+        if holding:
+            bound = min(int(b.newest[c]) for b, c in holding)
         else:
-            last = min(tops) // PS - 1
-        firsts = [b.first for b in self.boards.values() if b.first is not None]
+            tops = [int(b.newest.max()) for b in boards if b.newest.max() >= 0]
+            if not tops:
+                return [], set()
+            bound = max(tops)                   # nothing writing: all is on disk, but the last second is cut
+        out = [int(task["aggs"]["t_first"].min()) for kind, task, *_ in self.pending.values()
+               if kind == "ingest" and task["aggs"]["t_first"].size]
+        if self.untaken_t is not None:
+            out.append(self.untaken_t)
+        if out:
+            bound = min(bound, min(out))        # counts not back yet
+        last = bound // PS - 1
+        firsts = [b.first for b in boards if b.first is not None]
         first = -(-min(firsts) // PS) if firsts else 0
         if self.t_first is not None:
             first = max(first, -(-self.t_first // PS))
-        return [s for s in sorted(self.secs) if first <= s <= last]
+        hold = {(b.bi, c) for b, c in holding}
+        slow = {(b.bi, c) for b in boards for c in range(8) if (b.bi, c) not in hold and b.newest[c] < (last + 1) * PS}
+        return [s for s in sorted(self.secs) if first <= s <= last], slow
 
     def _daq_state(self, boards, newest, done):
         D = self.daq
-        secs = self._complete_seconds()
+        secs, slow = self._complete_seconds()
         rate = {}
-        if secs and self.status == "running":       # the newest complete second; nothing after the run ended
+        if secs and self.mode == "running":     # the newest complete second, while data are written
             row = self.secs[secs[-1]]
-            rate = {sl: float(row[sl]) for sl in self.slots}
+            nbc = self.setup.chans.board_channels
+            rate = {sl: (None if (sl // nbc, (sl % nbc) // 2) in slow else float(row[sl])) for sl in self.slots}
         try:
             du = shutil.disk_usage(self.folder or self.a.data_path or "/")
             disk = dict(free_gb=du.free / 1e9, total_gb=du.total / 1e9)
@@ -775,12 +1011,14 @@ class Online:
             disk = None
         nbc = self.setup.chans.board_channels
         t0s = self.t_first // PS if self.t_first is not None else (secs[0] if secs else 0)
+        known = [v for v in rate.values() if v is not None]
         return dict(
-            slots=[dict(slot=sl, **self.labels[sl], count=int(D.counts[sl]), rate=rate.get(sl), late=int(D.late[sl])) for sl in self.slots],
-            ref=self.ref_slot, total_rate=sum(rate.values()) if rate else None,
+            slots=[dict(slot=sl, **self.labels[sl], count=int(D.counts[sl]), rate=rate.get(sl), late=int(D.late[sl]),
+                        early=int(D.early[sl]), written=bool(self.boards[self.serials[sl // nbc]].newest[(sl % nbc) // 2] >= 0))
+                   for sl in self.slots],
+            ref=self.ref_slot, total_rate=sum(known) if rate else None, rate_unknown=len(rate) - len(known),
+            rate_second=None if not rate else secs[-1] - t0s,
             lag_s=None if newest is None or done is None else max(0.0, (newest - done) / PS),
-            processed_pct=None if newest is None or done is None or newest <= self.t_first else
-            min(100.0, 100.0 * (done - self.t_first) / (newest - self.t_first)),
             in_flight=len(self.pending), backpressure=self.status.startswith("falling behind"),
             run_bytes=sum(b["bytes"] for b in boards), files=sum(b["files"] for b in boards), disk=disk, n_windows=D.n_seg,
             seconds=[dict(t=s - t0s, boards=[int(self.secs[s][bi * nbc:(bi + 1) * nbc].sum()) for bi in range(len(self.serials))])
@@ -800,7 +1038,7 @@ class Online:
                 return None
             n = float(D.spec_n[sl])
             t0s = self.t_first // PS if self.t_first is not None else 0
-            rates = [[s - t0s, int(self.secs[s][sl])] for s in self._complete_seconds()]
+            rates = [[s - t0s, int(self.secs[s][sl])] for s in self._complete_seconds()[0]]
             lo, hi, nb, log = view or (0, 65536, 4096, False)
             e = dh.q_edges(lo, hi, nb, log)
             row = D.q[sl]
@@ -811,7 +1049,7 @@ class Online:
             i0 = max(0, int(np.searchsorted(dh.PX_EDGES, e[0], side="right")) - 1)
             i1 = min(dh.NPX, int(np.searchsorted(dh.PX_EDGES, e[-1], side="left")))
             P = D.psd[sl, i0:i1]
-            return dict(slot=sl, **self.labels[sl], count=int(D.counts[sl]), late=int(D.late[sl]), ref=self.ref_slot,
+            return dict(slot=sl, **self.labels[sl], count=int(D.counts[sl]), late=int(D.late[sl]), early=int(D.early[sl]), ref=self.ref_slot,
                         q=dict(edges=e.tolist(), counts=shown.tolist(), total=tot, zero=int(row[0]), sat=int(row[65535]),
                                outside=int(inside - shown.sum()), log=bool(log)),
                         psd=dict(xedges=dh.PX_EDGES[i0:i1 + 1].tolist(), ny=dh.NPY, counts=P.tolist(),
@@ -835,12 +1073,25 @@ class Online:
         with self.lock:
             self.acc = ff.Result(self.setup.chans.n_slots)
             self.daq = dh.DaqResult(self.setup.chans.n_slots)
+            self.owned = 0
+            self.late_log.clear()
             self.epoch += 1
 
     def set_ref(self, sl):
         with self.lock:
             self.ref_slot = sl if sl in self.labels else None
             self.daq.dt[...] = 0
+
+
+def folder_quiet(folder: str, quiet_s: float) -> bool:
+    """No data file of the folder was written in the last quiet_s seconds (wall clock): a finished run."""
+    times = []
+    for p in glob.glob(os.path.join(folder, "*.fsu")):
+        try:
+            times.append(os.path.getmtime(p))
+        except OSError:
+            pass
+    return bool(times) and time.time() - max(times) > quiet_s
 
 
 def newest_run_folder(data_path: str):
@@ -868,10 +1119,16 @@ class Handler(BaseHTTPRequestHandler):
             folder = q.get("folder", [""])[0]
             if not folder:
                 self.send_response(400); self.end_headers(); return
-            self.online.follow = folder
-            self.online.restart = True
-            self.online.wake.set()
+            self.online.run_started(folder)
             say(f"{time.strftime('%H:%M:%S')} following run folder {folder}")
+            self.send_response(204); self.end_headers(); return
+        if self.path.startswith("/stopped"):     # FSUDAQ stopped a saving run and closed its files
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            folder = q.get("folder", [""])[0]
+            if not folder:
+                self.send_response(400); self.end_headers(); return
+            self.online.run_stopped(folder)
+            say(f"{time.strftime('%H:%M:%S')} run stopped: {folder}")
             self.send_response(204); self.end_headers(); return
         q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         if self.path.startswith("/clear"):      # the page's Clear: per-channel and finder histograms start again
@@ -937,9 +1194,10 @@ def parse_args(argv=None):
     p.add_argument("--window", type=float, default=25.0,
                    help="bunch building: a gap longer than this starts a new bunch [ns]. 25 = the finder's +-10 ns gate "
                         "around each plane's expected arrival plus the 4.3 ns T0->T2 flight at beta 0.75")
-    p.add_argument("--stall-s", type=float, default=5.0, help="no couple written for this long: process all that is on disk")
-    p.add_argument("--hold-s", type=float, default=30.0, help="a couple silent this long no longer holds the finder back "
-                                                              "(its later hits are counted as late)")
+    p.add_argument("--stall-s", type=float, default=5.0, help="no couple written for this long: a pause (or the run ended "
+                                                              "without word from FSUDAQ)")
+    p.add_argument("--hold-s", type=float, default=30.0, help="a couple silent this long no longer holds the finder back, "
+                                                              "nor does a pause (its later hits are counted as late)")
     p.add_argument("--min-step-s", type=float, default=0.5, help="do not cut finder slices shorter than this while data come in")
     p.add_argument("--max-slice-s", type=float, default=2.0, help="the longest finder slice (memory per worker)")
     p.add_argument("--task-timeout", type=float, default=120.0, help="a task out longer than this is reported as stalled")

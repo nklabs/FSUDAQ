@@ -14,6 +14,8 @@ in file order (each channel's hits are in time order there), whenever they reach
             (shows the trigger hold-off as a cut, pile-up, and a pulser as a peak); the first hit of a
             channel in each batch has no previous one
   late      hits older than the track finder's boundary when they reached the disk (not in the finder)
+  early     hits from before a dashboard started mid-run that reach the disk after it (not in the
+            finder; not late either: the finder never started there)
   per second: hits per channel and second of data time (the rate plots)
 process_ordered() takes the time-ordered hits of a finder slice [t0, t1), which need all channels
 together:
@@ -60,7 +62,7 @@ F_EDGES = np.arange(NF + 1) * F_GROUP / (SEG * BIN_PS * 1e-12) + 0.5 / (SEG * BI
 
 
 class DaqResult:
-    ARRAYS = ("counts", "psd_out", "iat", "late", "dt", "spec_p", "spec_n", "spec_tot_p", "spec_tot_n")
+    ARRAYS = ("counts", "psd_out", "iat", "late", "early", "dt", "spec_p", "spec_n", "spec_tot_p", "spec_tot_n")
     SPARSE = ("q", "psd")
     SCALARS = ("n_seg",)
 
@@ -72,6 +74,7 @@ class DaqResult:
         self.psd_out = np.zeros(n_slots, np.int64)
         self.iat = np.zeros((n_slots, IAT_EDGES.size - 1), np.int64)
         self.late = np.zeros(n_slots, np.int64)
+        self.early = np.zeros(n_slots, np.int64)
         self.dt = np.zeros((n_slots, NDT), np.int64)
         self.spec_p = np.zeros((n_slots, NF), np.float64)
         self.spec_n = np.zeros(n_slots, np.float64)
@@ -133,21 +136,24 @@ def _exact_kernel(ts, slot, e, qs, late_before, pxlut, counts, q, psd, psd_out, 
                 iat[s, int(x)] += 1
 
 
-def process_exact(ts, slot, e, qs, late_before, n_slots, ts_late=None):
-    """DaqResult (counts, q, psd, iat, late) of a batch of hits in file order, and the hits per
+def process_exact(ts, slot, e, qs, late_before, n_slots, ts_late=None, early_before=None):
+    """DaqResult (counts, q, psd, iat, late, early) of a batch of hits in file order, and the hits per
     (slot, second of data time) as (seconds, slots, counts). ts_late: the times "late" is decided on
-    (the finder's: time offsets removed), default ts."""
+    (the finder's: time offsets removed), default ts. Hits before early_before are counted as early,
+    not late."""
     r = DaqResult(n_slots, np.uint32)
     if ts.size == 0:
         return r, (np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros(0, np.int64))
     ts = np.ascontiguousarray(ts, np.int64); slot = np.ascontiguousarray(slot, np.int64)
     _exact_kernel(ts, slot, np.ascontiguousarray(e, np.int64), np.ascontiguousarray(qs, np.int64), np.int64(late_before),
                   PXLUT, r.counts, r.q, r.psd, r.psd_out, r.iat, r.late)
-    if ts_late is not None:                    # late by the finder's time
-        r.late[...] = 0
-        ok = (slot >= 0) & (slot < n_slots)
-        np.add.at(r.late, slot[ok & (np.asarray(ts_late) < late_before)], 1)
     ok = (slot >= 0) & (slot < n_slots)
+    if ts_late is not None or early_before is not None:   # late by the finder's time; early apart
+        tl = ts if ts_late is None else np.asarray(ts_late)
+        r.late[...] = 0
+        early = ok & (tl < early_before) if early_before is not None else np.zeros(ts.size, bool)
+        np.add.at(r.late, slot[ok & (tl < late_before) & ~early], 1)
+        np.add.at(r.early, slot[early], 1)
     key, cnt = np.unique((ts[ok] // 1_000_000_000_000) * n_slots + slot[ok], return_counts=True)
     return r, (key // n_slots, key % n_slots, cnt.astype(np.int64))
 
