@@ -25,6 +25,7 @@ static const std::set<uint32_t> NotFromFile = {
   0xEF14, // InterruptStatusID
   0xEF18, // InterruptEventNumber
   0xEF20, // Scratch
+  0xEF00, // ReadoutControl: the CAEN library sets it at open (bus-error enable for block transfers)
 };
 
 static int nFail = 0;

@@ -15,6 +15,7 @@
 #include "CustomWidgets.h"
 
 class DigiSettingsPanel : public QMainWindow{
+  friend class FSUDAQTest; // tests/test_daq.cpp
   Q_OBJECT
 
 public:

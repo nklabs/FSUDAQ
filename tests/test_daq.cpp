@@ -11,10 +11,14 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileInfo>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QTextStream>
 #include <QTimer>
+#include <QScrollArea>
+#include <QMap>
+#include <thread>
 
 #include <functional>
 #include <unistd.h>
@@ -30,6 +34,7 @@ static int nFail = 0;
 
 static const int Serials[6] = {15880, 15879, 58918, 62839, 1443, 30508}; // port order on odin
 static QStringList dialogs;   // "title: text" of every dialog answered
+static QMap<QString, QString> answers;   // dialog title -> the button to press (else the default)
 
 class FSUDAQTest {
 public:
@@ -274,7 +279,14 @@ public:
     w->AutoRun();
     Pump(800);
     QString runDir = w->RunFolder();
-    w->close();                      // closeEvent
+    w->close();                      // asked: the default is No
+    CHECK(w->inDataRun && Dialogs("Close FSUDAQ") == 1, "closing during a run was not asked about, or stopped the run");
+    dialogs.clear();
+    answers["Close FSUDAQ"] = "Yes";
+    w->close();                      // closeEvent, answered Yes
+    answers.clear();
+    CHECK(Dialogs("Close FSUDAQ") == 1, "no question before closing");
+    dialogs.removeAll(dialogs.value(0));
     CHECK(!w->inDataRun, "still in a run after the window closed");
     CheckAllSaved(QStringList() << runDir, "window closed");
     QStringList rec = RecordLines();
@@ -302,6 +314,12 @@ public:
     CHECK(!w->bnOpenScope->isEnabled() && !w->chkSaveData->isEnabled() && !w->chkRepeatRun->isEnabled() && !w->bnSetDataPath->isEnabled(),
           "controls not locked in the pause");
     CHECK(w->bnStopACQ->isEnabled() && w->bnStopACQ->text() == "Stop Series", "Stop Series not offered in the pause");
+    w->OpenDigiSettings();               // opened in the pause: its controls are locked
+    {
+      QWidget * page = w->digiSettings->tabWidget->widget(0);
+      QScrollArea * sa = qobject_cast<QScrollArea *>(page);
+      CHECK(sa && sa->widget() && !sa->widget()->isEnabled(), "the settings panel opened in a series pause is not locked");
+    }
     CHECK(WaitFor([&](){ return w->inDataRun; }, 3000) && w->runID == 2, "run 2 did not start after the pause");
     runDirs << w->RunFolder();
     CHECK(WaitFor([&](){ return w->pauseTimer->isActive(); }, 3000), "no pause after run 2");
@@ -368,6 +386,106 @@ public:
     w->CloseDigitizers();
   }
 
+  void DroppedWriteBlocksStart(){
+    printf("== a register write lost on the link (success returned): the board does not hold its file, no run\n");
+    NewWorkDir(); AddBoards(); NewFSUDAQ();
+    fake_caen_drop_write(15879, 0x136C);          // ch3 trigger threshold
+    dialogs.clear();
+    Open();
+    CHECK(w->BoardsNotProgrammed() == QStringList("Digi-15879"), "not-programmed: %s", qPrintable(w->BoardsNotProgrammed().join(",")));
+    CHECK(Dialogs("Settings files") == 1, "no dialog at open (%s)", qPrintable(dialogs.join(" | ")));
+    w->chkSaveData->setChecked(true);
+    w->AutoRun();
+    CHECK(!w->inDataRun && Dialogs("Run not started") == 1, "a run started with a register that does not read back");
+    if( nFail == 0 ) OK("the register that reads back wrong is named, and Start is refused");
+    w->CloseDigitizers();
+  }
+
+  void SlowStopReported(){
+    printf("== a readout that does not end 10 s after the stop: the data left on the board are reported and recorded\n");
+    NewWorkDir(); AddBoards(); NewFSUDAQ();
+    Open();
+    w->chkSaveData->setChecked(true);
+    dialogs.clear();
+    w->AutoRun();
+    Pump(400);
+    fake_caen_fail(1443, "hang");
+    std::thread release([](){ std::this_thread::sleep_for(std::chrono::seconds(12)); fake_caen_fail(1443, ""); });
+    w->StopPressed();
+    release.join();
+    QStringList rec = RecordLines();
+    CHECK(rec.size() == 2 && rec[1].contains("1443") && rec[1].contains("data were left"), "stop record: %s", qPrintable(rec.join(" / ")));
+    CHECK(Dialogs("Problems in the run") == 1, "no dialog (%s)", qPrintable(dialogs.join(" | ")));
+    CHECK(w->StuckBoards().isEmpty() && w->bnStartACQ->isEnabled(), "the board counts as stuck although its readout ended");
+    if( nFail == 0 ) OK("one dialog, the stop record says Digi-1443 left data on the board");
+    w->CloseDigitizers();
+  }
+
+  void StuckBoardBlocksRuns(){
+    printf("== a readout stuck in the CAEN library: recorded, no new run, close does not hang\n");
+    NewWorkDir(); AddBoards(); NewFSUDAQ();
+    Open();
+    w->chkSaveData->setChecked(true);
+    dialogs.clear();
+    w->AutoRun();
+    Pump(400);
+    fake_caen_fail(58918, "hang");
+    w->StopPressed();                  // 10 s + 5 s
+    QStringList rec = RecordLines();
+    CHECK(rec.size() == 2 && rec[1].contains("58918") && rec[1].contains("stuck"), "stop record: %s", qPrintable(rec.join(" / ")));
+    CHECK(w->StuckBoards() == QStringList("Digi-58918"), "stuck boards: %s", qPrintable(w->StuckBoards().join(",")));
+    CHECK(!w->bnStartACQ->isEnabled() && !w->bnOpenScope->isEnabled(), "Start or Scope enabled with a stuck board");
+    dialogs.clear();
+    w->AutoRun();
+    CHECK(!w->inDataRun && Dialogs("Run not started") == 1, "a run started with a stuck board");
+    QElapsedTimer t; t.start();
+    w->CloseDigitizers();              // the stuck readout is left alone, nothing hangs
+    CHECK(t.elapsed() < 15000, "closing took %lld ms", (long long) t.elapsed());
+    fake_caen_fail(58918, "");         // let the thread go (it then ends on its own)
+    Pump(500);
+    if( nFail == 0 ) OK("recorded as stuck, Start/Scope refused, close returned in %lld ms", (long long) t.elapsed());
+  }
+
+  void OverwriteUndoneIfStartFails(){
+    printf("== \"Overwrite files and continue\" and then the start fails: the old run is back\n");
+    NewWorkDir(); AddBoards(); NewFSUDAQ();
+    Open();
+    w->chkSaveData->setChecked(true);
+    w->chkAutoIncrement->setChecked(false);
+    w->leRunID->setText("7");
+    dialogs.clear();
+    w->AutoRun(); Pump(300); w->StopPressed();
+    QString runDir = w->RunFolder();
+    QStringList before = QDir(runDir).entryList(QDir::Files, QDir::Name);
+    qint64 bytes = 0; for( auto & f : before ) bytes += QFileInfo(runDir + "/" + f).size();
+    fake_caen_fail(1443, "malloc");
+    answers["Run number already used"] = "Overwrite files and continue";
+    dialogs.clear();
+    w->leRunID->setText("7");
+    w->AutoRun();
+    answers.clear();
+    QStringList after = QDir(runDir).entryList(QDir::Files, QDir::Name);
+    qint64 bytes2 = 0; for( auto & f : after ) bytes2 += QFileInfo(runDir + "/" + f).size();
+    CHECK(!w->inDataRun && Dialogs("Run not started") == 1, "the run started, or no refusal");
+    CHECK(after == before && bytes2 == bytes, "the old run's files are not back: %lld files %lld bytes, were %lld files %lld bytes",
+          (long long) after.size(), (long long) bytes2, (long long) before.size(), (long long) bytes);
+    CHECK(QDir(runDir).entryList(QStringList() << "replaced_*", QDir::Dirs).isEmpty(), "the aside folder is left");
+    fake_caen_fail(1443, "");
+    if( nFail == 0 ) OK("%lld files of run 7 back in place", (long long) after.size());
+    w->CloseDigitizers();
+  }
+
+  void BoardThatDoesNotReopen(){
+    printf("== a board that answers the search but does not open again: left out, no crash\n");
+    NewWorkDir(); AddBoards(); NewFSUDAQ();
+    fake_caen_fail(30508, "reopen");
+    Open();
+    CHECK(w->nDigi == 5, "%u boards open", w->nDigi);
+    CHECK(w->logInfo->toPlainText().contains("cannot be opened now"), "not said in the log");
+    if( nFail == 0 ) OK("five boards open, the sixth said in the log");
+    w->CloseDigitizers();
+  }
+
   void ScopeKeepsSaveData(){
     printf("== opening and closing the scope leaves Save Data as it was\n");
     NewWorkDir(); AddBoards(); NewFSUDAQ();
@@ -402,6 +520,9 @@ int main(int argc, char ** argv){
       dialogs << box->windowTitle() + ": " + box->text();
       printf("         [dialog] %s: %s\n", qPrintable(box->windowTitle()), qPrintable(box->text().left(160).replace("\n", " ")));
       QAbstractButton * b = box->defaultButton();
+      if( answers.contains(box->windowTitle()) ){
+        for( QAbstractButton * x : box->buttons() ) if( x->text().remove('&') == answers[box->windowTitle()] ) b = x;
+      }
       if( !b && !box->buttons().isEmpty() ) b = box->buttons().first();
       if( b ) b->click(); else box->done(0);
     }else if( auto * d = qobject_cast<QDialog *>(m) ){
@@ -421,6 +542,11 @@ int main(int argc, char ** argv){
   t.BoardAlsoOnUSB();
   t.SignalStopsRunProperly();
   t.CloseWindowDuringRun();
+  t.DroppedWriteBlocksStart();
+  t.SlowStopReported();
+  t.StuckBoardBlocksRuns();
+  t.OverwriteUndoneIfStartFails();
+  t.BoardThatDoesNotReopen();
   t.ScopeKeepsSaveData();
 
   delete t.w;

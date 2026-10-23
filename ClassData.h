@@ -808,6 +808,7 @@ inline int Data::DecodePHADualChannelBlock(unsigned int ChannelMask, bool fastDe
   bool hasFormatInfo = ((word >> 31) & 0x1);
   unsigned int aggSize = ( word & 0x7FFFFFFF ) ;
   if( verbose >= 2 ) printf("Dual Channel size : %d \n",  aggSize);
+  if( aggSize < 2 || 4 * ((uint64_t) nw + aggSize) > nByte ){ decodeOverrun = true; return -1; } // a damaged size: (aggSize - 2) would wrap and loop over garbage for seconds
   unsigned short decimation = (word >> 12) & 0xF ;
   unsigned int nSample = 0; /// wave form;
   unsigned int nEvents = 0;
@@ -1066,6 +1067,7 @@ inline int Data::DecodePSDDualChannelBlock(unsigned int ChannelMask, bool fastDe
   
   unsigned int aggSize = ( word & 0x3FFFFF ) ;
   if( verbose >= 2 ) printf(" size : %d \n",  aggSize);
+  if( aggSize < 2 || 4 * ((uint64_t) nw + aggSize) > nByte ){ decodeOverrun = true; return -1; } // a damaged size: (aggSize - 2) would wrap and loop over garbage for seconds
 
   unsigned int nEvents = 0;
   nw = nw + 1; word = ReadBuffer(nw, verbose);
@@ -1304,6 +1306,7 @@ inline int Data::DecodeQDCGroupedChannelBlock(unsigned int ChannelMask, bool fas
 
   unsigned int aggSize = ( word & 0x3FFFFF ) ;
   if( verbose >= 2 ) printf(" Group agg. size : %d words\n",  aggSize);
+  if( aggSize < 2 || 4 * ((uint64_t) nw + aggSize) > nByte ){ decodeOverrun = true; return -1; } // a damaged size: (aggSize - 2) would wrap and loop over garbage for seconds
 
   unsigned int nEvents = 0;
   nw = nw + 1; word = ReadBuffer(nw, verbose);

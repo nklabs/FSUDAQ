@@ -25,4 +25,7 @@ if [[ -e "${locks[0]}" ]]; then
 fi
 
 echo "FSUDAQ under gdb, log in log/gdb_${timestamp}.log"
-gdb -q -batch -ex run -ex "thread apply all bt" --args ./FSUDAQ_Qt6 2>&1 | tee "log/gdb_${timestamp}.log"
+# signals go to FSUDAQ (it stops a run properly on Ctrl-C, kill, a closed terminal); gdb stops
+# only on a crash. tee -i: it must outlive Ctrl-C to log the stop.
+gdb -q -batch -ex "handle SIGINT SIGTERM SIGHUP SIGPIPE nostop noprint pass" -ex "set print thread-events off" \
+    -ex run -ex "thread apply all bt" --args ./FSUDAQ_Qt6 2>&1 | tee -i "log/gdb_${timestamp}.log"

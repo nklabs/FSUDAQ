@@ -12,6 +12,7 @@
 #include <QGridLayout>
 #include <QElapsedTimer>
 #include <QNetworkAccessManager>
+#include <QMessageBox>
 
 #include "ClassDigitizer.h"
 #include "CustomThreads.h"
@@ -33,7 +34,14 @@ public:
   ~FSUDAQ();
 
   void closeEvent(QCloseEvent * event){
-    // a run (or the scope's acquisition) going: stop it properly first, files closed and recorded
+    // a run (or a series) going: ask, then stop it properly first, files closed and recorded
+    if( (inDataRun || series.active) && !closingBySignal ){
+      if( QMessageBox::question(this, "Close FSUDAQ", "A run is going. Stop it and close FSUDAQ?",
+                                QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes ){
+        event->ignore();
+        return;
+      }
+    }
     StopEverything("FSUDAQ was closed");
     if( scope ) {
       delete scope;
@@ -157,6 +165,10 @@ private:
   } series;
   void UpdateRunControls();     // enable the run widgets for the present state (open, running, pausing, scope)
   bool lastStopHadProblems;     // the run just stopped had failures (a series then ends)
+  bool closingBySignal = false; // ShutdownOnSignal: close without asking
+  std::vector<bool> boardStuck; // a board whose readout is stuck in the CAEN library: nothing more until FSUDAQ restarts
+  QString replacedDir;          // "Overwrite": the old files of the run number, set aside until the run has started
+  QStringList StuckBoards() const;
   void RunTimeUp();
   void PauseOver();
   void StopPressed();

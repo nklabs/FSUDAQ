@@ -10,6 +10,7 @@
 #include <QApplication>
 #include <QScreen>
 #include <QMessageBox>
+#include <QSignalBlocker>
 
 #define ComBoxMixed "Mixed"
                                                                                   // bit = 0, bit = 1
@@ -266,7 +267,12 @@ DigiSettingsPanel::DigiSettingsPanel(Digitizer ** digi, unsigned int nDigi, QStr
         digi[ID]->SetSettingFileUpdate(state);
         if( state && digi[ID]->IsSettingFileExist() ) {
           std::string filePath = digi[ID]->GetSettingFileName();
-          digi[ID]->SaveAllSettingsAsBin(filePath);
+          if( !digi[ID]->SaveAllSettingsAsBin(filePath) ){
+            digi[ID]->SetSettingFileUpdate(false);
+            SendLogMsg("<font style=\"color: red;\">Cannot write " + QString::fromStdString(filePath) + ": Live Setting Update stays off.</font>");
+            QSignalBlocker block(chkCoupledSettingFile);
+            chkCoupledSettingFile->setChecked(false);
+          }
         }
       });
 
@@ -1285,7 +1291,7 @@ void DigiSettingsPanel::SetUpInquiryCopyTab(){
         }
       }
 
-      if( fromCh == -1 ) return;
+      if( fromCh == -1 || fromCh >= digi[fromIndex]->GetNumRegChannels() ) return;   // a channel the source board has
 
       printf("Copy Digi-%d, ch %d \n", digi[fromIndex]->GetSerialNumber(), fromCh);
 
@@ -3244,6 +3250,14 @@ void DigiSettingsPanel::UpdatePanelFromMemory(){
 
   enableSignalSlot = false; 
 
+  // Live Setting Update may have stopped because the file could not be written
+  if( !digi[ID]->SettingFileProblem().empty() ){
+    QSignalBlocker block(chkCoupledSettingFile);
+    chkCoupledSettingFile->setChecked(digi[ID]->IsSettingFileUpdate());
+    leSaveFilePath[ID]->setText(QString::fromStdString(digi[ID]->SettingFileProblem()));
+    leSaveFilePath[ID]->setStyleSheet("color:red;");
+  }
+
   UpdateBoardAndChannelsStatus();
 
   //*========================================
@@ -3648,6 +3662,14 @@ void DigiSettingsPanel::EnableButtons(bool enable){
 
     }
     buttonsWidget[i]->setEnabled(enable);
+  }
+  // every control of every board page (and Inquiry / Copy): a run or a series keeps its settings.
+  // Controls that are disabled on purpose (e.g. channels a DT5730 does not have) stay disabled.
+  for( int t = 0; t < tabWidget->count(); t++ ){
+    QWidget * page = tabWidget->widget(t);
+    QScrollArea * sa = qobject_cast<QScrollArea *>(page);
+    QWidget * content = (sa && sa->widget()) ? sa->widget() : page;
+    content->setEnabled(enable);
   }
 }
 
@@ -4170,7 +4192,11 @@ void DigiSettingsPanel::SaveSetting(int opt){
     QString ext = fileInfo.suffix();
     if( opt == 0 ){
       if( ext.isEmpty() ) filePath += ".bin";
-      digi[ID]->SaveAllSettingsAsBin(filePath.toStdString());
+      if( !digi[ID]->SaveAllSettingsAsBin(filePath.toStdString()) ){
+        SendLogMsg("<font style=\"color: red;\">Cannot write <b>" + filePath + "</b>; nothing saved.</font>");
+        QMessageBox::warning(this, "Settings not saved", "Cannot write\n" + filePath);
+        return;
+      }
       leSaveFilePath[ID]->setText(filePath);
     }
     if( opt == 1 ){
@@ -4198,6 +4224,14 @@ void DigiSettingsPanel::LoadSetting(){
   if( fileDialog.selectedFiles().size() == 0 ) return; // when no file selected.
 
   QString fileName = fileDialog.selectedFiles().at(0);
+
+  // a file saved from another board: say so (copying one board's settings to another is allowed)
+  int fileSN = Digitizer::SerialInSettingsFile(fileName.toStdString());
+  if( fileSN > 0 && fileSN != digi[ID]->GetSerialNumber() ){
+    if( QMessageBox::question(this, "Settings of another board", fileName + "\nwas saved from Digi-" + QString::number(fileSN) +
+          ". Load it into Digi-" + QString::number(digi[ID]->GetSerialNumber()) + "?\n\n(With Live Setting Update on, this board's changes would then be written to that file.)",
+          QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes ) return;
+  }
 
   // the same load, program and read-back as opening "w/ settings"; memory and panel then show the board
   std::vector<std::string> problems;

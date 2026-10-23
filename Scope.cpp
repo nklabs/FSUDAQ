@@ -201,6 +201,9 @@ Scope::Scope(Digitizer ** digi, unsigned int nDigi, ReadDataThread ** readDataTh
   QPushButton * bnClearMemory = new QPushButton("Clear Memory", this);
   layout->addWidget(bnClearMemory, rowID, 3);
   connect(bnClearMemory, &QPushButton::clicked, this, [=](){
+    // not while the scope runs: its readout thread copies from this memory (the board mutexes are per
+    // file, so the lock below does not keep it out)
+    if( isACQStarted ){ SendLogMsg("Stop the scope before clearing the memory."); return; }
     digiMTX[ID].lock();
     digi[ID]->GetData()->ClearData();
     digiMTX[ID].unlock();

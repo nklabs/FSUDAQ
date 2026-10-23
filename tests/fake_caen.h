@@ -50,9 +50,12 @@ int  fake_caen_set_synthetic(int serial, int eventsPerCouple, double aggPerMs);
 void fake_caen_set_read_delay(int serial, int microseconds);
 // Every byte ReadData handed out since the board was added, to compare with the saved files.
 size_t fake_caen_handed_out(int serial, const uint32_t ** words);
-// Make the next calls fail: what = "malloc" (MallocReadoutBuffer), "write" (WriteRegister) or
-// "read" (ReadData), 0 or "" to clear.
+// Make the next calls fail: what = "malloc" (MallocReadoutBuffer), "write" (WriteRegister),
+// "read" (ReadData), "hang" (ReadData blocks until cleared, like a call stuck in the driver),
+// "reopen" (the board opens once, then no more), 0 or "" to clear.
 void fake_caen_fail(int serial, const char * what);
+// A write to this address returns success but is lost (a write dropped on the link); 0 = none.
+void fake_caen_drop_write(int serial, uint32_t address);
 
 #ifdef __cplusplus
 }

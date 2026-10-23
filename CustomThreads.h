@@ -35,11 +35,12 @@ public:
   }
   /// start the readout. Use this, not start(): the stop request is cleared here, before the thread
   /// runs; cleared in run(), a Stop() right after the start was lost and the thread never ended
-  void Start() { stop = false; drain = false; failed = false; boardStopped = false; failReason.clear(); start(); }
+  void Start() { stop = false; drain = false; failed = false; boardStopped = false; drainCut = false; failReason.clear(); start(); }
   void Stop() { drain = false; this->stop = true;}          /// leave at once (also ends a drain); what the board still holds is not read
   void StopAfterDrain() { drain = true; this->stop = true; }  /// stop the board (from this thread), read and save what it still holds, then leave
   bool Failed() const { return failed; }                     /// the last run of this thread ended on a read error, not on Stop
   bool BoardStopped() const { return boardStopped; }         /// in a drain: this thread has stopped its board
+  bool DrainCut() const { return drainCut; }                 /// the last drain ended before the board was empty: data left on it
   QString FailReason() const { return failReason; }
   void SetSaveData(bool onOff)  {this->isSaveData = onOff;}
   void SetScopeMode(bool onOff) {this->isScope = onOff;}
@@ -93,7 +94,7 @@ public:
 
     printf("ReadDataThread for digi-%d running.\n", digi->GetSerialNumber());
     int emptyReads = 0;                                   // reads in a row that found nothing, once the board is stopped
-    std::chrono::steady_clock::time_point drainStart{};
+    std::chrono::steady_clock::time_point drainStart{}, lastData{};
     do{
       
       // drain is set before stop: whoever sees stop also sees drain (both atomic)
@@ -105,7 +106,7 @@ public:
         digi->SWStopACQ();
         digiMTX[ID].unlock();
         boardStopped = true;
-        drainStart = std::chrono::steady_clock::now();
+        drainStart = lastData = std::chrono::steady_clock::now();
       }
 
       digiMTX[ID].lock();
@@ -119,6 +120,7 @@ public:
       if( ret == CAEN_DGTZ_Success ){
         if( nByte > 0 ){
           emptyReads = 0;
+          lastData = std::chrono::steady_clock::now();
           digiMTX[ID].lock();
           digi->GetData()->DecodeBuffer(!isScope, 0);
           if( isSaveData ) digi->GetData()->SaveData();
@@ -130,9 +132,13 @@ public:
           if( ++emptyReads >= 3 ) break;
           usleep(50000);
         }
-        if( boardStopped && std::chrono::steady_clock::now() - drainStart > std::chrono::seconds(5) ){
-          printf("\033[31mDigi-%d: still reading data 5 s after the stop; the rest is left on the board.\033[0m\n", digi->GetSerialNumber());
-          emit sendMsg("<font style=\"color: red;\">Digi-" + QString::number(digi->GetSerialNumber()) + ": still reading data 5 s after the stop; the rest is left on the board.</font>");
+        // a board read steadily is never cut off; one that stops giving data without ever reading empty,
+        // or a drain beyond 2 min, is: the rest stays on the board and the stop says so
+        const auto t = std::chrono::steady_clock::now();
+        if( boardStopped && (t - lastData > std::chrono::seconds(5) || t - drainStart > std::chrono::seconds(120)) ){
+          failReason = "data were left on the board at the stop (the readout after the stop did not end)";
+          drainCut = true;
+          printf("\033[31mDigi-%d: %s.\033[0m\n", digi->GetSerialNumber(), failReason.toStdString().c_str());
           break;
         }
 
@@ -208,6 +214,7 @@ private:
   std::atomic<bool> drain;
   std::atomic<bool> failed;
   std::atomic<bool> boardStopped;   // this thread stopped its board for the drain
+  std::atomic<bool> drainCut;       // the drain ended with data left on the board
   QString failReason;      // written before failed is set
   int ID;
   timespec ta, tb, t1, t2, t0;
@@ -229,9 +236,9 @@ public:
   void SetWaitTimeinSec(float sec) {waitTime = sec * 10 ;}
   float GetWaitTimeinSec() const {return waitTime/10.;}
   void DoOnce() {emit timeUp();};
+  void Start(){ stop = false; start(); } /// clears the stop request before the thread runs (run() must not: a Stop() right after start() would be lost)
   void run(){
     unsigned int count  = 0;
-    stop = false;
     do{
       usleep(100000);
       count ++;
@@ -243,7 +250,7 @@ public:
 signals:
   void timeUp();
 private:
-  bool stop;
+  std::atomic<bool> stop;
   unsigned int waitTime;
 };
 

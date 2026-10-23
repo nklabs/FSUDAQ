@@ -138,6 +138,7 @@ int Digitizer::OpenDigitizer(int boardID, int portID, bool program, bool verbose
       return -1;
     }else{
       isConnected = true;
+      CAEN_DGTZ_SWStopAcquisition(handle);  // a board left running (a crash) must not take data while it is programmed
       NumRegChannel = BoardInfo.Channels;
       NumInputCh = NumRegChannel;
       isInputChEqRegCh = true;
@@ -1009,9 +1010,10 @@ std::vector<std::pair<Reg, int>> Digitizer::ProgrammedRegisters(){
       DPP::DisableExternalTrigger,
       DPP::BufferOccupancyGain,
       DPP::ExtendedVetoDelay,
-      DPP::ReadoutControl,
       DPP::RegChannelEnableMask,
     };
+    // not ReadoutControl (0xEF00): the CAEN library sets it at open (bus-error enable for the block
+    // transfers) and must keep it
     for( const Reg & r : boardRegs ){
       if( ModelType == ModelTypeCode::DT && r.GetAddress() == DPP::ExtendedVetoDelay.GetAddress() ) continue; // not on desktop boards
       list.push_back({r, -1});
@@ -1060,7 +1062,9 @@ int Digitizer::ProgramSettingsToBoard(){
   int nFailed = 0;
 
   for( auto & [reg, ch] : ProgrammedRegisters() ){
-    WriteRegister(reg, GetSettingFromMemory(reg, ch < 0 ? 0 : ch), ch, false);
+    uint32_t value = GetSettingFromMemory(reg, ch < 0 ? 0 : ch);
+    if( reg == DPP::AcquisitionControl ) value &= ~0x4u;   // the run bit: never start a board by writing its settings
+    WriteRegister(reg, value, ch, false);
     if( ret != 0 ) nFailed++;
     if( ch >= 0 && programPauseMs > 0 ) usleep(programPauseMs * 1000);
   }
@@ -1071,7 +1075,6 @@ int Digitizer::ProgramSettingsToBoard(){
 }
 
 int Digitizer::LoadAndProgramSettings(std::string fileName, std::vector<std::string> & problems){
-  programmedFromFile = false;
   problems.clear();
   if( !isConnected || isDummy || softwareDisable || AcqRun ){
     problems.push_back(fileName + " not loaded: the board is " + (AcqRun ? "taking data." : "not open or disabled."));
@@ -1085,24 +1088,29 @@ int Digitizer::LoadAndProgramSettings(std::string fileName, std::vector<std::str
   }
   std::vector<unsigned int> fromFile(setting, setting + SETTINGSIZE);
 
+  programmedFromFile = false;            // from here the board is being written
   int nFailed = ProgramSettingsToBoard();
   if( nFailed > 0 ) problems.push_back(std::to_string(nFailed) + " register write(s) failed");
   int nReadFailed = ReadAllSettingsFromBoard(true);
   if( nReadFailed > 0 ) problems.push_back(std::to_string(nReadFailed) + " register read(s) failed");
-  programmedFromFile = (nFailed == 0 && nReadFailed == 0);
 
   /// every register written must now read back as the file has it
   for( auto & [reg, ch] : ProgrammedRegisters() ){
     if( reg.GetRWType() != RW::ReadWrite ) continue; // write-only (QDC record length): nothing to read back
+    if( reg == DPP::LVDSIOData ) continue;            // reads the LVDS pins when they are inputs
     int c = ch < 0 ? 0 : ch;
     unsigned short index = reg.Index(c);
-    if( setting[index] == fromFile[index] ) continue;
+    uint32_t want = fromFile[index];
+    if( reg == DPP::AcquisitionControl ) want &= ~0x4u;  // written without the run bit
+    if( setting[index] == want ) continue;
     char msg[160];
     snprintf(msg, sizeof msg, "0x%04X %s%s: file 0x%08X, board 0x%08X", reg.ActualAddress(ch), reg.GetNameChar(),
              ch < 0 ? "" : (" ch" + std::to_string(ch)).c_str(), fromFile[index], setting[index]);
     problems.push_back(msg);
   }
 
+  // the board holds the file only if every write and read went through and every register reads back
+  programmedFromFile = problems.empty();
   return (int) problems.size();
 }
 
@@ -1183,10 +1191,12 @@ int Digitizer::LoadSettingBinaryToMemory(std::string fileName, std::string * why
   isSettingFileExist = true;
   settingFileName = fileName;
 
-  uint32_t boardInfo = GetSettingFromMemory(DPP::BoardInfo_R);
-  if( (boardInfo & 0xFF) == 0x0E ) {tick2ns = 4.0;  if(!isConnected) NumRegChannel = 16;}// 725
-  if( (boardInfo & 0xFF) == 0x0B ) {tick2ns = 2.0;  if(!isConnected) NumRegChannel = 16;}// 730
-  if( (boardInfo & 0xFF) == 0x04 ) {tick2ns = 16.0; if(!isConnected) NumRegChannel =  8;}// 740
+  if( !isConnected ){   // a connected board knows its own clock and channels
+    uint32_t boardInfo = GetSettingFromMemory(DPP::BoardInfo_R);
+    if( (boardInfo & 0xFF) == 0x0E ) {tick2ns = 4.0;  NumRegChannel = 16;}// 725
+    if( (boardInfo & 0xFF) == 0x0B ) {tick2ns = 2.0;  NumRegChannel = 16;}// 730
+    if( (boardInfo & 0xFF) == 0x04 ) {tick2ns = 16.0; NumRegChannel =  8;}// 740
+  }
 
   return 0;
 }
@@ -1198,10 +1208,11 @@ unsigned int Digitizer::ReadSettingFromFile(Reg registerAddress, unsigned short 
   unsigned short index = registerAddress.Index(ch);
   
   settingFile = fopen (settingFileName.c_str(),"r");
+  if( settingFile == NULL ){ printf("cannot read %s\n", settingFileName.c_str()); return 0xFFFFFFFF; }
   ///fseek( settingFile, address, SEEK_SET); 
   fseek( settingFile, index * 4, SEEK_SET); 
   ///printf(" at pos %lu Byte = index(%lu)\n", ftell(settingFile), ftell(settingFile)/4);
-  unsigned int lala[1];
+  unsigned int lala[1] = {0xFFFFFFFF};
   size_t dummy = fread( lala, sizeof(unsigned int), 1, settingFile);
   ///printf(" data at pos %lu(%lu) : %X = %d\n", ftell(settingFile) - sizeof(unsigned int), (ftell(settingFile) - sizeof(unsigned int))/4, lala[0], lala[0]);
   fclose (settingFile);
@@ -1223,6 +1234,13 @@ void Digitizer::SaveSettingToFile(Reg registerAddress, unsigned int value, unsig
   setting[index] = value;
   
   settingFile = fopen (settingFileName.c_str(),"r+");
+  if( settingFile == NULL ){
+    // a file that cannot be written (read-only, moved): Live Setting Update ends, and says so
+    printf("\033[31mDigi-%d: cannot write %s (%s): Live Setting Update is off.\033[0m\n", GetSerialNumber(), settingFileName.c_str(), strerror(errno));
+    settingFileProblem = "cannot write " + settingFileName + " (" + strerror(errno) + "): Live Setting Update is off";
+    isSettingFileUpdate = false;
+    return;
+  }
   ///fseek( settingFile, address, SEEK_SET); 
   fseek( settingFile, index * 4, SEEK_SET); 
   unsigned int jaja[1] = {value};
@@ -1231,33 +1249,42 @@ void Digitizer::SaveSettingToFile(Reg registerAddress, unsigned int value, unsig
   fclose (settingFile);
 }
 
-void Digitizer::SaveAllSettingsAsBin(std::string fileName){
+bool Digitizer::SaveAllSettingsAsBin(std::string fileName){
   DebugPrint("%s", "Digitizer");
-  SaveAllSettingsAsTextForRun(fileName);
-  
-  if( !isSettingFilledinMemeory ) return;
-  
-  settingFileName = fileName;
+  if( !SaveAllSettingsAsTextForRun(fileName) ) return false;
+  settingFileName = fileName;   // only a file that was written becomes the board's settings file
   isSettingFileExist = true;
-
+  settingFileProblem.clear();
+  return true;
 }
 
-void Digitizer::SaveAllSettingsAsTextForRun (std::string fileName){
+bool Digitizer::SaveAllSettingsAsTextForRun (std::string fileName){
   DebugPrint("%s", "Digitizer");
-  if( !isSettingFilledinMemeory ) return;
+  if( !isSettingFilledinMemeory ) return false;
   
   FILE * binFile = fopen(fileName.c_str(), "w+");
   if( binFile == NULL ) {
     printf("Cannot open %s.\n", fileName.c_str());
-    return;
+    return false;
   }
   
-  fwrite(setting, SETTINGSIZE * sizeof(unsigned int), 1, binFile);
-  fseek(binFile, 0L, SEEK_END);
-  unsigned int inFileSize = ftell(binFile);
-  printf("Created file : %s. file size : %d Byte\n", fileName.c_str(), inFileSize);
-  fclose (binFile);
+  bool ok = fwrite(setting, SETTINGSIZE * sizeof(unsigned int), 1, binFile) == 1;
+  ok = (fclose(binFile) == 0) && ok;
+  printf("%s file : %s\n", ok ? "Created" : "FAILED to write", fileName.c_str());
+  return ok;
 
+}
+
+int Digitizer::SerialInSettingsFile(std::string fileName){
+  FILE * f = fopen(fileName.c_str(), "rb");
+  if( f == NULL ) return -1;
+  std::vector<unsigned int> w(SETTINGSIZE, 0);
+  size_t n = fread(w.data(), sizeof(unsigned int), SETTINGSIZE, f);
+  fclose(f);
+  if( n != SETTINGSIZE ) return -1;
+  Reg b1 = DPP::ROM_BoardSerialNumByte1_R, b0 = DPP::ROM_BoardSerialNumByte0_R;
+  int sn = ((w[b1.Index(0)] & 0xFF) << 8) | (w[b0.Index(0)] & 0xFF);
+  return sn > 0 ? sn : -1;
 }
 
 void Digitizer::SaveAllSettingsAsText(std::string fileName){

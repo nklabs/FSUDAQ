@@ -62,7 +62,8 @@ class Digitizer{
     bool         isSettingFileUpdate;
     bool         isSettingFilledinMemeory; /// false for disabled ReadAllSettingFromBoard()
     bool         hasOverThresholdWidth;  /// for QDC
-    bool         programmedFromFile;       /// a settings file was loaded and written to the board without failed writes or reads
+    bool         programmedFromFile;       /// a settings file was written to the board and every register reads back as in the file
+    std::string  settingFileProblem;       /// why Live Setting Update stopped writing the file
     unsigned int setting[SETTINGSIZE];     /// Setting, 4bytes x 2048 = 8192 bytes
 
     /// the registers ProgramSettingsToBoard() writes, in the order it writes them, as (register, channel)
@@ -185,8 +186,10 @@ class Digitizer{
 
     /// memory <--> file
     void         SaveAllSettingsAsText       (std::string fileName);
-    void         SaveAllSettingsAsTextForRun (std::string fileName);
-    void         SaveAllSettingsAsBin        (std::string fileName); 
+    bool         SaveAllSettingsAsTextForRun (std::string fileName); /// false if the file could not be written
+    bool         SaveAllSettingsAsBin        (std::string fileName); /// false if the file could not be written (then not adopted)
+    static int   SerialInSettingsFile        (std::string fileName); /// the board serial a settings file was saved from (-1 unknown)
+    std::string  SettingFileProblem()        const {return settingFileProblem;}
     std::string  GetSettingFileName()        {return settingFileName;}
     /// tell the digitizer where to look at the setting file.
     /// if not exist, call SaveAllSettinsAsBin();

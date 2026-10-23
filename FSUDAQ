@@ -3,6 +3,7 @@
 # assertion messages go to stderr and used to be lost) and with core dumps enabled,
 # so a crash leaves a core file in this directory for  gdb ./FSUDAQ_Qt6 core*
 
+cd "$(dirname "$(readlink -f "$0")")" || exit 1   # the dashboard and settings are found from here
 timestamp=$(date +%Y%m%d_%H%M%S)
 
 outFile=log/program_${timestamp}.log
@@ -31,4 +32,6 @@ fi
 
 echo "FSUDAQ, save stdout+stderr to $outFile"
 
-stdbuf -oL -eL ./FSUDAQ_Qt6 2>&1 | tee "$outFile"
+# tee -i: Ctrl-C (or a closed terminal) goes to the whole group; FSUDAQ then stops the run
+# properly, and tee must stay to log it
+stdbuf -oL -eL ./FSUDAQ_Qt6 2>&1 | tee -i "$outFile"

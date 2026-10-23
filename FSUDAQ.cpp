@@ -21,6 +21,7 @@
 #include <QNetworkReply>
 #include <QElapsedTimer>
 #include <QStorageInfo>
+#include <memory>
 
 // Run Monitor cell colours
 static const char * InputCellStyle = "background-color: #F0F0F0;";
@@ -257,14 +258,14 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     leRunID->setReadOnly(true);
     leRunID->setAlignment(Qt::AlignHCenter);
     leRunID->setValidator(new QIntValidator(0, 999999, this));
-    leRunID->setToolTip("Next run number. Editable when auto-increment is off.");
+    leRunID->setToolTip("With auto-increment: the last run number (the next run takes the one after). Without: the number the next run takes; editable.");
 
     chkSaveData = new QCheckBox("Save Data", this);
     connect(chkSaveData, &QCheckBox::toggled, this, &FSUDAQ::UpdateDataPathEnabled);
 
     chkAutoIncrement = new QCheckBox("Auto-increment run no.", this);
     chkAutoIncrement->setChecked(true);
-    chkAutoIncrement->setToolTip("Checked: each saved run takes the next number. Unchecked: the run number field is editable and a run refuses to start if files for that number already exist.");
+    chkAutoIncrement->setToolTip("Checked: each saved run takes the next number. Unchecked: the run number field is editable; if files for that number exist, Start asks whether to go back or overwrite them. Repeated runs need it checked.");
     connect(chkAutoIncrement, &QCheckBox::toggled, this, [=](bool checked){
       leRunID->setReadOnly(checked);
       if( checked ) leRunID->setText(QString::number(runID));
@@ -290,7 +291,7 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     QLabel * lbRunLength = new QLabel("Run length : ", this);
     lbRunLength->setAlignment(Qt::AlignRight | Qt::AlignCenter);
     sbRunTimeMin = new RSpinBox(this, 1);
-    sbRunTimeMin->setRange(0, 100000);
+    sbRunTimeMin->setRange(0, 30000);   // QTimer takes an int of ms: at most 35791 min
     sbRunTimeMin->setSingleStep(1);
     sbRunTimeMin->setValue(0);
     sbRunTimeMin->setSuffix(" min");
@@ -839,15 +840,32 @@ void FSUDAQ::OpenDigitizers(){
     if( cbOpenMethod->currentData().toInt() == 1 ) LogMsg(QString("Done searching. Found %1 digitizer(s). Opening digitizer(s) and loading settings files....").arg(nDigi));
   }
   
+  // open every board found; one that answered the search but does not open now is left out, and said
+  std::vector<Digitizer *> opened;
+  for( auto & f : portList ){
+    Digitizer * d = new Digitizer(f.board, f.port, false, false, f.link);
+    if( !d->IsConnected() ){
+      LogMsg(QString("<font style=\"color: red;\">The board at port %1, board %2 answered the search but cannot be opened now: it is left out.</font>").arg(f.port).arg(f.board));
+      delete d;
+      continue;
+    }
+    opened.push_back(d);
+  }
+  nDigi = opened.size();
+  if( nDigi == 0 ){
+    LogMsg("<font style=\"color: red;\">No digitizer could be opened.</font>");
+    return;
+  }
+
   digi = new Digitizer * [nDigi];
+  for( unsigned int i = 0; i < nDigi; i++ ) digi[i] = opened[i];
   readDataThread = new ReadDataThread * [nDigi];
 
   openedWithSettings = (cbOpenMethod->currentData().toInt() == 1);
+  boardStuck.assign(nDigi, false);
   QStringList settingsProblems; // shown together once every board is open
 
   for( unsigned int i = 0; i < nDigi; i++){
-    digi[i] = new Digitizer(portList[i].board, portList[i].port, false, false, portList[i].link);
-    //digi[i]->Reset();
     QString digiName = "Digi-" + QString::number(digi[i]->GetSerialNumber());
 
     ///============== load settings 
@@ -887,14 +905,16 @@ void FSUDAQ::OpenDigitizers(){
   }
 
   LogMsg("====== <font style=\"color: blue;\"><b>" + QString("Done. Opened %1 digitizer(s).").arg(nDigi) + "</b></font> =====");
-  if( !openedWithSettings ) LogMsg("<font style=\"color: orange;\">Opened without settings files: the boards keep the registers they had.</font>");
+  if( !openedWithSettings ) LogMsg("<font style=\"color: orange;\">Opened without settings files: the boards keep their registers (apart from what the CAEN library sets when it opens them).</font>");
   if( !settingsProblems.isEmpty() ){
     QStringList notProgrammed = BoardsNotProgrammed();
     QMessageBox box(this);
     box.setIcon(QMessageBox::Warning);
     box.setWindowTitle("Settings files");
-    box.setText(notProgrammed.isEmpty() ? "Every board was programmed from its settings file, but some registers do not read back as the file has them."
-                                        : "Not every board was programmed from its settings file. Runs cannot start until it is: fix the file(s) and load them with Digitizer Settings > Load Settings, or close and reopen the digitizers.");
+    box.setText(notProgrammed.isEmpty() ? "Every board holds its settings file, with remarks (details)."
+                                        : notProgrammed.join(", ") + (notProgrammed.size() == 1 ? " does" : " do") + " not hold its settings file (details). Runs cannot start until "
+                                          "every board does: fix the file(s) and load them with Digitizer Settings > Load Settings, or close and reopen the digitizers. "
+                                          "(To run anyway, reopen \"w/o settings\": the boards keep what they now hold.)");
     box.setDetailedText(settingsProblems.join("\n"));
     box.exec();
   }
@@ -944,10 +964,16 @@ void FSUDAQ::CloseDigitizers(){
 
   if( digi == nullptr ) return;
 
+  // a readout stuck in the CAEN library is left as it is (with its board): waiting would hang FSUDAQ
+  std::vector<bool> leave(nDigi, false);
   for(unsigned int i = 0; i < nDigi; i ++){
     readDataThread[i]->Stop();
     readDataThread[i]->quit();
-    readDataThread[i]->wait();
+    if( !readDataThread[i]->wait(5000) ){
+      leave[i] = true;
+      LogMsg("<font style=\"color: red;\">Digi-" + QString::number(digi[i]->GetSerialNumber()) + ": its readout does not end; left as it is. Restart FSUDAQ.</font>");
+      continue;
+    }
     delete readDataThread[i];
     printf(" readDataThread[%d] is deleted.\n", i);
   }
@@ -956,6 +982,7 @@ void FSUDAQ::CloseDigitizers(){
   readDataThread = nullptr;
 
   for(unsigned int i = 0; i < nDigi; i ++){
+    if( leave[i] ) continue;
     digi[i]->StopACQ();
     digi[i]->CloseDigitizer();
     delete digi[i];
@@ -1552,6 +1579,16 @@ void FSUDAQ::StartACQ(){
 
   // opened "w/ settings": a board that does not hold its settings file would take data with
   // whatever it had before, so no run starts until every board was programmed from its file
+  QStringList stuckBoards = StuckBoards();
+  if( !stuckBoards.isEmpty() ){
+    LogMsg("<font style=\"color: red;\">Run not started: the readout of " + stuckBoards.join(", ") + " is stuck in the CAEN library. Restart FSUDAQ.</font>");
+    QMessageBox::warning(this, "Run not started", "The readout of " + stuckBoards.join(", ") + " is stuck in the CAEN library.\n\nRestart FSUDAQ (and power-cycle the board if it still does not answer).");
+    return;
+  }
+  for( unsigned int i = 0; i < nDigi; i++ ){
+    if( digi[i]->IsBoardDisabled() ) LogMsg("<font style=\"color: orange;\">Digi-" + QString::number(digi[i]->GetSerialNumber()) + " is disabled (Digitizer Settings): it is not in this run.</font>");
+  }
+
   QStringList notProgrammed = BoardsNotProgrammed();
   if( !notProgrammed.isEmpty() ){
     LogMsg("<font style=\"color: red;\">Run not started: " + notProgrammed.join(", ") + " not programmed from a settings file.</font>");
@@ -1606,7 +1643,7 @@ void FSUDAQ::StartACQ(){
       box.setIcon(QMessageBox::Warning);
       box.setWindowTitle("Run number already used");
       box.setText("Run-" + runIDStr + " with prefix \"" + prefix + "\" already has " + QString::number(existing.size()) + " file(s) in\n" + runDir + "\n\ne.g. " + existing.first());
-      box.setInformativeText("Go back to choose another run number, or delete those files and record this run under the same number.");
+      box.setInformativeText("Go back to choose another run number, or replace those files: this run is recorded under the same number, and the old files are deleted once it has started (kept if it does not start).");
       QPushButton * back = box.addButton("Go back", QMessageBox::RejectRole);
       QPushButton * over = box.addButton("Overwrite files and continue", QMessageBox::DestructiveRole);
       box.setDefaultButton(back);
@@ -1616,13 +1653,26 @@ void FSUDAQ::StartACQ(){
         GiveBackRunNumber();
         return;
       }
-      // remove everything of that run, including files with indices a new run would not reach
-      int removed = 0;
-      for( const QString & f : existing ){
-        if( QFile::remove(runDir + "/" + f) ) removed ++;
-        else LogMsg("<font style=\"color: red;\">Cannot remove " + runDir + "/" + f + "</font>");
+      // set the old run aside (all of it, also indices this run may not reach); it is deleted once
+      // this run has started, and put back if it does not start
+      replacedDir = runDir + "/replaced_" + QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss");
+      if( !QDir().mkpath(replacedDir) ){
+        LogMsg("<font style=\"color: red;\">Start Run-" + runIDStr + " refused: cannot create " + replacedDir + ".</font>");
+        replacedDir.clear();
+        GiveBackRunNumber();
+        return;
       }
-      LogMsg("<font style=\"color: orange;\">Run-" + runIDStr + ": " + QString::number(removed) + " existing file(s) removed on request; the run is recorded under the same number.</font>");
+      for( const QString & f : existing ){
+        if( !QFile::rename(runDir + "/" + f, replacedDir + "/" + f) ){
+          LogMsg("<font style=\"color: red;\">Start Run-" + runIDStr + " refused: cannot move " + runDir + "/" + f + " aside.</font>");
+          for( const QString & g : QDir(replacedDir).entryList(QDir::Files) ) QFile::rename(replacedDir + "/" + g, runDir + "/" + g);
+          QDir(replacedDir).removeRecursively();
+          replacedDir.clear();
+          GiveBackRunNumber();
+          return;
+        }
+      }
+      LogMsg("<font style=\"color: orange;\">Run-" + runIDStr + ": " + QString::number(existing.size()) + " existing file(s) set aside; they are deleted once this run has started.</font>");
     }
     // one folder per run for the data files and the settings snapshots; the run
     // record files (RunTimeStamp.dat/.csv, lastRun.sh) stay in the data path
@@ -1653,6 +1703,16 @@ void FSUDAQ::StartACQ(){
     }
   }
 
+  // the elog entry is written before any board starts: no process is spawned during acquisition
+  // (a fork during a run coincided with a kernel panic in the a3818 driver, 29 Sep 2026)
+  if( problems.isEmpty() && elogID > 0 && chkElog->isChecked() && save ){
+    QString msg = "================================= Run-" + QString::number(runID).rightJustified(3, '0') + "<p>" 
+                  + QDateTime::currentDateTime().toString("MM.dd hh:mm:ss") + "<p>"
+                  + startComment + "<p>"
+                  "---------------------------------<p>";
+    WriteElog(msg, "Run Log", "Run", runID);
+  }
+
   //---- 2. start the boards, the master (the 0-th board) last; all of them or none
   std::vector<unsigned int> started;
   if( problems.isEmpty() ){
@@ -1673,13 +1733,22 @@ void FSUDAQ::StartACQ(){
   if( !problems.isEmpty() ){
     for( unsigned int i : started ){
       readDataThread[i]->Stop();
-      readDataThread[i]->wait();
+      if( !readDataThread[i]->wait(10000) ){ boardStuck[i] = true; continue; }
       digiMTX[i].lock();
       digi[i]->StopACQ();
       digiMTX[i].unlock();
     }
-    for( unsigned int i = 0; i < nDigi; i++) digi[i]->GetData()->CloseSaveFile();
+    for( unsigned int i = 0; i < nDigi; i++) if( !boardStuck[i] ) digi[i]->GetData()->CloseSaveFile();
     for( const QString & f : createdFiles ) QFile::remove(f);
+    if( !replacedDir.isEmpty() ){         // the run that was to be replaced comes back
+      for( const QString & g : QDir(replacedDir).entryList(QDir::Files) ) QFile::rename(replacedDir + "/" + g, runDir + "/" + g);
+      QDir(replacedDir).removeRecursively();
+      replacedDir.clear();
+      LogMsg("The files of the earlier Run-" + runIDStr + " are back in place.");
+      if( elogID > 0 && chkElog->isChecked() && save ) AppendElog("Run-" + runIDStr + " was not started.<p>");
+    }else if( elogID > 0 && chkElog->isChecked() && save ){
+      AppendElog("Run-" + runIDStr + " was not started.<p>");
+    }
     if( save ) QDir().rmdir(runDir); // only if empty
     for( const QString & p : problems ) LogMsg("<font style=\"color: red;\">" + p + "</font>");
     LogMsg("<font style=\"color: red;\">The run was not started; no board is running.</font>");
@@ -1706,7 +1775,7 @@ void FSUDAQ::StartACQ(){
   isACQStarted = true;
 
   // if( scalar ) scalarTimer->start(ScalarUpdateinMiliSec); 
-  if( scalar ) scalarTimingThread->start();
+  if( scalar ) scalarTimingThread->Start();
 
   if( !scalar->isVisible() ) {
     scalar->show();
@@ -1729,13 +1798,11 @@ void FSUDAQ::StartACQ(){
       influx->ClearDataPointsBuffer();
     }
 
-    if( elogID > 0 && chkElog->isChecked() && save ){
-      QString msg = "================================= Run-" + QString::number(runID).rightJustified(3, '0') + "<p>" 
-                    + QDateTime::currentDateTime().toString("MM.dd hh:mm:ss") + "<p>"
-                    + startComment + "<p>"
-                    "---------------------------------<p>";
-      WriteElog(msg, "Run Log", "Run", runID);
-    }
+  }
+
+  if( !replacedDir.isEmpty() ){           // the run started: the old files of this number go
+    QDir(replacedDir).removeRecursively();
+    replacedDir.clear();
   }
 
   StartRunClock(save ? "Run " + QString::number(runID) : "Run (not saved)");
@@ -1773,13 +1840,15 @@ void FSUDAQ::StopACQ(){
   QString stopTime = QDateTime::currentDateTime().toString("yyyy.MM.dd hh:mm:ss");
 
   std::vector<bool> stuck(nDigi, false);  // a readout that does not end: its board and file are left alone
+  QStringList stopProblems;
   for( unsigned int i = 0; i < nDigi; i++){
     if( digi[i]->IsBoardDisabled() ) continue;
     if( !readDataThread[i]->wait(10000) ){
-      LogMsg("<font style=\"color: red;\">Digi-" + QString::number(digi[i]->GetSerialNumber()) + ": its readout did not end 10 s after the stop; stopped without reading the rest.</font>");
+      stopProblems << "Digi-" + QString::number(digi[i]->GetSerialNumber()) + ": its readout did not end 10 s after the stop; data were left on the board.";
       readDataThread[i]->Stop();
       if( !readDataThread[i]->wait(5000) ){
         stuck[i] = true;
+        boardStuck[i] = true;
         LogMsg("<font style=\"color: red;\"><b>Digi-" + QString::number(digi[i]->GetSerialNumber()) + " does not answer: its readout is stuck in the CAEN library. Its file is left open; restart FSUDAQ (and power-cycle the board if it still does not answer).</b></font>");
       }
     }
@@ -1795,6 +1864,13 @@ void FSUDAQ::StopACQ(){
     LogMsg("Digi-" + QString::number(digi[i]->GetSerialNumber()) + " ACQ is stopped." );
   }
   inDataRun = false;
+  StopRunClock();   // the acquisition time ends here, not after the comment dialog
+
+  // everything that went wrong in this run, before it is recorded
+  QStringList failures = RunFailures() + stopProblems;
+  for( unsigned int i = 0; i < nDigi; i++ ) if( stuck[i] ) failures << "Digi-" + QString::number(digi[i]->GetSerialNumber()) + "'s readout is stuck in the CAEN library: restart FSUDAQ.";
+  lastStopHadProblems = !failures.isEmpty();
+  for( const QString & f : failures ) LogMsg("<font style=\"color: red;\">" + f + "</font>");
 
   if( scalarTimingThread->isRunning()){
     scalarTimingThread->Stop();
@@ -1824,6 +1900,9 @@ void FSUDAQ::StopACQ(){
 
   if( save ) {
     CommentDialog(false); // acquisition has already stopped; Cancel only means "no comment"
+    QStringList unsaid;   // the problems, in the record too (an abort comment already names its own)
+    for( const QString & f : failures ) if( !stopComment.contains(f) ) unsaid << f;
+    if( !unsaid.isEmpty() ) stopComment += " | Problems: " + unsaid.join(" ");
     LogMsg("===================== Stop Run-" + QString::number(runID));
     WriteRunTimestamp(false, stopTime);
   }else{
@@ -1854,20 +1933,22 @@ void FSUDAQ::StopACQ(){
 
   isACQStarted = false;
 
-  StopRunClock();
   UpdateRunControls();
 
-  // a file that failed to close, or anything the last refresh did not see (AbortRun says it itself)
-  QStringList failures = RunFailures();
-  for( bool s : stuck ) if( s ) failures << "a board's readout did not end (see the log)";
-  lastStopHadProblems = !failures.isEmpty();
+  // one dialog (AbortRun shows its own)
   if( !failures.isEmpty() && abortComment.isEmpty() ){
-    for( const QString & f : failures ) LogMsg("<font style=\"color: red;\">" + f + "</font>");
-    QMessageBox::warning(this, "Problems in the run", "The run had problems:\n\n" + failures.join("\n"));
+    QMessageBox::warning(this, "Problems in the run", "The run had problems:\n\n" + failures.join("\n") +
+                         (series.active ? "\n\nThe series of runs ends here." : ""));
   }
 
   repaint();
 
+}
+
+QStringList FSUDAQ::StuckBoards() const {
+  QStringList list;
+  for( unsigned int i = 0; i < nDigi && i < boardStuck.size(); i++ ) if( boardStuck[i] ) list << "Digi-" + QString::number(digi[i]->GetSerialNumber());
+  return list;
 }
 
 QStringList FSUDAQ::RunFailures() const {
@@ -1877,6 +1958,7 @@ QStringList FSUDAQ::RunFailures() const {
     if( digi[i]->IsBoardDisabled() ) continue;
     QString digiName = "Digi-" + QString::number(digi[i]->GetSerialNumber());
     if( readDataThread[i]->Failed() ) list << digiName + " stopped taking data: " + readDataThread[i]->FailReason() + ".";
+    if( readDataThread[i]->DrainCut() ) list << digiName + ": " + readDataThread[i]->FailReason() + ".";
     uint64_t notSaved = digi[i]->GetData()->SaveFailed.load();
     if( notSaved > 0 ) list << digiName + ": " + QString(digi[i]->GetData()->SaveError) + " (" + QString::number(notSaved) + " read(s) not saved).";
   }
@@ -1894,15 +1976,17 @@ void FSUDAQ::AbortRun(const QStringList & failures){
   StopACQ();
   abortComment.clear();
   needManualComment = true;
+  const bool wasSeries = series.active;
   EndSeries("a board failed");
-  QMessageBox::critical(this, "Run stopped", "The run was stopped because:\n\n" + failures.join("\n"));
+  QMessageBox::critical(this, "Run stopped", "The run was stopped because:\n\n" + failures.join("\n") +
+                        (wasSeries ? "\n\nThe series of runs ends here." : ""));
 }
 
 void FSUDAQ::UpdateRunControls(){
   const bool open = (digi != nullptr);
   const bool pausing = pauseTimer->isActive();
   const bool busy = inDataRun || pausing || series.active;   // a run, or a series between its runs
-  const bool idle = open && !busy && !scopeShown;
+  const bool idle = open && !busy && !scopeShown && StuckBoards().isEmpty();
 
   bnStartACQ->setEnabled(idle);
   bnStartACQ->setStyleSheet(idle ? "background-color: green;" : "");
@@ -1910,7 +1994,8 @@ void FSUDAQ::UpdateRunControls(){
   bnStopACQ->setStyleSheet(busy ? "background-color: red;" : "");
   bnStopACQ->setText(pausing ? "Stop Series" : "Stop ACQ");
   bnOpenDigitizers->setEnabled(!busy && !scopeShown); // "Close Digitizers" only while no run is going
-  bnOpenScope->setEnabled(open && !busy);
+  bnOpenScope->setEnabled(open && !busy && StuckBoards().isEmpty());
+  bnLock->setEnabled(!busy);              // "Lock and Set" runs the elog program and a database request
   bnSync->setEnabled(idle);
   chkSaveData->setEnabled(open && !busy && !rawDataPath.isEmpty());
   chkAutoIncrement->setEnabled(!busy);
@@ -2016,6 +2101,7 @@ void FSUDAQ::StopPressed(){
 }
 
 void FSUDAQ::ShutdownOnSignal(int sig){
+  closingBySignal = true;
   LogMsg("<font style=\"color: red;\">Signal " + QString::number(sig) + " (" + QString(strsignal(sig)) + "): stopping and closing FSUDAQ.</font>");
   StopEverything("signal " + QString(strsignal(sig)));
   QCoreApplication::quit(); // the main window's destructor closes the digitizers
@@ -2272,13 +2358,20 @@ bool FSUDAQ::CommentDialog(bool isStartRun){
       runID ++;
       incremented = true;
     }else{
-      runID = leRunID->text().toUInt(); // the operator chose the number
+      bool ok = false;
+      unsigned int typed = leRunID->text().toUInt(&ok); // the operator chose the number
+      if( !ok ){
+        QMessageBox::warning(this, "Run not started", "\"" + leRunID->text() + "\" is not a run number.");
+        return false;
+      }
+      runID = typed;
     }
   }
   QString runIDStr = QString::number(runID).rightJustified(3, '0');
 
   int result = QDialog::Rejected ;
   QLineEdit *lineEdit = new QLineEdit(this);
+  std::unique_ptr<QLineEdit> lineEditOwner(lineEdit);   // freed here unless the dialog took it
 
   // needManualComment is false for the automatic start/stop of timed runs;
   // the checkbox lets the operator skip the dialog for manual runs too.
@@ -2301,7 +2394,7 @@ bool FSUDAQ::CommentDialog(bool isStartRun){
     QPushButton *button2 = new QPushButton("Cancel", dOpen);
 
     vlayout->addWidget(label, 0, 0, 1, 2);
-    vlayout->addWidget(lineEdit, 1, 0, 1, 2);
+    vlayout->addWidget(lineEditOwner.release(), 1, 0, 1, 2);   // the dialog owns it now
     vlayout->addWidget(button1, 2, 0);
     vlayout->addWidget(button2, 2, 1);
 
@@ -2543,7 +2636,7 @@ void FSUDAQ::OpenScope(){
         if( scalar ){
           lbScalarACQStatus->setText("<font style=\"color: green;\"><b>ACQ On</b></font>");
           // scalarTimer->start(ScalarUpdateinMiliSec); 
-          scalarTimingThread->start();
+          scalarTimingThread->Start();
         }
         StartRunClock("Scope");
 
@@ -2596,6 +2689,8 @@ void FSUDAQ::OpenDigiSettings(){
     //connect(scope, &Scope::SendLogMsg, this, &FSUDAQ::LogMsg);
     connect(digiSettings, &DigiSettingsPanel::UpdateOtherPanels, this, [=](){ UpdateAllPanels(2); });
     connect(digiSettings, &DigiSettingsPanel::SendLogMsg, this, &FSUDAQ::LogMsg);
+    // opened during a run, a series pause or the scope's acquisition: locked like an open one
+    digiSettings->EnableButtons(!(inDataRun || series.active || pauseTimer->isActive() || isACQStarted));
 
     digiSettings->show();
   }else{

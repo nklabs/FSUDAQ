@@ -8,7 +8,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
 #include <climits>
+#include <memory>
 #include <unistd.h>
 #include <map>
 #include <string>
@@ -36,6 +38,10 @@ struct Board {
   int synthEvents = 0;                   // > 0: generate the data
   long held = 0;                         // after a stop: aggregates still being filled, read only after a forced data flush
   int readDelayUs = 0;                   // time a ReadData with data takes
+  uint32_t dropWrite = 0;                // a write to this address is lost
+  std::shared_ptr<std::atomic<bool>> hang = std::make_shared<std::atomic<bool>>(false);  // ReadData blocks (set from the test thread)
+  std::shared_ptr<std::atomic<bool>> readFail = std::make_shared<std::atomic<bool>>(false);
+  int opens = 0;
   std::vector<uint32_t> handedOut;       // everything ReadData gave
 };
 
@@ -252,7 +258,15 @@ extern "C" int fake_caen_is_sentinel(uint32_t address, uint32_t value) { return 
 
 extern "C" void fake_caen_fail(int serial, const char * what) {
   Board * b = FromSerial(serial);
-  if( b ) b->fail = what ? what : "";
+  if( !b ) return;
+  b->fail = what ? what : "";
+  b->hang->store(b->fail == "hang");
+  b->readFail->store(b->fail == "read");
+}
+
+extern "C" void fake_caen_drop_write(int serial, uint32_t address) {
+  Board * b = FromSerial(serial);
+  if( b ) b->dropWrite = address;
 }
 
 //======================================================================= CAEN API
@@ -266,6 +280,8 @@ CAEN_DGTZ_ErrorCode CAEN_DGTZ_OpenDigitizer(CAEN_DGTZ_ConnectionType LinkType, i
               || (LinkType == CAEN_DGTZ_OpticalLink && b.link == 1 && b.num == LinkNum && b.node == ConetNode);
     if( !match ) continue;
     if( b.open ) return CAEN_DGTZ_DigitizerAlreadyOpen;
+    if( b.fail == "reopen" && b.opens > 0 ) return CAEN_DGTZ_CommError;
+    b.opens++;
     b.open = true;
     *handle = (int) i;
     return CAEN_DGTZ_Success;
@@ -293,6 +309,7 @@ CAEN_DGTZ_ErrorCode CAEN_DGTZ_GetInfo(int handle, CAEN_DGTZ_BoardInfo_t * info) 
 CAEN_DGTZ_ErrorCode CAEN_DGTZ_WriteRegister(int handle, uint32_t Address, uint32_t Data) {
   BOARD_OR_FAIL;
   if( b->fail == "write" ) return CAEN_DGTZ_WriteDeviceRegisterFail;
+  if( b->dropWrite != 0 && Address == b->dropWrite ) return CAEN_DGTZ_Success;   // lost on the way
   Write(*b, Address, Data);
   return CAEN_DGTZ_Success;
 }
@@ -386,7 +403,8 @@ CAEN_DGTZ_ErrorCode CAEN_DGTZ_ClearData(int handle) { BOARD_OR_FAIL; Clear(*b); 
 // Hands out up to MaxAggregatePerBlockTransfer board aggregates the board has taken and not yet given.
 CAEN_DGTZ_ErrorCode CAEN_DGTZ_ReadData(int handle, CAEN_DGTZ_ReadMode_t mode, char * buffer, uint32_t * bufferSize) {
   (void) mode; BOARD_OR_FAIL;
-  if( b->fail == "read" ){ *bufferSize = 0; return CAEN_DGTZ_CommError; }
+  if( b->readFail->load() ){ *bufferSize = 0; return CAEN_DGTZ_CommError; }
+  while( b->hang->load() ) usleep(10000);      // stuck in the driver until the test lets it go
   long acq = b->st.running ? Acquired(*b) : b->st.aggAcquired - b->held;
   long perBLT = Read(*b, 0xEF1C) & 0x3FF;
   if( perBLT <= 0 ) perBLT = 1;
