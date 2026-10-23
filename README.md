@@ -2,6 +2,29 @@
 
 https://discord.gg/xVsRhNZF8G
 
+# This fork
+
+Prepared for data taking with six DPP-PSD boards on optical links (Oct 2026). Differences from
+upstream that matter at the console:
+
+- **Settings.** "w/ settings" (the default) loads `Digi-<serial>_<DPP>.bin` from the settings path,
+  writes every register that shapes the acquisition and reads every one back. A board whose file is
+  missing or refused, or a register that does not read back as the file has it, blocks Start (the
+  dialog names it). Removed because they did not do what they said: "default Program", Program
+  Default (board and channel), Autoset Reading Conf., Copy Board, SW decimation. The settings panel
+  is locked during a run and during the pause of a repeated series.
+- **Runs.** Each run has its own folder `<data path>/<prefix>_<run>/` (data files and the boards'
+  settings as read back at the start). A run starts on every board or on none. At Stop every board
+  is read out to the end before the files close. A board that stops answering or a file that cannot
+  be written stops the run with one alarm, and the stop comment in RunTimeStamp says why. Timed and
+  repeated runs: run length, repeat and pause on the main window. Ctrl-C, kill, a closed terminal or
+  closing the window stop a run properly. Start the program with `./FSUDAQ` (log in log/) or
+  `./FSUDAQ-gdb` (backtrace on a crash).
+- **Online dashboard** (online/README.md) instead of the online histograms and analyzers.
+- **Setup and tests:** `./install.sh --check` reports what is missing, `./install.sh` installs it;
+  `make -C tests` and `python3 tests/test_online.py` run the tests (tests/README.md, which also lists
+  what to check once on the hardware).
+
 # Introduction
 
 This is a DAQ for 1st gen CAEN digitizer for 
@@ -13,12 +36,14 @@ It has scope (updated every half-sec), allow full control of the digitizer (exce
 
 It can be connected to InfluxDB v1.8+ and Elog.
 
-Each channel has it own 1D histogram. It will not be filled by default, but can enable it in the "Online Histgrams" panel. The binning of each histogram will be saved under the raw data path as singleSpectaSetting.txt
+(Upstream:) each channel has its own 1D histogram in the "Online Histograms" panel. In this fork that
+panel and the online analyzer selection are removed (they filled plots from a worker thread while the
+GUI drew them, which corrupted the heap mid-run); the online dashboard replaces them.
 
 ## Wiki
 https://fsunuc.physics.fsu.edu/wiki/index.php/CAEN_digitizer
 
-# Online analyzer
+# Online analyzer (upstream; not reachable from the GUI in this fork)
 A Multi-builder (event builder that can build event across multiple digitizer) is made. It has normal event building code and also a backward event building code that build events from the latest data up to certain amont of event.
 
 A 1-D and 2-D histogram is avalible. In the 2-D histogram, graphical cuts can be created and rename.
@@ -55,9 +80,13 @@ When programSettings.txt is presented in the same folder as the FSUDAQ_Qt, the p
 - (line 3) the database name
 - (line 4) the influxDB token (for v2.0+)
 - (line 5) the elog IP
-- (line 6) the elog logbook name
-- (line 7) elog user name
-- (line 8) elog user password
+- (line 6) the elog port
+- (line 7) the elog logbook name
+- (line 8) elog user name
+- (line 9) elog user password
+- then `key=value` lines, in any order: `settingsPath` (folder of the `Digi-*.bin` files),
+  `autoIncrementRunID`, `maxFileSizeMB` (roll-over size, up to 4000), `repeatPauseSec`,
+  `autoDashboard`. FSUDAQ writes the file back when these change.
 
 If no programSettings.txt is found. The program can still search for all digitizers that connected using optical cable. 
 
@@ -79,8 +108,9 @@ User must setup the data path for data take. Without the data path, user still c
 - RunTimestamp.dat  <- this store the timestamps and comments for all runs
 - RunTimestamp.csv  <- csv format for the RunTimestamp.dat, easy for inport to excel
 - lastRun.sh <- some data for bash script
-- *.fsu <- all data file
-- *.bin <- setting file
+- `<prefix>_<run>/` <- one folder per run, with
+  - `<prefix>_<run>_<serial>_<DPP>_<tick>_<index>.fsu` <- data files, a new index at the roll-over size
+  - `<prefix>_<run>_<serial>_<DPP>.bin` <- each board's settings, read back from the board at the start
 
 # ToDo
 
@@ -141,7 +171,7 @@ use `qmake6 -project ` to generate the *.pro
 
 in the *.pro, add 
 
-- ` QT += core widgets charts printsupport`
+- ` QT += core widgets charts printsupport network`
 - ` LIBS += -lCAENDigitizer -lcurl`
 
 ## if *.pro exist
@@ -182,9 +212,9 @@ second, ensure the core dump file has unlimited size and set the core dump file 
 * If accessing the database takes too long, recommend to disable the database.
 * Pile up rate is not accurate for very high input rate ( > 60 kHz ).
 * When using the scope, the Agg/Read must be smaller than 512.
-* Although the Events/Agg used the CAEN API to recalculate before ACQ start, for PHA firmware, when the trigger rate changed, the Events per Agg need to be changed.
+* Events/Agg, Agg Organization and Max Aggregates per transfer come from the settings file as they are (this fork does not let the CAEN library choose them). For PHA firmware, when the trigger rate changes, the Events per Agg may need to be changed.
 * The Agg Organization, Event per Agg, Record Length are strongly correlated. Some settings are invalid and will cause the digitizer goes crazy.
-* Load digitizer setting would not load everything, only load the channel settings and some board settings.
+* (Fixed in this fork: loading settings writes every register that shapes the acquisition and checks it reads back.)
 * Sometimes, the buffer is not in time order, and make the trigger/Accept rate to be nagative. This is nothing to do with the program but the digitizer settings. Recommand reporgram the digitizer.
 * For 1740 QDC, RecordLenght is board setting, but readout is indivuial group.
 * For PHA, the trapezoid scaling and fine-gain register are calculated before ACQ start.

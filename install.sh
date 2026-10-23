@@ -17,8 +17,8 @@
 #   CAENDigitizer-*.tgz  https://www.caen.it/products/caendigitizer-library/
 #   CAENUSBdrvB-*.tgz    (USB boards) not on the digitizer pages: it is the "Linux driver" under
 #                        Software/Firmware on https://www.caen.it/products/v1718/ (desktop
-#                        digitizers appear on USB as V1718s). 1.5.4 builds on new kernels with
-#                        the patch this script applies.
+#                        digitizers appear on USB as V1718s). 1.5.4 (older than the README's
+#                        1.5.5, so the script warns) builds on new kernels with the patch it applies.
 #
 # Safe to run again: steps that are already done are skipped.
 
@@ -351,7 +351,7 @@ if [[ $DO_VENV -eq 1 ]]; then
     fail "online/venv with numpy + numba not set up"
   else
     [[ -x $VPY ]] || python3 -m venv online/venv
-    if $VPY -m pip install -q --upgrade pip numpy numba; then
+    if $VPY -m pip install -q --upgrade pip && $VPY -m pip install -q -r online/requirements.txt; then
       ok "online/venv: numpy $($VPY -c 'import numpy; print(numpy.__version__)'), numba $($VPY -c 'import numba; print(numba.__version__)')"
     else
       fail "pip could not install numpy/numba into online/venv"
@@ -378,6 +378,11 @@ if [[ $NUSB -gt 0 ]]; then
   fi
 else
   info "no CAEN USB device connected (fine for optical link / A4818)"
+fi
+# optical links through a PCIe card: its driver must be loaded (not installed by this script)
+if lspci 2>/dev/null | grep -qi "CAEN"; then
+  if lsmod | grep -qE '^a(3|5)818 '; then ok "CAEN PCIe optical-link driver loaded ($(lsmod | grep -oE '^a(3|5)818' | head -1))"
+  else warn "a CAEN PCIe card is installed but its driver (a3818 / a5818) is not loaded: the optical links will not work"; fi
 fi
 
 #----------------------------------------------------------------------------- summary

@@ -1336,7 +1336,7 @@ void FSUDAQ::UpdateScalar(){
     if( data->DecodeBadChannel > 0 ) problems << "bad-ch " + QString::number(data->DecodeBadChannel);
     if( data->SaveFailed > 0 ) problems << "<b>NOT SAVED " + QString::number(data->SaveFailed) + "</b>";
     readDataThread[iDigi]->SetReadCountZero();
-    lbFileSize[iDigi]->setText("written " + QString::number(data->GetTotalFileSize()/1024./1024., 'f', 1) + " MB");
+    lbFileSize[iDigi]->setText(inDataRun && chkSaveData->isChecked() ? "written " + QString::number(data->GetTotalFileSize()/1024./1024., 'f', 1) + " MB" : "not saved");
 
     // per channel: this interval's counts, and the window over which input, missed and lost are measured
     const int nCh = digi[iDigi]->GetNumInputCh();
@@ -2865,8 +2865,8 @@ void FSUDAQ::CheckElog(){
   // printf("Elog testing Fail\n");
   if( elogIP == "" ) LogMsg("no elog IP");
   if( elogName == "" ) LogMsg("no elog Name");
-  if( elogUser == "" ) LogMsg("no elog User name. Please set it in the programSettings.txt, line 6.");
-  if( elogPWD == "" ) LogMsg("no elog User pwd. Please set it in the programSettings.txt, line 7.");
+  if( elogUser == "" ) LogMsg("no elog User name. Please set it in the programSettings.txt, line 8.");
+  if( elogPWD == "" ) LogMsg("no elog User pwd. Please set it in the programSettings.txt, line 9.");
   if( elogID < 0 ) LogMsg("Possible elog IP, Name, User name, pwd incorrect, or elog not installed.");
   leElogIP->setEnabled(false);
   leElogName->setEnabled(false);
