@@ -1062,6 +1062,7 @@ int Digitizer::LoadAndProgramSettings(std::string fileName, std::vector<std::str
   if( nFailed > 0 ) problems.push_back(std::to_string(nFailed) + " register write(s) failed");
   int nReadFailed = ReadAllSettingsFromBoard(true);
   if( nReadFailed > 0 ) problems.push_back(std::to_string(nReadFailed) + " register read(s) failed");
+  programmedFromFile = (nFailed == 0 && nReadFailed == 0);
 
   /// every register written must now read back as the file has it
   for( auto & [reg, ch] : ProgrammedRegisters() ){
@@ -1075,7 +1076,6 @@ int Digitizer::LoadAndProgramSettings(std::string fileName, std::vector<std::str
     problems.push_back(msg);
   }
 
-  programmedFromFile = problems.empty();
   return (int) problems.size();
 }
 

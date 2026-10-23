@@ -90,7 +90,6 @@ private:
   RComboBox * cbToBoard;
   QRadioButton * rbCh[MaxRegChannel]; // Copy from ch
   QCheckBox * chkCh[MaxRegChannel]; // Copy to Ch
-  QPushButton * bnCopyBoard;
   QPushButton * bnCopyChannel;
 
   QString rawDataPath;
@@ -106,12 +105,10 @@ private:
   QWidget * buttonsWidget[MaxNDigitizer]; 
 
   QPushButton * bnRefreshSetting; // read setting from board
-  QPushButton * bnProgramPreDefined;
   QPushButton * bnClearBuffer;
   
   // QPushButton * bnSendSoftwareTriggerSignal;
   QPushButton * bnSetNoTrace;
-  QPushButton * bhAutoSetEventPulling;
   //QPushButton * bnSendSoftwareClockSyncSignal;
   QPushButton * bnSaveSettings;
   QPushButton * bnLoadSettings;
@@ -198,7 +195,6 @@ private:
   QTabWidget * chTab;
 
   RComboBox * chSelection[MaxNDigitizer];
-  QPushButton * bnProgramChannel[MaxNDigitizer];
 
   //----------- common for PHA and PSD
   RSpinBox * sbRecordLength[MaxNDigitizer][MaxRegChannel + 1];

@@ -9,6 +9,7 @@
 #include <QSortFilterProxyModel>
 #include <QApplication>
 #include <QScreen>
+#include <QMessageBox>
 
 #define ComBoxMixed "Mixed"
                                                                                   // bit = 0, bit = 1
@@ -215,23 +216,16 @@ DigiSettingsPanel::DigiSettingsPanel(Digitizer ** digi, unsigned int nDigi, QStr
       buttonLayout->addWidget(leSaveFilePath[iDigi], rowID, 1, 1, 3);
       leSaveFilePath[iDigi]->setText(QString::fromStdString(digi[ID]->GetSettingFileName()));
 
+      // no "Program Default", "Program Default Channel Settings" or "Autoset Reading Conf.": they
+      // let the CAEN library choose the event aggregation for the whole board, which left DT5730S
+      // channels 4-7 without data (4cc1350). Boards are set up from settings files.
       rowID ++; //---------------------------
       bnRefreshSetting = new QPushButton("Refresh Settings", this);
       buttonLayout->addWidget(bnRefreshSetting, rowID, 0);
       connect(bnRefreshSetting, &QPushButton::clicked, this, &DigiSettingsPanel::ReadSettingsFromBoard);
 
-      bnProgramPreDefined = new QPushButton("Program Default", this);
-      buttonLayout->addWidget(bnProgramPreDefined, rowID, 1);
-      connect(bnProgramPreDefined, &QPushButton::clicked, this, [=](){         
-        digi[ID]->ProgramBoard();
-        usleep(1000*500); // wait for 0.2 sec
-
-        UpdatePanelFromMemory();
-        emit UpdateOtherPanels();
-      }); 
-
       bnClearBuffer = new QPushButton("Clear Buffer/FIFO/Data", this);
-      buttonLayout->addWidget(bnClearBuffer, rowID, 2);
+      buttonLayout->addWidget(bnClearBuffer, rowID, 1);
       connect(bnClearBuffer, &QPushButton::clicked, this, [=](){ 
         digi[ID]->WriteRegister(DPP::SoftwareClear_W, 1); 
         digi[ID]->GetData()->ClearData();
@@ -239,7 +233,7 @@ DigiSettingsPanel::DigiSettingsPanel(Digitizer ** digi, unsigned int nDigi, QStr
       });
 
       bnLoadSettings = new QPushButton("Load Settings", this);
-      buttonLayout->addWidget(bnLoadSettings, rowID, 3);
+      buttonLayout->addWidget(bnLoadSettings, rowID, 2);
       connect(bnLoadSettings, &QPushButton::clicked, this, &DigiSettingsPanel::LoadSetting);
 
       rowID ++; //---------------------------
@@ -255,16 +249,6 @@ DigiSettingsPanel::DigiSettingsPanel(Digitizer ** digi, unsigned int nDigi, QStr
         }
       });
 
-      bhAutoSetEventPulling = new QPushButton("Autoset Reading Conf.", this);
-      buttonLayout->addWidget(bhAutoSetEventPulling, rowID, 1);
-      connect(bhAutoSetEventPulling, &QPushButton::clicked, this, [=](){ 
-        SendLogMsg("Digi-" +QString::number(digi[ID]->GetSerialNumber()) + " : AutoSetDPPEventAggregation()");
-        digi[ID]->AutoSetDPPEventAggregation(); 
-        UpdateBoardAndChannelsStatus();
-        UpdatePanelFromMemory();
-        emit UpdateOtherPanels();
-      });
-
       // bnSendSoftwareClockSyncSignal = new QPushButton("Send SW Clock-Sync Signal", this);
       // buttonLayout->addWidget(bnSendSoftwareClockSyncSignal, rowID, 1);
       // connect(bnSendSoftwareClockSyncSignal, &QPushButton::clicked, this, [=](){ digi[ID]->WriteRegister(DPP::SoftwareClockSync_W, 1); UpdateBoardAndChannelsStatus();});
@@ -276,7 +260,7 @@ DigiSettingsPanel::DigiSettingsPanel(Digitizer ** digi, unsigned int nDigi, QStr
 
       //checkBox, to coupled or decouple the setting file.
       chkCoupledSettingFile = new QCheckBox("Live Setting Update", this);
-      buttonLayout->addWidget(chkCoupledSettingFile, rowID, 2);
+      buttonLayout->addWidget(chkCoupledSettingFile, rowID, 1);
       chkCoupledSettingFile->setCheckState(Qt::CheckState::Unchecked);
       connect(chkCoupledSettingFile, &QCheckBox::stateChanged, this, [=](int state){
         digi[ID]->SetSettingFileUpdate(state);
@@ -1262,10 +1246,8 @@ void DigiSettingsPanel::SetUpInquiryCopyTab(){
     }
 
     //---------- Acton buttons
-    bnCopyBoard = new QPushButton("Copy Board",copyBox);
-    bnCopyBoard->setFixedSize(120, 50);
-    copyLayout->addWidget(bnCopyBoard, 2, 2);
-
+    // no "Copy Board": it wrote only the write-only board registers (software reset and
+    // configuration reload among them) and none of the settings; settings files do it instead
     bnCopyChannel = new QPushButton("Copy Channel(s)", copyBox);
     bnCopyChannel->setFixedSize(120, 50);
     copyLayout->addWidget(bnCopyChannel, 3, 2);
@@ -1294,42 +1276,7 @@ void DigiSettingsPanel::SetUpInquiryCopyTab(){
       if( i >= digi[id1]->GetNumRegChannels() ) chkCh[i]->setEnabled(false);
     }
 
-    bnCopyBoard->setEnabled(false);
     bnCopyChannel->setEnabled(false);
-
-    connect(bnCopyBoard, &QPushButton::clicked, this, [=](){
-      int fromIndex = cbFromBoard->currentIndex();
-      int toIndex = cbToBoard->currentIndex();
-
-      SendLogMsg("Copy Settings from DIG:" +  QString::number(digi[fromIndex]->GetSerialNumber()) + " to DIG:" +  QString::number(digi[toIndex]->GetSerialNumber()));
-      
-      //Copy Board Setting
-      for( int i = 0; i < (int) RegisterBoardList_PHAPSD.size(); i++){
-        if( RegisterBoardList_PHAPSD[i].GetRWType() != RW::WriteONLY ) continue;
-        uint32_t value = digi[fromIndex]->GetSettingFromMemory(RegisterBoardList_PHAPSD[i]);
-        digi[toIndex]->WriteRegister(RegisterBoardList_PHAPSD[i], value);
-      }
-
-      std::vector<Reg> regList;
-      if( digi[fromIndex]->GetDPPType() == V1730_DPP_PHA_CODE ) regList = RegisterChannelList_PHA;
-      if( digi[fromIndex]->GetDPPType() == V1730_DPP_PSD_CODE ) regList = RegisterChannelList_PSD;
-
-      for( int i = 0; i < digi[toIndex]->GetNumRegChannels() ; i++){
-        //Copy setting
-        for( int k = 0; k < (int) regList.size(); k ++){
-          if( regList[k].GetRWType() != RW::ReadWrite ) continue;
-
-          uint32_t value = digi[fromIndex]->GetSettingFromMemory(regList[k], i);
-          digi[toIndex]->WriteRegister(regList[k], value, i);
-
-          usleep(10000); // wait for 10 milisec
-        }
-      }
-      
-      SendLogMsg("------ done");
-      return true;
-
-    });
 
     connect(bnCopyChannel, &QPushButton::clicked, this, [=](){
       int fromIndex = cbFromBoard->currentIndex();
@@ -1586,15 +1533,6 @@ void DigiSettingsPanel::SetUpChannel_PHA(){
       SyncAllChannelsTab_PHA();
     });
 
-    bnProgramChannel[ID] = new QPushButton("Program Default Channel Settings",this);
-    papa->addWidget(bnProgramChannel[ID]);
-    connect(bnProgramChannel[ID], &QPushButton::clicked, this, [=](){
-      short ch = chSelection[ID]->currentData().toInt();
-      digi[ID]->ProgramChannel(ch);
-      digi[ID]->ReadAllSettingsFromBoard(true);
-      UpdatePanelFromMemory();
-      emit UpdateOtherPanels();
-    });
   }
 
   {//*========================= input
@@ -2045,15 +1983,6 @@ void DigiSettingsPanel::SetUpChannel_PSD(){
       SyncAllChannelsTab_PSD();
     });
 
-    bnProgramChannel[ID] = new QPushButton("Program Default Channel Settings",this);
-    papa->addWidget(bnProgramChannel[ID]);
-    connect(bnProgramChannel[ID], &QPushButton::clicked, this, [=](){
-      short ch = chSelection[ID]->currentData().toInt();
-      digi[ID]->ProgramChannel(ch);
-      digi[ID]->ReadAllSettingsFromBoard(true);
-      UpdatePanelFromMemory();
-      emit UpdateOtherPanels();
-    });
   }
 
   {//*=============== input
@@ -2644,15 +2573,6 @@ void DigiSettingsPanel::SetUpChannel_QDC(){
       }
     });
 
-    bnProgramChannel[ID] = new QPushButton("Program Default Channel Settings",this);
-    papa->addWidget(bnProgramChannel[ID]);
-    connect(bnProgramChannel[ID], &QPushButton::clicked, this, [=](){
-      short group = chSelection[ID]->currentData().toInt();
-      digi[ID]->ProgramChannel(group);
-      digi[ID]->ReadAllSettingsFromBoard(true);
-      UpdatePanelFromMemory();
-      emit UpdateOtherPanels();
-    });
   }
 
   {//*=============== input
@@ -4195,7 +4115,6 @@ void DigiSettingsPanel::CheckRadioAndCheckedButtons(){
   }
 
   if( digi[id1]->GetDPPType() != digi[id2]->GetDPPType() ){
-    bnCopyBoard->setEnabled(false);
     bnCopyChannel->setEnabled(false);
 
     for( int i = 0 ; i < MaxRegChannel; i++){
@@ -4208,13 +4127,8 @@ void DigiSettingsPanel::CheckRadioAndCheckedButtons(){
 
   for( int i = 0 ; i < MaxRegChannel; i++){
     rbCh[i]->setEnabled(i < digi[id1]->GetNumRegChannels());
-    chkCh[i]->setEnabled(i < digi[id1]->GetNumRegChannels());
-  }
-
-  if( id1 == id2 ){
-    bnCopyBoard->setEnabled(false);
-  }else{
-    bnCopyBoard->setEnabled(true);
+    if( !(i < digi[id2]->GetNumRegChannels()) ) chkCh[i]->setChecked(false); // e.g. ch 8-15 when the target is a DT5730
+    chkCh[i]->setEnabled(i < digi[id2]->GetNumRegChannels());
   }
 
   int chFromIndex = -1;
@@ -4297,16 +4211,25 @@ void DigiSettingsPanel::LoadSetting(){
 
   QString fileName = fileDialog.selectedFiles().at(0);
 
-  if( digi[ID]->LoadSettingBinaryToMemory(fileName.toStdString().c_str()) == 0 ){
-    SendLogMsg("Loaded settings file " + fileName + " for Digi-" + QString::number(digi[ID]->GetSerialNumber()));
-    leSaveFilePath[ID]->setText(fileName);
-    digi[ID]->ProgramSettingsToBoard();
-    UpdatePanelFromMemory();
-
-    UpdateOtherPanels();
-
+  // the same load, program and read-back as opening "w/ settings"; memory and panel then show the board
+  std::vector<std::string> problems;
+  int nProblem = digi[ID]->LoadAndProgramSettings(fileName.toStdString(), problems);
+  QString digiName = "Digi-" + QString::number(digi[ID]->GetSerialNumber());
+  if( nProblem < 0 ){
+    SendLogMsg("<font style=\"color: red;\">" + digiName + ": settings file not loaded: " + QString::fromStdString(problems.front()) + "</font>");
+    QMessageBox::warning(this, "Settings not loaded", digiName + ": the settings file was not loaded.\n\n" + QString::fromStdString(problems.front()));
+    return;
+  }
+  digi[ID]->SetTrace(false); // as at open
+  leSaveFilePath[ID]->setText(fileName);
+  UpdatePanelFromMemory();
+  UpdateOtherPanels();
+  if( nProblem == 0 ){
+    SendLogMsg("Loaded settings file " + fileName + " for " + digiName + "; every register reads back as in the file.");
   }else{
-    SendLogMsg("Fail to Loaded settings file " + fileName + " for Digi-" + QString::number(digi[ID]->GetSerialNumber()));
+    QString list;
+    for( auto & p : problems ){ SendLogMsg("<font style=\"color: red;\">" + digiName + ": " + QString::fromStdString(p) + "</font>"); list += QString::fromStdString(p) + "\n"; }
+    QMessageBox::warning(this, "Settings differ", digiName + ": after loading " + fileName + ", the board does not hold the file's settings:\n\n" + list);
   }
 }
 

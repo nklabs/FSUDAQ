@@ -62,7 +62,7 @@ class Digitizer{
     bool         isSettingFileUpdate;
     bool         isSettingFilledinMemeory; /// false for disabled ReadAllSettingFromBoard()
     bool         hasOverThresholdWidth;  /// for QDC
-    bool         programmedFromFile;       /// the board was programmed from a settings file that loaded without problems
+    bool         programmedFromFile;       /// a settings file was loaded and written to the board without failed writes or reads
     unsigned int setting[SETTINGSIZE];     /// Setting, 4bytes x 2048 = 8192 bytes
 
     /// the registers ProgramSettingsToBoard() writes, in the order it writes them, as (register, channel)

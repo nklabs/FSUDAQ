@@ -41,6 +41,7 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
   digi = nullptr;
   nDigi = 0;
   isACQStarted= false;
+  openedWithSettings = false;
 
   scalar = nullptr;
   scope = nullptr;
@@ -99,9 +100,10 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     cbOpenMethod = new RComboBox(this);
     cbOpenMethod->addItem("w/o settings", 0);
     cbOpenMethod->addItem("w/ settings", 1);
-    cbOpenMethod->addItem("default Program", 2);
+    // no "default Program": it let the CAEN library choose the event aggregation, which left
+    // DT5730S channels 4-7 without data (4cc1350); boards are set up from settings files
     cbOpenMethod->setCurrentIndex(1); // open with the settings files of the settings path by default
-    cbOpenMethod->setToolTip("w/ settings: load Digi-<serial>_<DPP>.bin from the settings path and program the boards with it (default). w/o settings: open and read the boards as they are. default Program: write the built-in defaults.");
+    cbOpenMethod->setToolTip("w/ settings: load Digi-<serial>_<DPP>.bin from the settings path, program the boards with it and check every register reads back (default); runs start only when every board was programmed from its file. w/o settings: open and read the boards as they are.");
     layout->addWidget(cbOpenMethod, 2, 0);
 
     // one button: green "Open Digitizers" while closed, red "Close Digitizers" while open
@@ -829,59 +831,43 @@ void FSUDAQ::OpenDigitizers(){
   }else{
     if( cbOpenMethod->currentData().toInt() == 0 ) LogMsg(QString("Done seraching. Found %1 digitizer(s). Opening digitizer(s)....").arg(nDigi));
     if( cbOpenMethod->currentData().toInt() == 1 ) LogMsg(QString("Done searching. Found %1 digitizer(s). Opening digitizer(s) and loading settings files....").arg(nDigi));
-    if( cbOpenMethod->currentData().toInt() == 2 ) LogMsg(QString("Done searching. Found %1 digitizer(s). Opening digitizer(s) and programming defaults....").arg(nDigi));    
   }
   
   digi = new Digitizer * [nDigi];
   readDataThread = new ReadDataThread * [nDigi];
 
+  openedWithSettings = (cbOpenMethod->currentData().toInt() == 1);
+  QStringList settingsProblems; // shown together once every board is open
+
   for( unsigned int i = 0; i < nDigi; i++){
     digi[i] = new Digitizer(portList[i].first, portList[i].second);
     //digi[i]->Reset();
-
-    if( cbOpenMethod->currentData().toInt() == 2 ) {
-      digi[i]->ProgramBoard();
-    }
+    QString digiName = "Digi-" + QString::number(digi[i]->GetSerialNumber());
 
     ///============== load settings 
-    if( cbOpenMethod->currentData().toInt() <= 1 ){
-      QString fileName = settingsPath + "/Digi-" + QString::number(digi[i]->GetSerialNumber()) + "_" + QString::fromStdString(digi[i]->GetData()->DPPTypeStr) + ".bin";
-      QFile file(fileName);
-      if( !file.open(QIODevice::Text | QIODevice::ReadOnly) ) {
-
-        if( digi[i]->GetDPPType() == V1730_DPP_PHA_CODE ) {
-          //digi[i]->ProgramBoard_PHA();
-          //LogMsg("<b>" + fileName + "</b> not found. Program predefined PHA settings.");
-          LogMsg("<b>" + fileName + "</b> not found.");
-        }
-        if( digi[i]->GetDPPType() == V1730_DPP_PSD_CODE ){
-          //digi[i]->ProgramBoard_PSD();
-          //LogMsg("<b>" + fileName + "</b> not found. Program predefined PSD settings.");
-          LogMsg("<b>" + fileName + "</b> not found.");
-        }
-        if( digi[i]->GetDPPType() == V1740_DPP_QDC_CODE ){
-          //digi[i]->ProgramBoard_QDC();
-          //LogMsg("<b>" + fileName + "</b> not found. Program predefined PSD settings.");
-          LogMsg("<b>" + fileName + "</b> not found.");
-        }
+    QString fileName = settingsPath + "/Digi-" + QString::number(digi[i]->GetSerialNumber()) + "_" + QString::fromStdString(digi[i]->GetData()->DPPTypeStr) + ".bin";
+    bool readBoard = true; // fill memory (and the panels) from the board, unless loading did it
+    if( openedWithSettings ){
+      std::vector<std::string> problems;
+      int nProblem = digi[i]->LoadAndProgramSettings(fileName.toStdString(), problems);
+      readBoard = (nProblem < 0);
+      if( nProblem < 0 ){
+        LogMsg("<font style=\"color: red;\">" + digiName + ": settings file not loaded: " + QString::fromStdString(problems.front()) + "</font>");
+        settingsProblems << digiName + ": not programmed. " + QString::fromStdString(problems.front());
+      }else if( nProblem == 0 ){
+        LogMsg("Loaded <b>" + fileName + "</b> into " + digiName + "; every register reads back as in the file.");
       }else{
-        LogMsg("Found <b>" + fileName + "</b> for digitizer settings.");
-        
-        if( cbOpenMethod->currentData().toInt() == 1 ){
-          if( digi[i]->LoadSettingBinaryToMemory(fileName.toStdString().c_str()) == 0 ){
-            LogMsg("Loaded settings file <b>" + fileName + "</b> for Digi-" + QString::number(digi[i]->GetSerialNumber()));
-            digi[i]->ProgramSettingsToBoard();
-          }else{
-            LogMsg("Fail to Loaded settings file " + fileName + " for Digi-" + QString::number(digi[i]->GetSerialNumber()));
-          }
-        }else{
-          LogMsg("Save the setting file path, but not load.");
-          digi[i]->SetSettingBinaryPath(fileName.toStdString());
+        LogMsg("<font style=\"color: red;\">" + digiName + ": programmed from <b>" + fileName + "</b>, but " + QString::number(nProblem) + " problem(s):</font>");
+        for( auto & p : problems ){
+          LogMsg("<font style=\"color: red;\">&nbsp;&nbsp;" + digiName + ": " + QString::fromStdString(p) + "</font>");
+          settingsProblems << digiName + ": " + QString::fromStdString(p);
         }
-        
       }
-    }    
-    digi[i]->ReadAllSettingsFromBoard(true);
+    }else if( QFile::exists(fileName) ){
+      LogMsg("Opened " + digiName + " as it is; " + fileName + " is the file \"Live Setting Update\" and Save write to.");
+      digi[i]->SetSettingBinaryPath(fileName.toStdString());
+    }
+    if( readBoard ) digi[i]->ReadAllSettingsFromBoard(true);
 
     //===== set no trace, even when FSQDAQ segfault at scope, the digitizer will save no trace
     digi[i]->SetTrace(false);
@@ -894,6 +880,17 @@ void FSUDAQ::OpenDigitizers(){
   }
 
   LogMsg("====== <font style=\"color: blue;\"><b>" + QString("Done. Opened %1 digitizer(s).").arg(nDigi) + "</b></font> =====");
+  if( !openedWithSettings ) LogMsg("<font style=\"color: orange;\">Opened without settings files: the boards keep the registers they had.</font>");
+  if( !settingsProblems.isEmpty() ){
+    QStringList notProgrammed = BoardsNotProgrammed();
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle("Settings files");
+    box.setText(notProgrammed.isEmpty() ? "Every board was programmed from its settings file, but some registers do not read back as the file has them."
+                                        : "Not every board was programmed from its settings file. Runs cannot start until it is: fix the file(s) and load them with Digitizer Settings > Load Settings, or close and reopen the digitizers.");
+    box.setDetailedText(settingsProblems.join("\n"));
+    box.exec();
+  }
 
   WaitForDigitizersOpen(false);
   bnStartACQ->setStyleSheet("background-color: green;");
@@ -973,6 +970,7 @@ void FSUDAQ::CloseDigitizers(){
 
   LogMsg("Done. Closed " + QString::number(nDigi) + " Digitizer(s).");
   nDigi = 0;
+  openedWithSettings = false;
 
   WaitForDigitizersOpen(true);
   bnStartACQ->setStyleSheet("");
@@ -980,6 +978,15 @@ void FSUDAQ::CloseDigitizers(){
 
   printf("End of FSUDAQ::%s\n", __func__);
 
+}
+
+QStringList FSUDAQ::BoardsNotProgrammed() const {
+  QStringList list;
+  if( !openedWithSettings || digi == nullptr ) return list;
+  for( unsigned int i = 0; i < nDigi; i++ ){
+    if( !digi[i]->IsBoardDisabled() && !digi[i]->IsProgrammedFromFile() ) list << "Digi-" + QString::number(digi[i]->GetSerialNumber());
+  }
+  return list;
 }
 
 void FSUDAQ::WaitForDigitizersOpen(bool onOff){
@@ -1543,6 +1550,16 @@ void FSUDAQ::OpenScalar(){
 void FSUDAQ::StartACQ(){
   DebugPrint("%s", "FSUDAQ");
   if( digi == nullptr ) return;
+
+  // opened "w/ settings": a board that does not hold its settings file would take data with
+  // whatever it had before, so no run starts until every board was programmed from its file
+  QStringList notProgrammed = BoardsNotProgrammed();
+  if( !notProgrammed.isEmpty() ){
+    LogMsg("<font style=\"color: red;\">Run not started: " + notProgrammed.join(", ") + " not programmed from a settings file.</font>");
+    QMessageBox::warning(this, "Run not started", notProgrammed.join(", ") + (notProgrammed.size() == 1 ? " is" : " are") +
+                         " not programmed from a settings file (see the log).\n\nLoad the file with Digitizer Settings > Load Settings, or close and reopen the digitizers.");
+    return;
+  }
 
   // the prefix typed in the field applies to this run (it used to take effect one run late)
   if( chkSaveData->isChecked() && lePrefix->text() != prefix ) {

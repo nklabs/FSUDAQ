@@ -108,6 +108,8 @@ private:
   Digitizer ** digi;
   unsigned int nDigi;
   bool isACQStarted;
+  bool openedWithSettings;      // opened "w/ settings": every board must hold its settings file before a run
+  QStringList BoardsNotProgrammed() const;  // boards opened "w/ settings" that are not programmed from a file
 
   QString programSettingsFilePath;
   QString rawDataPath;
