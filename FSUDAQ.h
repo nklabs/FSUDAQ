@@ -54,6 +54,7 @@ public:
 
 public slots:
   void UpdateScalar();
+  void ShutdownOnSignal(int sig); // SIGINT/SIGTERM/SIGHUP: stop a run properly, then quit
 
 private slots:
 
@@ -228,7 +229,7 @@ private:
   // triggers, bit 15 on the first event after a loss): accumulated over a window that grows until it
   // holds enough flags (per second is far too coarse at low rates); the last complete window is shown.
   struct DeadTimeWindow {
-    enum State { Wait, Valid, Low, BadFlags };
+    enum State { Wait, Valid, Low, BadFlags, OtherStep }; // OtherStep: flags every 128 or 8192 triggers, not 1024
     uint64_t flagsTotal = 0;     // 1024-trigger flags since the start (the board's counter starts at zero)
     uint64_t sinceFlag = 0;      // events recorded after the newest flag
     double msSinceFlag = 0;      // time since the refresh that brought the newest flag

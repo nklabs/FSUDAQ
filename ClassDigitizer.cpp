@@ -780,7 +780,7 @@ int Digitizer::ReadData(){
     ret = CAEN_DGTZ_OutOfMemory;
     return ret;
   }
-  if( ret == CAEN_DGTZ_Success ) data->ReadBytesSinceRate += data->nByte;
+  if( ret == CAEN_DGTZ_Success ){ std::lock_guard<std::mutex> lock(data->rateMTX); data->ReadBytesSinceRate += data->nByte; }
   //uint32_t EventSize = ReadRegister(DPP::EventSize); // Is it as same as data->nByte?
   // if( data->nByte > 0 ) printf("Read Buffer size %d byte \n", data->nByte);
   

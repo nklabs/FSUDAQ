@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 #include <cerrno>
 #include <atomic>
+#include <mutex>
 
 #include "macro.h"
 
@@ -132,7 +133,22 @@ class Data{
     void SetMaxFileSize(uint64_t bytes) { maxFileSize = bytes; } // a file is closed and the next index opened once it exceeds this
     uint64_t GetMaxFileSize() const { return maxFileSize; }
 
-    void CalTriggerRate(); // this method is called by FSUDAQ::UpdateScalar()
+    void CalTriggerRate(); // called by TakeRateCounters()
+
+    /// the per-interval counters of the Run Monitor, copied and zeroed at once
+    struct RateCounters {
+      uint32_t counts[MaxNChannels];       // events decoded
+      uint32_t flag1024[MaxNChannels];     // "1024 triggers counted" flags (extras bit 13)
+      uint32_t countsAtFlag[MaxNChannels]; // counts at the newest of them (0 = none)
+      uint32_t lostFlag[MaxNChannels];     // "trigger lost" flags (bit 15)
+      uint32_t lostNFlag[MaxNChannels];    // "N lost triggers counted" flags (bit 12)
+      uint64_t readBytes;
+      unsigned int aggCount;
+    };
+    /// copy the counters, compute the trigger rates and zero the counters, under the lock the decoder
+    /// holds while it decodes a buffer: no event or flag falls between the copy and the reset
+    void TakeRateCounters(RateCounters & out);
+    std::mutex rateMTX;
     void ClearReferenceTime();
 
   protected:
@@ -396,7 +412,21 @@ inline void Data::ClearReferenceTime(){
   for( int ch = 0; ch < numInputCh; ch ++ ) t0[ch] = 0;
 }
 
-inline void Data::CalTriggerRate(){ // this method is called by FSUDAQ::UpdateScalar()
+inline void Data::TakeRateCounters(RateCounters & out){
+  std::lock_guard<std::mutex> lock(rateMTX);
+  for( int i = 0; i < MaxNChannels; i++ ){
+    out.counts[i] = CountsSinceRate[i];
+    out.flag1024[i] = Flag1024SinceRate[i];
+    out.countsAtFlag[i] = CountsAtFlagSinceRate[i];
+    out.lostFlag[i] = LostFlagSinceRate[i];
+    out.lostNFlag[i] = LostNFlagSinceRate[i];
+  }
+  out.readBytes = ReadBytesSinceRate;
+  out.aggCount = AggCount;
+  CalTriggerRate(); // reads the timestamps the decoder writes, and resets the counters
+}
+
+inline void Data::CalTriggerRate(){ // called by TakeRateCounters(), under rateMTX
 
   unsigned long long dTime = 0;
   double sec = -999;
@@ -653,6 +683,7 @@ inline void Data::DecodeBuffer(char * &buffer, unsigned int size, bool fastDecod
 
 inline void Data::DecodeBuffer(bool fastDecode, int verbose){
   /// verbose : 0 = off, 1 = only energy + timestamp, 2 = show header, 3 = wave 
+  std::lock_guard<std::mutex> lock(rateMTX); // the Run Monitor takes the counters between buffers
   
   if( buffer == NULL ) {
     if( verbose >= 1 ) printf(" buffer is empty \n");

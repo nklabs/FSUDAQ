@@ -320,7 +320,7 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     QLabel * lbFileSize = new QLabel("File size : ", this);
     lbFileSize->setAlignment(Qt::AlignRight | Qt::AlignCenter);
     sbFileSizeMB = new RSpinBox(this, 0);
-    sbFileSizeMB->setRange(10, 1000000);
+    sbFileSizeMB->setRange(10, 4000); // below 4 GiB: the offline reader (Aux/fsuReader.h) keeps its file position in 32 bits
     sbFileSizeMB->setSingleStep(10);
     sbFileSizeMB->setValue(MaxSaveFileSize / 1024 / 1024);
     sbFileSizeMB->setSuffix(" MB");
@@ -1288,9 +1288,11 @@ void FSUDAQ::UpdateScalar(){
     // digiMTX[iDigi].lock();
 
     Data * data = digi[iDigi]->GetData();
+    Data::RateCounters rc;
+    data->TakeRateCounters(rc); // this interval's counters, zeroed in the same step
 
     // readout diagnostics, grey; problems in red
-    lbAggCount[iDigi]->setText(QString::number(data->AggCount) + " agg · " + QString::number(readDataThread[iDigi]->GetReadCount()) + " reads");
+    lbAggCount[iDigi]->setText(QString::number(rc.aggCount) + " agg · " + QString::number(readDataThread[iDigi]->GetReadCount()) + " reads");
     QStringList problems;
     QStringList stuck;              // channels whose flags are not written, filled below
     if( data->DecodeTruncated  > 0 ) problems << "cut " + QString::number(data->DecodeTruncated);   // reads that ended inside an aggregate (online decode only; the file is complete)
@@ -1306,13 +1308,19 @@ void FSUDAQ::UpdateScalar(){
     bool bLostSeen = false, bValid = false, bWait = false;
     for( int i = 0; i < nCh; i++){
       DeadTimeWindow & w = deadWin[iDigi][i];
-      const uint32_t cnt = data->CountsSinceRate[i];
-      const uint32_t nf  = data->Flag1024SinceRate[i];
-      const uint32_t cAt = data->CountsAtFlagSinceRate[i];
+      const uint32_t cnt = rc.counts[i];
+      const uint32_t nf  = rc.flag1024[i];
+      const uint32_t cAt = rc.countsAtFlag[i];
       if( dtMs <= 0 ) w = DeadTimeWindow();   // first refresh after a start: its flags still count from the start
       const double ms = std::max<qint64>(dtMs, 0);
       boardCounts += cnt;
-      w.lostFlags += data->LostFlagSinceRate[i]; w.lostNFlags += data->LostNFlagSinceRate[i];
+      // the counting below assumes a flag every 1024 triggers: 0x1n84 [17:16] = 00 (01: 128, 10: 8192)
+      if( digi[iDigi]->GetDPPType() == DPPTypeCode::DPP_PSD_CODE && ((digi[iDigi]->GetSettingFromMemory(DPP::PSD::DPPAlgorithmControl2_G, i) >> 16) & 0x3) != 0 ){
+        w = DeadTimeWindow();
+        w.state = DeadTimeWindow::OtherStep;
+        continue;
+      }
+      w.lostFlags += rc.lostFlag[i]; w.lostNFlags += rc.lostNFlag[i];
       w.ms += ms;
       if( nf > 0 ){
         const uint64_t upToFlag = w.sinceFlag + cAt;   // events from the previous flag up to this interval's newest flag
@@ -1359,7 +1367,7 @@ void FSUDAQ::UpdateScalar(){
 
     if( dtMs > 0 ){
       double countsRate = boardCounts * 1000. / dtMs;
-      double bytesRate = data->ReadBytesSinceRate * 1000. / dtMs;
+      double bytesRate = rc.readBytes * 1000. / dtMs;
       totalEventRate += countsRate;
       totalBytesRate += bytesRate;
       lbBoardValue[iDigi][0]->setText("<b>" + RateText(countsRate) + "</b>");
@@ -1383,12 +1391,12 @@ void FSUDAQ::UpdateScalar(){
     for( int i = 0; i < nCh; i++){
       if( digi[iDigi]->GetInputChannelOnOff(i) == false ) continue;
       const DeadTimeWindow & w = deadWin[iDigi][i];
-      const double countsRate = dtMs > 0 ? data->CountsSinceRate[i] * 1000. / dtMs : -1;
+      const double countsRate = dtMs > 0 ? rc.counts[i] * 1000. / dtMs : -1;
       leTrigger[iDigi][i]->setText(countsRate >= 0 ? RateText(countsRate) : "");
       QString input, missed, lost, inputStyle = InputCellStyle, missedStyle, lostStyle;
       if( dtMs <= 0 ){
         // nothing yet
-      }else if( !flagsOK ){
+      }else if( !flagsOK || w.state == DeadTimeWindow::OtherStep ){
         input = missed = lost = "n/a";
       }else if( w.state == DeadTimeWindow::BadFlags ){
         input = "bad flags"; missed = lost = "–";
@@ -1414,7 +1422,6 @@ void FSUDAQ::UpdateScalar(){
       }
     }
 
-    digi[iDigi]->GetData()->CalTriggerRate(); //this resets NumEventDecode, AggCount, EventsSinceRate, ReadBytesSinceRate and the Counts/flag counters
     if( chkSaveData->isChecked() ) totalFileSize += digi[iDigi]->GetData()->GetTotalFileSize();
     // digiMTX[iDigi].unlock();
     // printf("============= end of  FSUDAQ::%s\n", __func__);
@@ -1979,6 +1986,21 @@ void FSUDAQ::StopPressed(){
   needManualComment = true;
   StopACQ();
   EndSeries(series.active ? "Stop pressed" : "");
+}
+
+void FSUDAQ::ShutdownOnSignal(int sig){
+  LogMsg("<font style=\"color: red;\">Signal " + QString::number(sig) + " (" + QString(strsignal(sig)) + "): stopping and closing FSUDAQ.</font>");
+  if( inDataRun ){
+    runTimer->stop();
+    pauseTimer->stop();
+    needManualComment = false;
+    abortComment = "Run stopped by FSUDAQ: signal " + QString(strsignal(sig)) + ".";
+    StopACQ();
+    abortComment.clear();
+    needManualComment = true;
+  }
+  EndSeries("FSUDAQ is closing");
+  QCoreApplication::quit(); // the main window's destructor closes the digitizers
 }
 
 void FSUDAQ::EndSeries(const QString & why){

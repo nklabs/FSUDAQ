@@ -19,6 +19,7 @@
 #include <functional>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <csignal>
 
 #include "FSUDAQ.h"
 #include "fake_caen.h"
@@ -297,6 +298,26 @@ public:
     w->CloseDigitizers();
   }
 
+  void SignalStopsRunProperly(){
+    printf("== SIGTERM during a run: the run is read out, recorded as stopped by the signal\n");
+    NewWorkDir(); AddBoards(100, 2); NewFSUDAQ();
+    for( int s : Serials ) fake_caen_set_read_delay(s, 1000);
+    Open();
+    w->chkSaveData->setChecked(true);
+    dialogs.clear();
+    w->AutoRun();
+    Pump(800);
+    QString runDir = w->RunFolder();
+    w->ShutdownOnSignal(SIGTERM);   // what the signal pipe in main.cpp calls
+    CHECK(!w->inDataRun, "still in a run after SIGTERM");
+    CheckAllSaved(QStringList() << runDir, "SIGTERM");
+    QStringList rec = RecordLines();
+    CHECK(rec.size() == 2 && rec[1].contains("signal"), "stop record: %s", qPrintable(rec.join(" / ")));
+    CHECK(dialogs.isEmpty(), "dialogs during the shutdown: %s", qPrintable(dialogs.join(" | ")));
+    if( nFail == 0 ) OK("all data saved, record names the signal, no dialog in the way");
+    w->CloseDigitizers();
+  }
+
   void ScopeKeepsSaveData(){
     printf("== opening and closing the scope leaves Save Data as it was\n");
     NewWorkDir(); AddBoards(); NewFSUDAQ();
@@ -347,6 +368,7 @@ int main(int argc, char ** argv){
   t.ReadFailureStopsRun();
   t.WriteFailureStopsRun();
   t.RepeatedRuns();
+  t.SignalStopsRunProperly();
   t.ScopeKeepsSaveData();
 
   delete t.w;

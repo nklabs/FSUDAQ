@@ -13,9 +13,18 @@ ulimit -c unlimited
 
 # CAEN's library keeps per-link locks as plain mutexes in /dev/shm (CAENV_LCK_*). A DAQ
 # process that dies inside a library call leaves them locked, and every later open of that
-# link hangs for ever (seen 29 Sep 2026). Clear them when no CAEN program is running.
-if ! pgrep -x FSUDAQ_Qt6 >/dev/null && ! pgrep -x CoMPASS >/dev/null && ! pgrep -x CAENDPPServer >/dev/null; then
-  rm -f /dev/shm/CAENV_LCK_*
+# link hangs for ever (seen 29 Sep 2026). Clear them only when no process holds them open or
+# mapped (any CAEN program: wavedump, Python, CoMPASS under java, ...) and no FSUDAQ, CoMPASS
+# or CAENDPPServer runs.
+locks=(/dev/shm/CAENV_LCK_*)
+if [[ -e "${locks[0]}" ]]; then
+  if pgrep -x FSUDAQ_Qt6 >/dev/null || pgrep -x CoMPASS >/dev/null || pgrep -x CAENDPPServer >/dev/null; then
+    echo "CAEN lock files kept: a CAEN program is running."
+  elif command -v fuser >/dev/null && fuser -s "${locks[@]}" 2>/dev/null; then
+    echo "CAEN lock files kept: in use by process(es) $(fuser "${locks[@]}" 2>/dev/null | tr -s ' ')."
+  else
+    rm -f "${locks[@]}"
+  fi
 fi
 
 echo "FSUDAQ, save stdout+stderr to $outFile"
