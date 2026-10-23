@@ -27,6 +27,8 @@ typedef struct {
   int overflows;       // ReadData calls whose data did not fit the readout buffer
   int flushes;         // forced data flushes (0x8040 / 0x1n40 written)
   int running;
+  long startSeq;       // order of the last SWStart / SWStop over all boards (1, 2, ...; 0 = never)
+  long stopSeq;
 } fake_caen_stats;
 
 // Add a board. link: 0 = USB (num = USB link), 1 = optical (num = port, node = daisy-chain index).
@@ -52,10 +54,18 @@ void fake_caen_set_read_delay(int serial, int microseconds);
 size_t fake_caen_handed_out(int serial, const uint32_t ** words);
 // Make the next calls fail: what = "malloc" (MallocReadoutBuffer), "write" (WriteRegister),
 // "read" (ReadData), "hang" (ReadData blocks until cleared, like a call stuck in the driver),
-// "reopen" (the board opens once, then no more), 0 or "" to clear.
+// "reopen" (the board opens once, then no more), "stopread" (ReadData fails once the board is
+// stopped: a problem only the stop finds), "overread" (ReadData says it read more than the buffer
+// holds), 0 or "" to clear.
 void fake_caen_fail(int serial, const char * what);
 // A write to this address returns success but is lost (a write dropped on the link); 0 = none.
 void fake_caen_drop_write(int serial, uint32_t address);
+// At a stop the board holds nHeld aggregates still being filled (default 1, generated data only);
+// they are read only after a forced data flush, which makes them readable one every latencyMs
+// (default 0: all at once).
+void fake_caen_set_flush(int serial, int nHeld, int latencyMs);
+// Forget what the board handed out, cleared and flushed so far (a refused start that ran it briefly).
+void fake_caen_forget(int serial);
 
 #ifdef __cplusplus
 }

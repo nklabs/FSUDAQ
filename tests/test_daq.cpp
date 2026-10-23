@@ -23,6 +23,7 @@
 #include <functional>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 #include <csignal>
 
 #include "FSUDAQ.h"
@@ -85,6 +86,7 @@ public:
     w = new FSUDAQ();
     w->chkSkipComment->setChecked(true);
     w->chkAutoDashboard->setChecked(false);
+    w->chkAutoIncrement->setChecked(true);   // an earlier scenario may have left it off
   }
 
   void Open(){
@@ -182,15 +184,42 @@ public:
     fake_caen_stats st; fake_caen_get_stats(15880, &st);
     long behind = st.aggAcquired - st.aggRead;
     CHECK(behind > 0, "the readout did not fall behind; the test cannot see data left on the board");
+    {
+      usleep(200000);   // no event processing: the Run Monitor takes nothing meanwhile
+      Data::RateCounters rc1, rc2;
+      w->digi[0]->GetData()->TakeRateCounters(rc1);
+      w->digi[0]->GetData()->TakeRateCounters(rc2);
+      uint64_t n1 = 0, n2 = 0;
+      for( int ch = 0; ch < MaxNChannels; ch++ ){ n1 += rc1.counts[ch]; n2 += rc2.counts[ch]; }
+      CHECK(n1 > 0 && n2 < n1, "rate counters not zeroed when taken: %lu events, then %lu", (unsigned long) n1, (unsigned long) n2);
+    }
     w->StopPressed();
     CHECK(!w->inDataRun, "still in a run after Stop");
     CheckAllSaved(QStringList() << runDir, "run 1");
+    for( unsigned int i = 0; i < w->nDigi; i++ ){
+      int s = w->digi[i]->GetSerialNumber();
+      qint64 onDisk = 0;
+      for( auto & f : QDir(runDir).entryList(QStringList() << ("*_" + QString::number(s) + "_PSD_2_*.fsu"), QDir::Files) ) onDisk += QFileInfo(runDir + "/" + f).size();
+      CHECK((qint64) w->digi[i]->GetData()->GetTotalFileSize() == onDisk, "Digi-%d: %lu bytes counted, %lld on disk", s, (unsigned long) w->digi[i]->GetData()->GetTotalFileSize(), (long long) onDisk);
+    }
+    w->StopACQ(); w->StopPressed();   // nothing running: no second stop record
+    CHECK(RecordLines().size() == 2, "a stop with nothing running was recorded: %lld lines", (long long) RecordLines().size());
     CHECK(NumFiles(runDir, 15880) >= 2, "no roll-over: %d file(s) for Digi-15880", NumFiles(runDir, 15880));
     QStringList rec = RecordLines();
     CHECK(rec.size() == 2 && rec[0].startsWith("Start Run | 1 |") && rec[1].startsWith(" Stop Run | 1 |"), "run record: %s", qPrintable(rec.join(" / ")));
     for( int s : Serials ) CHECK(QFile::exists(runDir + "/temp_001_" + QString::number(s) + "_PSD.bin"), "no settings snapshot for Digi-%d", s);
     CHECK(dialogs.isEmpty(), "dialogs: %s", qPrintable(dialogs.join(" | ")));
     if( nFail == 0 ) OK("6 boards, %d files for Digi-15880, record and snapshots in place; %ld aggregates were still on Digi-15880 at Stop", NumFiles(runDir, 15880), behind);
+
+    // the next number already on disk (a stale lastRun.sh): "Go back" (the default) gives the number back
+    int failBefore = nFail;
+    w->runID = 0; w->leRunID->setText("0");
+    dialogs.clear();
+    w->AutoRun();
+    CHECK(!w->inDataRun && Dialogs("Run number already used") == 1, "no question, or the run started over run 1");
+    CHECK(w->runID == 0 && w->leRunID->text() == "0", "after Go back the run number is %u (field \"%s\"), expected 0", w->runID, qPrintable(w->leRunID->text()));
+    CHECK(RecordLines().size() == 2, "Go back was recorded");
+    if( nFail == failBefore ) OK("run number on disk: Go back keeps run 1's files and gives the number back");
     w->CloseDigitizers();
   }
 
@@ -208,6 +237,7 @@ public:
     CHECK(w->runID == 0, "run number consumed: %u", w->runID);
     CHECK(QDir(dataPath).entryList(QStringList() << "temp_*", QDir::Dirs).isEmpty(), "files of the refused run were left");
     CHECK(RecordLines().isEmpty(), "the refused run was recorded");
+    for( int s : Serials ) fake_caen_forget(s);   // Digi-30508 (started before 1443) ran briefly; that was cleared on purpose
     fake_caen_fail(1443, "");
     dialogs.clear();
     w->AutoRun();
@@ -486,6 +516,142 @@ public:
     w->CloseDigitizers();
   }
 
+  void StartStopOrder(){
+    printf("== the master (first board) starts last and stops first; the others stop once it has stopped\n");
+    NewWorkDir(); AddBoards(); NewFSUDAQ();
+    fake_caen_set_synthetic(Serials[0], 100, 0.05);  // the master always has an aggregate waiting and
+    fake_caen_set_read_delay(Serials[0], 30000);     // is in a 30 ms block transfer when Stop comes
+    Open();
+    w->chkSaveData->setChecked(true);
+    dialogs.clear();
+    w->AutoRun();
+    Pump(300);
+    QString runDir = w->RunFolder();
+    w->StopPressed();
+    fake_caen_stats m; fake_caen_get_stats(Serials[0], &m);
+    for( int i = 1; i < 6; i++ ){
+      fake_caen_stats st; fake_caen_get_stats(Serials[i], &st);
+      CHECK(st.startSeq > 0 && st.startSeq < m.startSeq, "Digi-%d started after the master (%ld, master %ld)", Serials[i], st.startSeq, m.startSeq);
+      CHECK(st.stopSeq > m.stopSeq, "Digi-%d stopped before the master (%ld, master %ld)", Serials[i], st.stopSeq, m.stopSeq);
+    }
+    CheckAllSaved(QStringList() << runDir, "start/stop order");
+    if( nFail == 0 ) OK("master started last, stopped first, all data saved");
+    w->CloseDigitizers();
+  }
+
+  void DrainWaitsForFlushedData(){
+    printf("== after the flush the last aggregates come in late and one by one: the stop still reads them all\n");
+    NewWorkDir(); AddBoards(); NewFSUDAQ();
+    for( int s : Serials ) fake_caen_set_flush(s, 3, 70);   // readable 70, 140, 210 ms after the flush
+    Open();
+    w->chkSaveData->setChecked(true);
+    dialogs.clear();
+    w->AutoRun();
+    Pump(500);
+    QString runDir = w->RunFolder();
+    w->StopPressed();
+    CheckAllSaved(QStringList() << runDir, "late flush");
+    CHECK(dialogs.isEmpty(), "dialogs: %s", qPrintable(dialogs.join(" | ")));
+    if( nFail == 0 ) OK("every held aggregate read and saved");
+    w->CloseDigitizers();
+  }
+
+  void ProblemAtStopEndsSeries(){
+    printf("== a problem only the stop finds, in a timed series: one dialog, the series ends, no next run\n");
+    NewWorkDir(); AddBoards(20, 1); NewFSUDAQ();
+    Open();
+    w->chkSaveData->setChecked(true);
+    w->sbRunTimeMin->setDecimals(3);
+    w->sbRunTimeMin->setValue(0.01);
+    w->chkRepeatRun->setChecked(true);
+    w->sbRepeatPauseSec->setValue(1);
+    fake_caen_fail(62839, "stopread");   // the readout after the stop fails
+    dialogs.clear();
+    w->AutoRun();
+    CHECK(w->inDataRun && w->runID == 1, "run 1 did not start");
+    CHECK(WaitFor([&](){ return !w->inDataRun && !w->series.active; }, 5000), "the series did not end after the run with a problem");
+    Pump(2000);                            // longer than the pause
+    CHECK(!w->inDataRun && w->runID == 1 && !w->pauseTimer->isActive(), "a next run started (run %u)", w->runID);
+    CHECK(Dialogs("Problems in the run") == 1 && dialogs.size() == 1, "not exactly one dialog (%s)", qPrintable(dialogs.join(" | ")));
+    QStringList rec = RecordLines();
+    CHECK(rec.size() == 2 && rec[1].contains("62839"), "stop record: %s", qPrintable(rec.join(" / ")));
+    CHECK(w->bnStartACQ->isEnabled(), "Start not enabled after the series ended");
+    fake_caen_fail(62839, "");
+    if( nFail == 0 ) OK("the series ends at the run with the problem, recorded, one dialog");
+    w->CloseDigitizers();
+  }
+
+  void FailureInSeriesEndsSeries(){
+    printf("== a board stops answering in a timed series: the run is stopped, the series ends\n");
+    NewWorkDir(); AddBoards(20, 1); NewFSUDAQ();
+    Open();
+    w->chkSaveData->setChecked(true);
+    w->sbRunTimeMin->setDecimals(3);
+    w->sbRunTimeMin->setValue(0.05);   // 3 s
+    w->chkRepeatRun->setChecked(true);
+    w->sbRepeatPauseSec->setValue(1);
+    dialogs.clear();
+    w->AutoRun();
+    Pump(300);
+    fake_caen_fail(58918, "read");
+    CHECK(WaitFor([&](){ return !w->inDataRun; }, 5000), "the run went on");
+    Pump(4500);                          // past the run time and the pause
+    CHECK(!w->series.active && !w->inDataRun && w->runID == 1 && !w->pauseTimer->isActive(), "the series went on (run %u)", w->runID);
+    CHECK(Dialogs("Run stopped") == 1 && dialogs.size() == 1, "not exactly one alarm (%s)", qPrintable(dialogs.join(" | ")));
+    CHECK(RecordLines().size() == 2, "%lld record lines", (long long) RecordLines().size());
+    CHECK(w->bnStartACQ->isEnabled(), "Start not enabled after the series ended");
+    fake_caen_fail(58918, "");
+    if( nFail == 0 ) OK("one alarm, the series ended, Start available");
+    w->CloseDigitizers();
+  }
+
+  void DataFileCannotGrow(){
+    printf("== a data file that cannot grow (disk full): the run is stopped, the file ends on a whole read\n");
+    NewWorkDir(); AddBoards(100, 2); NewFSUDAQ();
+    Open();
+    w->chkSaveData->setChecked(true);
+    w->sbFileSizeMB->setValue(1000);
+    struct rlimit old; getrlimit(RLIMIT_FSIZE, &old);
+    struct rlimit lim = old; lim.rlim_cur = 48u << 20;   // no file grows past 48 MB: a write there fails (EFBIG)
+    signal(SIGXFSZ, SIG_IGN);
+    setrlimit(RLIMIT_FSIZE, &lim);
+    dialogs.clear();
+    w->AutoRun();
+    QString runDir = w->RunFolder();
+    bool stopped = WaitFor([&](){ return !w->inDataRun; }, 15000);
+    setrlimit(RLIMIT_FSIZE, &old);
+    signal(SIGXFSZ, SIG_DFL);
+    CHECK(stopped, "the run went on without saving");
+    CHECK(Dialogs("Run stopped") == 1 && dialogs.size() == 1, "not exactly one alarm (%s)", qPrintable(dialogs.join(" | ")));
+    QStringList rec = RecordLines();
+    CHECK(rec.size() == 2 && rec[1].contains("cannot write"), "stop record: %s", qPrintable(rec.join(" / ")));
+    for( int s : Serials ){                // what is on disk is the start of what the board gave, cut at a whole read
+      std::vector<uint32_t> saved = Saved(runDir, s);
+      const uint32_t * out; size_t n = fake_caen_handed_out(s, &out);
+      CHECK(saved.size() > 0 && saved.size() <= n && memcmp(saved.data(), out, saved.size() * 4) == 0, "Digi-%d: the file is not the start of the data (%zu of %zu words)", s, saved.size(), n);
+    }
+    if( nFail == 0 ) OK("stopped, the record says the file cannot be written, the files hold whole reads");
+    w->CloseDigitizers();
+  }
+
+  void ReadLongerThanBuffer(){
+    printf("== the library reports more bytes than the readout buffer holds: the run is stopped\n");
+    NewWorkDir(); AddBoards(); NewFSUDAQ();
+    Open();
+    w->chkSaveData->setChecked(true);
+    dialogs.clear();
+    w->AutoRun();
+    Pump(300);
+    fake_caen_fail(1443, "overread");
+    CHECK(WaitFor([&](){ return !w->inDataRun; }, 5000), "the run went on");
+    CHECK(Dialogs("Run stopped") == 1 && dialogs.size() == 1, "not exactly one alarm (%s)", qPrintable(dialogs.join(" | ")));
+    QStringList rec = RecordLines();
+    CHECK(rec.size() == 2 && rec[1].contains("1443"), "stop record: %s", qPrintable(rec.join(" / ")));
+    fake_caen_fail(1443, "");
+    if( nFail == 0 ) OK("stopped with one alarm, the record names the board");
+    w->CloseDigitizers();
+  }
+
   void ScopeKeepsSaveData(){
     printf("== opening and closing the scope leaves Save Data as it was\n");
     NewWorkDir(); AddBoards(); NewFSUDAQ();
@@ -548,6 +714,12 @@ int main(int argc, char ** argv){
   t.OverwriteUndoneIfStartFails();
   t.BoardThatDoesNotReopen();
   t.ScopeKeepsSaveData();
+  t.StartStopOrder();
+  t.DrainWaitsForFlushedData();
+  t.ProblemAtStopEndsSeries();
+  t.FailureInSeriesEndsSeries();
+  t.DataFileCannotGrow();
+  t.ReadLongerThanBuffer();
 
   delete t.w;
   QDir(t.work).removeRecursively();

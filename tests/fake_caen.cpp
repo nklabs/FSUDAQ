@@ -37,15 +37,22 @@ struct Board {
   long startIndex = 0;
   int synthEvents = 0;                   // > 0: generate the data
   long held = 0;                         // after a stop: aggregates still being filled, read only after a forced data flush
+  long heldMax = 1;                      // how many a stop leaves being filled
+  int flushLatencyMs = 0;                // after the flush, one held aggregate becomes readable every this many ms
+  bool flushed = false;
+  std::chrono::steady_clock::time_point flushAt{};
   int readDelayUs = 0;                   // time a ReadData with data takes
   uint32_t dropWrite = 0;                // a write to this address is lost
   std::shared_ptr<std::atomic<bool>> hang = std::make_shared<std::atomic<bool>>(false);  // ReadData blocks (set from the test thread)
   std::shared_ptr<std::atomic<bool>> readFail = std::make_shared<std::atomic<bool>>(false);
+  std::shared_ptr<std::atomic<bool>> stopReadFail = std::make_shared<std::atomic<bool>>(false);
+  std::shared_ptr<std::atomic<bool>> overRead = std::make_shared<std::atomic<bool>>(false);
   int opens = 0;
   std::vector<uint32_t> handedOut;       // everything ReadData gave
 };
 
 std::vector<Board> boards;
+std::atomic<long> sequence{0};           // SWStart / SWStop calls over all boards (readout threads call SWStop)
 
 uint32_t Sentinel(uint32_t address) { return 0xDEAD0000u | ((address >> 2) & 0xFFFF); }
 
@@ -100,8 +107,18 @@ long Acquired(Board & b) {
   return n < total ? n : total;
 }
 
+// held aggregates not yet readable
+long Unreleased(Board & b) {
+  if( !b.flushed ) return b.held;
+  if( b.flushLatencyMs <= 0 ) return 0;
+  long ms = (long) std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - b.flushAt).count();
+  long n = b.held - ms / b.flushLatencyMs;
+  return n > 0 ? n : 0;
+}
+
 void Clear(Board & b) {
   b.held = 0;
+  b.flushed = false;
   long acq = b.st.running ? Acquired(b) : b.st.aggAcquired;
   if( acq > b.st.aggRead ){ b.st.aggCleared += acq - b.st.aggRead; b.st.aggRead = acq; }
 }
@@ -127,7 +144,11 @@ void Write(Board & b, uint32_t a, uint32_t v) {
   if( IsReadOnly(a) ) return;
   if( a == 0xEF24 || a == 0xEF34 ){ ResetRegisters(b); return; }
   if( a == 0xEF28 ){ Clear(b); return; }
-  if( a == 0x8040 || (a >= 0x1000 && a < 0x2000 && (a & 0xFF) == 0x40) ){ b.held = 0; b.st.flushes++; return; }   // DPP-PSD forced data flush
+  if( a == 0x8040 || (a >= 0x1000 && a < 0x2000 && (a & 0xFF) == 0x40) ){   // DPP-PSD forced data flush
+    b.st.flushes++;
+    if( !b.flushed && b.held > 0 ){ b.flushed = true; b.flushAt = std::chrono::steady_clock::now(); }
+    return;
+  }
   if( IsWriteOnlyAction(a) ) return;
   if( IsBroadcast(a) ){
     for( int ch = 0; ch < b.nCh; ch++ ) b.reg[(a - 0x7000) + (ch << 8)] = v;
@@ -234,7 +255,21 @@ extern "C" size_t fake_caen_handed_out(int serial, const uint32_t ** words) {
   return b->handedOut.size();
 }
 
-extern "C" void fake_caen_reset_all(void) { boards.clear(); }
+extern "C" void fake_caen_set_flush(int serial, int nHeld, int latencyMs) {
+  Board * b = FromSerial(serial);
+  if( b ){ b->heldMax = nHeld; b->flushLatencyMs = latencyMs; }
+}
+
+extern "C" void fake_caen_forget(int serial) {
+  Board * b = FromSerial(serial);
+  if( !b ) return;
+  b->handedOut.clear();
+  b->st.aggCleared = 0;
+  b->st.flushes = 0;
+  b->st.overflows = 0;
+}
+
+extern "C" void fake_caen_reset_all(void) { boards.clear(); sequence = 0; }
 
 extern "C" uint32_t fake_caen_reg(int serial, uint32_t address) {
   Board * b = FromSerial(serial);
@@ -262,6 +297,8 @@ extern "C" void fake_caen_fail(int serial, const char * what) {
   b->fail = what ? what : "";
   b->hang->store(b->fail == "hang");
   b->readFail->store(b->fail == "read");
+  b->stopReadFail->store(b->fail == "stopread");
+  b->overRead->store(b->fail == "overread");
 }
 
 extern "C" void fake_caen_drop_write(int serial, uint32_t address) {
@@ -386,6 +423,7 @@ CAEN_DGTZ_ErrorCode CAEN_DGTZ_SWStartAcquisition(int handle) {
   BOARD_OR_FAIL;
   if( b->st.running ) return CAEN_DGTZ_Success;
   b->st.running = 1;
+  b->st.startSeq = ++sequence;
   b->t0 = std::chrono::steady_clock::now();
   b->startIndex = b->st.aggAcquired;
   return CAEN_DGTZ_Success;
@@ -394,7 +432,11 @@ CAEN_DGTZ_ErrorCode CAEN_DGTZ_SWStopAcquisition(int handle) {
   BOARD_OR_FAIL;
   if( b->st.running ){
     b->st.aggAcquired = Acquired(*b); b->st.running = 0;
-    b->held = (b->synthEvents > 0 && b->st.aggAcquired > b->st.aggRead) ? 1 : 0;   // the aggregate being filled
+    b->st.stopSeq = ++sequence;
+    // the aggregates still being filled (a quiet couple's partial buffer): taken, readable only after a flush
+    b->held = b->synthEvents > 0 ? b->heldMax : 0;
+    b->st.aggAcquired += b->held;
+    b->flushed = false;
   }
   return CAEN_DGTZ_Success;
 }
@@ -403,9 +445,10 @@ CAEN_DGTZ_ErrorCode CAEN_DGTZ_ClearData(int handle) { BOARD_OR_FAIL; Clear(*b); 
 // Hands out up to MaxAggregatePerBlockTransfer board aggregates the board has taken and not yet given.
 CAEN_DGTZ_ErrorCode CAEN_DGTZ_ReadData(int handle, CAEN_DGTZ_ReadMode_t mode, char * buffer, uint32_t * bufferSize) {
   (void) mode; BOARD_OR_FAIL;
-  if( b->readFail->load() ){ *bufferSize = 0; return CAEN_DGTZ_CommError; }
+  if( b->readFail->load() || (b->stopReadFail->load() && !b->st.running) ){ *bufferSize = 0; return CAEN_DGTZ_CommError; }
   while( b->hang->load() ) usleep(10000);      // stuck in the driver until the test lets it go
-  long acq = b->st.running ? Acquired(*b) : b->st.aggAcquired - b->held;
+  if( b->overRead->load() ){ *bufferSize = b->allocated + 4; return CAEN_DGTZ_Success; }   // a size the buffer cannot hold
+  long acq = b->st.running ? Acquired(*b) : b->st.aggAcquired - Unreleased(*b);
   long perBLT = Read(*b, 0xEF1C) & 0x3FF;
   if( perBLT <= 0 ) perBLT = 1;
   uint32_t bytes = 0;
