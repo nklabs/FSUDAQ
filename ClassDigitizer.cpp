@@ -47,7 +47,10 @@ void Digitizer::Initalization(){
   isSettingFileExist = false;
   isSettingFileUpdate = false;
   settingFile = NULL;
-  
+  hasOverThresholdWidth = false;
+  programmedFromFile = false;
+  memset(setting, 0, sizeof(setting));
+
   ret = -1;
   isConnected = false; 
   AcqRun = false;
@@ -125,7 +128,9 @@ int Digitizer::OpenDigitizer(int boardID, int portID, bool program, bool verbose
     ///----- Getting Board Info
     ret = (int) CAEN_DGTZ_GetInfo(handle, &BoardInfo);
     if (ret != 0) {
-      if( verbose) printf("Can't read board info\n");
+      printf("Board %d, port %d answered but its board info could not be read; not used.\n", boardID, portID);
+      CAEN_DGTZ_CloseDigitizer(handle);
+      return -1;
     }else{
       isConnected = true;
       NumRegChannel = BoardInfo.Channels;
@@ -206,8 +211,8 @@ int Digitizer::OpenDigitizer(int boardID, int portID, bool program, bool verbose
   /// change address 0xEF08 (5 bits), this will reflected in the 2nd word of the Board Agg. header.
   ret = CAEN_DGTZ_WriteRegister(handle, DPP::BoardID, (DPPType & 0xF));
 
-  //TODO somehow the bdInfo does not work, use DPPType to set it
-  uint32_t bdInfo = GetSettingFromMemory(DPP::BoardInfo_R);
+  uint32_t bdInfo = 0; // memory size code in [15:8]; read from the board, the settings are not in memory yet
+  CAEN_DGTZ_ReadRegister(handle, DPP::BoardInfo_R, &bdInfo);
   uint32_t haha = ((bdInfo >> 8 ) & 0xFF);
   // printf("------- 0x%08X = %u \n", bdInfo, haha);
   switch(haha) {
@@ -810,7 +815,8 @@ void Digitizer::WriteRegister (Reg registerAddress, uint32_t value, int ch, bool
   }
   
   if( registerAddress.GetRWType() == RW::ReadONLY ) return;
-  if( !hasOverThresholdWidth && registerAddress == DPP::QDC::OverThresholdWidth ) return ;
+  // QDC firmware too old for the over-threshold width; on PSD boards the same address is the PUR-GAP threshold
+  if( DPPType == DPPTypeCode::DPP_QDC_CODE && !hasOverThresholdWidth && registerAddress == DPP::QDC::OverThresholdWidth ) return ;
   
   ret = CAEN_DGTZ_WriteRegister(handle, registerAddress.ActualAddress(ch), value);
 
@@ -855,7 +861,7 @@ uint32_t Digitizer::ReadRegister(Reg registerAddress, unsigned short ch, bool is
   if( registerAddress.GetRWType() == RW::WriteONLY ) return 0;
   // if( registerAddress == DPP::QDC::RecordLength_W ) return 0;
 
-  if( !hasOverThresholdWidth && registerAddress == DPP::QDC::OverThresholdWidth ) return 0;
+  if( DPPType == DPPTypeCode::DPP_QDC_CODE && !hasOverThresholdWidth && registerAddress == DPP::QDC::OverThresholdWidth ) return 0;
 
   ret = CAEN_DGTZ_ReadRegister(handle, registerAddress.ActualAddress(ch), &returnData);
   
@@ -894,60 +900,16 @@ uint32_t Digitizer::PrintRegister(uint32_t address, std::string msg){
 }
 
 //========================================== setting file IO
-Reg Digitizer::FindRegister(uint32_t address){
-  
-  Reg tempReg;  
-  ///========= Find Match Register
-  if( DPPType == DPPTypeCode::DPP_PHA_CODE || DPPType == DPPTypeCode::DPP_PSD_CODE ){
-    for( int p = 0; p < (int) RegisterBoardList_PHAPSD[p]; p++){
-      if( address == RegisterBoardList_PHAPSD[p].GetAddress() ) {
-        tempReg = RegisterBoardList_PHAPSD[p];
-        break;
-      }
-    }
-    if( tempReg.GetName() == ""){
-      if( DPPType == V1730_DPP_PHA_CODE ){
-        for( int p = 0; p < (int) RegisterChannelList_PHA[p]; p++){
-          if( address == RegisterChannelList_PHA[p].GetAddress() ) {
-            tempReg = RegisterChannelList_PHA[p];
-            break;
-          }
-        }
-      }
-      if( DPPType == V1730_DPP_PSD_CODE ){
-        for( int p = 0; p < (int) RegisterChannelList_PSD[p]; p++){
-          if( address == RegisterChannelList_PSD[p].GetAddress() ) {
-            tempReg = RegisterChannelList_PSD[p];
-            break;
-          }
-        }
-      }
-    }
-  }else{
-    for( int p = 0; p < (int) RegisterBoardList_QDC[p]; p++){
-      if( address == RegisterBoardList_QDC[p].GetAddress() ) {
-        tempReg = RegisterBoardList_QDC[p];
-        break;
-      }
-    }
-    for( int p = 0; p < (int) RegisterChannelList_QDC[p]; p++){
-      if( address == RegisterChannelList_QDC[p].GetAddress() ) {
-        tempReg = RegisterChannelList_QDC[p];
-        break;
-      }
-    }
-  }
-  
-  return tempReg;
-}
-
-void Digitizer::ReadAllSettingsFromBoard(bool force){
-  if( softwareDisable ) return;
-  if( AcqRun ) return;
-  if( !isConnected ) return;
-  if( isSettingFilledinMemeory && !force) return;
+int Digitizer::ReadAllSettingsFromBoard(bool force){
+  if( softwareDisable ) return 0;
+  if( AcqRun ) return 0;
+  if( !isConnected ) return 0;
+  if( isSettingFilledinMemeory && !force) return 0;
 
   printf("===== Digitizer(%d)::%s \n", GetSerialNumber(),  __func__);
+
+  int nFailed = 0;
+  auto Read = [&](Reg reg, int ch){ ReadRegister(reg, ch); if( ret != 0 ) nFailed++; };
 
   /// board setting
   if( DPPType == DPPTypeCode::DPP_PHA_CODE || DPPType == DPPTypeCode::DPP_PSD_CODE ){
@@ -955,22 +917,22 @@ void Digitizer::ReadAllSettingsFromBoard(bool force){
     for( int p = 0; p < (int) RegisterBoardList_PHAPSD.size(); p++){
       if( RegisterBoardList_PHAPSD[p].GetRWType() == RW::WriteONLY) continue;
       if( ModelType == ModelTypeCode::DT && RegisterBoardList_PHAPSD[p].GetAddress() == 0x81C4 ) continue;
-      ReadRegister(RegisterBoardList_PHAPSD[p]); 
+      Read(RegisterBoardList_PHAPSD[p], 0);
     }
     regChannelMask = GetSettingFromMemory(DPP::RegChannelEnableMask);
-    
+
     /// Channels Setting
     for( int ch = 0; ch < NumInputCh; ch ++){
       if( DPPType == V1730_DPP_PHA_CODE ){
         for( int p = 0; p < (int) RegisterChannelList_PHA.size(); p++){
           if( RegisterChannelList_PHA[p].GetRWType() == RW::WriteONLY) continue;
-          ReadRegister(RegisterChannelList_PHA[p], ch); 
+          Read(RegisterChannelList_PHA[p], ch);
         }
       }
       if( DPPType == V1730_DPP_PSD_CODE ){
         for( int p = 0; p < (int) RegisterChannelList_PSD.size(); p++){
           if( RegisterChannelList_PSD[p].GetRWType() == RW::WriteONLY) continue;
-          ReadRegister(RegisterChannelList_PSD[p], ch); 
+          Read(RegisterChannelList_PSD[p], ch);
         }
       }
     }
@@ -978,7 +940,7 @@ void Digitizer::ReadAllSettingsFromBoard(bool force){
   }else{
     for( int p = 0; p < (int) RegisterBoardList_QDC.size(); p++){
       if( RegisterBoardList_QDC[p].GetRWType() == RW::WriteONLY) continue;
-      ReadRegister(RegisterBoardList_QDC[p]); 
+      Read(RegisterBoardList_QDC[p], 0);
     }
 
     ReadQDCRecordLength();
@@ -988,7 +950,7 @@ void Digitizer::ReadAllSettingsFromBoard(bool force){
     for( int ch = 0; ch < GetNumRegChannels(); ch ++){
       for( int p = 0; p < (int) RegisterChannelList_QDC.size(); p++){
         if( RegisterChannelList_QDC[p].GetRWType() == RW::WriteONLY) continue;
-        ReadRegister(RegisterChannelList_QDC[p], ch); 
+        Read(RegisterChannelList_QDC[p], ch);
       }
     }
 
@@ -997,100 +959,124 @@ void Digitizer::ReadAllSettingsFromBoard(bool force){
   //printf("BoardID : 0x%X = DataFormat \n", GetSettingFromMemory(DPP::BoardID));
 
   isSettingFilledinMemeory = true;
+  if( nFailed > 0 ) printf("\033[31mDigi-%d: %d register read(s) failed; the settings in memory are incomplete.\033[0m\n", GetSerialNumber(), nFailed);
+  return nFailed;
 
 }
 
-void Digitizer::ProgramSettingsToBoard(){
-  DebugPrint("%s", "Digitizer");
-  if( softwareDisable ) return;
-  if( AcqRun ) return;
-  if( !isConnected || isDummy ) return;
-  
-  printf("========== %s \n", __func__);
+std::vector<std::pair<Reg, int>> Digitizer::ProgrammedRegisters(){
+  std::vector<std::pair<Reg, int>> list;
 
-  const short pauseMilliSec = 20;
-
-  Reg haha;
-  
   if( DPPType == DPPTypeCode::DPP_PHA_CODE || DPPType == DPPTypeCode::DPP_PSD_CODE ){
-  
-    /// board setting
-    //for( int p = 0; p < (int) RegisterBoardList_PHAPSD.size(); p++){
-    //  if( RegisterBoardList_PHAPSD[p].GetRWType() == RW::ReadWrite) {
-    //    haha = RegisterBoardList_PHAPSD[p];
-    //    WriteRegister(haha, GetSettingFromMemory(haha), -1, false); 
-    //    usleep(pauseMilliSec * 1000);
-    //  }
-    //}
+    /// board setting: every read/write board register that shapes the acquisition. Left out:
+    /// BoardID (written at open from the firmware type), the fan, and the VME relocation,
+    /// interrupt and scratch registers. Front-panel I/O before the LVDS registers it enables.
+    const std::vector<Reg> boardRegs = {
+      DPP::BoardConfiguration,
+      DPP::AcquisitionControl,
+      DPP::GlobalTriggerMask,
+      DPP::FrontPanelTRGOUTEnableMask,
+      DPP::FrontPanelIOControl,
+      DPP::FrontPanelLVDSIONewFeatures,
+      DPP::LVDSIOData,
+      DPP::VoltageLevelModeConfig,
+      DPP::AnalogMonitorMode,
+      DPP::RunStartStopDelay,
+      DPP::DisableExternalTrigger,
+      DPP::BufferOccupancyGain,
+      DPP::ExtendedVetoDelay,
+      DPP::ReadoutControl,
+      DPP::RegChannelEnableMask,
+    };
+    for( const Reg & r : boardRegs ){
+      if( ModelType == ModelTypeCode::DT && r.GetAddress() == DPP::ExtendedVetoDelay.GetAddress() ) continue; // not on desktop boards
+      list.push_back({r, -1});
+    }
 
-    haha = DPP::BoardConfiguration; WriteRegister(haha, GetSettingFromMemory(haha), -1, false);
-    haha = DPP::AcquisitionControl; WriteRegister(haha, GetSettingFromMemory(haha), -1, false);
-    haha = DPP::GlobalTriggerMask; WriteRegister(haha, GetSettingFromMemory(haha), -1, false);
-    haha = DPP::FrontPanelIOControl; WriteRegister(haha, GetSettingFromMemory(haha), -1, false);
-    haha = DPP::FrontPanelTRGOUTEnableMask; WriteRegister(haha, GetSettingFromMemory(haha), -1, false);
-    haha = DPP::RegChannelEnableMask; WriteRegister(haha, GetSettingFromMemory(haha), -1, false);
-
-    /// Channels Setting
+    /// Channels Setting; a coupled register belongs to the even channel of the pair
+    const std::vector<Reg> & chRegs = (DPPType == V1730_DPP_PHA_CODE) ? RegisterChannelList_PHA : RegisterChannelList_PSD;
     for( int ch = 0; ch < NumInputCh; ch ++){
-      if( DPPType == V1730_DPP_PHA_CODE ){
-        for( int p = 0; p < (int) RegisterChannelList_PHA.size(); p++){
-          if( RegisterChannelList_PHA[p].GetRWType() == RW::ReadWrite ){      
-            haha = RegisterChannelList_PHA[p];
-            WriteRegister(haha, GetSettingFromMemory(haha, ch), ch, false); 
-            usleep(pauseMilliSec * 1000);
-          }
-        }
-      }
-      if( DPPType == V1730_DPP_PSD_CODE ){
-        for( int p = 0; p < (int) RegisterChannelList_PSD.size(); p++){
-          if( RegisterChannelList_PSD[p].GetRWType() == RW::ReadWrite){
-            haha = RegisterChannelList_PSD[p];
-            WriteRegister(haha, GetSettingFromMemory(haha, ch), ch, false); 
-            usleep(pauseMilliSec * 1000);
-          }
-        }
+      for( const Reg & r : chRegs ){
+        if( r.GetRWType() != RW::ReadWrite ) continue;
+        if( r.IsCoupled() && ch % 2 ) continue;
+        list.push_back({r, ch});
       }
     }
 
-
   }else{
-    /// board setting
-    //for( int p = 0; p < (int) RegisterBoardList_QDC.size(); p++){
-    //  if( RegisterBoardList_QDC[p].GetRWType() == RW::ReadWrite) {
-    //    haha = RegisterBoardList_QDC[p];
-    //    WriteRegister(haha, GetSettingFromMemory(haha), -1, false); 
-    //    usleep(pauseMilliSec * 1000);
-    //  }
-    //}
-
-    haha = DPP::BoardConfiguration; WriteRegister(haha, GetSettingFromMemory(haha), -1, false);
-    haha = DPP::AcquisitionControl; WriteRegister(haha, GetSettingFromMemory(haha), -1, false);
-    haha = DPP::GlobalTriggerMask; WriteRegister(haha, GetSettingFromMemory(haha), -1, false);
-    haha = DPP::FrontPanelIOControl; WriteRegister(haha, GetSettingFromMemory(haha), -1, false);
-    haha = DPP::FrontPanelTRGOUTEnableMask; WriteRegister(haha, GetSettingFromMemory(haha), -1, false);
-    haha = DPP::QDC::GroupEnableMask; WriteRegister(haha, GetSettingFromMemory(haha), -1, false);
-    haha = DPP::QDC::RecordLength_W; WriteRegister(haha, GetSettingFromMemory(haha), -1, false);
-    // haha = DPP::QDC::NumberEventsPerAggregate; WriteRegister(haha, GetSettingFromMemory(haha), -1, false);
-
-    haha = DPP::DecimationFactor; WriteRegister(haha, GetSettingFromMemory(haha), -1, false);
+    for( const Reg & r : {DPP::BoardConfiguration, DPP::AcquisitionControl, DPP::GlobalTriggerMask, DPP::FrontPanelIOControl,
+                          DPP::FrontPanelTRGOUTEnableMask, DPP::QDC::GroupEnableMask, DPP::QDC::RecordLength_W, DPP::DecimationFactor} ){
+      list.push_back({r, -1});
+    }
 
     /// Channels Setting
     for( int ch = 0; ch < GetNumRegChannels(); ch ++){
-      for( int p = 0; p < (int) RegisterChannelList_QDC.size(); p++){
-        if( RegisterChannelList_QDC[p].GetRWType() == RW::ReadWrite ){
-          haha = RegisterChannelList_QDC[p];
-          WriteRegister(haha, GetSettingFromMemory(haha, ch), ch, false); 
-          usleep(pauseMilliSec * 1000);
-        }
+      for( const Reg & r : RegisterChannelList_QDC ){
+        if( r.GetRWType() == RW::ReadWrite ) list.push_back({r, ch});
       }
     }
 
   }
 
-  //set agg
-  haha = DPP::AggregateOrganization;        WriteRegister(haha, GetSettingFromMemory(haha), -1, false);
-  haha = DPP::MaxAggregatePerBlockTransfer; WriteRegister(haha, GetSettingFromMemory(haha), -1, false);
+  //set agg, last: they size the buffers for the channel settings above
+  list.push_back({DPP::AggregateOrganization, -1});
+  list.push_back({DPP::MaxAggregatePerBlockTransfer, -1});
 
+  return list;
+}
+
+int Digitizer::ProgramSettingsToBoard(){
+  DebugPrint("%s", "Digitizer");
+  if( softwareDisable ) return 0;
+  if( AcqRun ) return 0;
+  if( !isConnected || isDummy ) return 0;
+
+  printf("========== %s \n", __func__);
+
+  const short pauseMilliSec = 20;
+  int nFailed = 0;
+
+  for( auto & [reg, ch] : ProgrammedRegisters() ){
+    WriteRegister(reg, GetSettingFromMemory(reg, ch < 0 ? 0 : ch), ch, false);
+    if( ret != 0 ) nFailed++;
+    if( ch >= 0 ) usleep(pauseMilliSec * 1000);
+  }
+
+  if( nFailed > 0 ) printf("\033[31mDigi-%d: %d register write(s) failed while programming the settings.\033[0m\n", GetSerialNumber(), nFailed);
+  return nFailed;
+
+}
+
+int Digitizer::LoadAndProgramSettings(std::string fileName, std::vector<std::string> & problems){
+  programmedFromFile = false;
+  problems.clear();
+
+  std::string why;
+  if( LoadSettingBinaryToMemory(fileName, &why) != 0 ){
+    problems.push_back(why);
+    return -1;
+  }
+  std::vector<unsigned int> fromFile(setting, setting + SETTINGSIZE);
+
+  int nFailed = ProgramSettingsToBoard();
+  if( nFailed > 0 ) problems.push_back(std::to_string(nFailed) + " register write(s) failed");
+  int nReadFailed = ReadAllSettingsFromBoard(true);
+  if( nReadFailed > 0 ) problems.push_back(std::to_string(nReadFailed) + " register read(s) failed");
+
+  /// every register written must now read back as the file has it
+  for( auto & [reg, ch] : ProgrammedRegisters() ){
+    if( reg.GetRWType() != RW::ReadWrite ) continue; // write-only (QDC record length): nothing to read back
+    int c = ch < 0 ? 0 : ch;
+    unsigned short index = reg.Index(c);
+    if( setting[index] == fromFile[index] ) continue;
+    char msg[160];
+    snprintf(msg, sizeof msg, "0x%04X %s%s: file 0x%08X, board 0x%08X", reg.ActualAddress(ch), reg.GetNameChar(),
+             ch < 0 ? "" : (" ch" + std::to_string(ch)).c_str(), fromFile[index], setting[index]);
+    problems.push_back(msg);
+  }
+
+  programmedFromFile = problems.empty();
+  return (int) problems.size();
 }
 
 void Digitizer::SetSettingToMemory(Reg registerAddress,  unsigned int value, unsigned short ch ){
@@ -1134,48 +1120,48 @@ void Digitizer::SetSettingBinaryPath(std::string fileName){
   
 }
 
-int Digitizer::LoadSettingBinaryToMemory(std::string fileName){
+int Digitizer::LoadSettingBinaryToMemory(std::string fileName, std::string * why){
   DebugPrint("%s", "Digitizer");
-  settingFile = fopen(fileName.c_str(), "r");
-  
-  if( settingFile == NULL ) {
-    printf(" %s does not exist or cannot load.\n", fileName.c_str());
-    isSettingFileExist = false;
+  auto Fail = [&](std::string reason){
+    printf("\033[31m%s %s\033[0m\n", fileName.c_str(), reason.c_str());
+    if( why ) *why = fileName + " " + reason;
     return -1;
-    
-  }else{
-    isSettingFileExist = true;
-    settingFileName = fileName;
-    fclose (settingFile);
-    
-    uint32_t fileDPP = ((ReadSettingFromFile(DPP::AMCFirmwareRevision_R, 0) >> 8) & 0xFF);
-    
-    /// compare seeting DPP version;
-    if( isConnected && DPPType != (int) fileDPP ){
-      printf("DPPType in the file is %s(0x%X), but the dgitizer DPPType is %s(0x%X). \n", GetDPPString(fileDPP).c_str(), fileDPP, GetDPPString().c_str(),  DPPType);
-      return -1;
-    }else{
-      /// load binary to memoery
-      DPPType = fileDPP;
-      printf("DPPType in the file is %s(0x%X). Board Type is %s \n", GetDPPString(fileDPP).c_str(), fileDPP, GetDPPString().c_str());
+  };
 
-      settingFile = fopen(fileName.c_str(), "r");
-      size_t dummy = fread( setting, SETTINGSIZE * sizeof(unsigned int), 1, settingFile);
-      fclose (settingFile);
+  std::vector<unsigned int> fromFile(SETTINGSIZE);
+  FILE * file = fopen(fileName.c_str(), "rb");
+  if( file == NULL ) return Fail("does not exist or cannot be read.");
+  size_t nRead = fread(fromFile.data(), sizeof(unsigned int), SETTINGSIZE, file);
+  bool longer = fgetc(file) != EOF;
+  fclose(file);
+  if( nRead != SETTINGSIZE || longer ) return Fail("is not a settings file (it is not " + std::to_string(SETTINGSIZE * sizeof(unsigned int)) + " bytes).");
 
-      if( dummy != 0 ) printf("reach the end of file (read %ld).\n", dummy);
-      
-      uint32_t boardInfo = GetSettingFromMemory(DPP::BoardInfo_R);
-      if( (boardInfo & 0xFF) == 0x0E ) {tick2ns = 4.0;  if(!isConnected) NumRegChannel = 16;}// 725
-      if( (boardInfo & 0xFF) == 0x0B ) {tick2ns = 2.0;  if(!isConnected) NumRegChannel = 16;}// 730
-      if( (boardInfo & 0xFF) == 0x04 ) {tick2ns = 16.0; if(!isConnected) NumRegChannel =  8;}// 740
+  Reg amc = DPP::AMCFirmwareRevision_R;
+  uint32_t fileDPP = (fromFile[amc.Index(0)] >> 8) & 0xFF;
 
-      ///Should seperate file<->memory, memory<->board
-      ///ProgramSettingsToBoard(); /// do nothing if not connected.
-    
-      return 0;
-    }
+  /// compare seeting DPP version;
+  if( isConnected && DPPType != (int) fileDPP ){
+    return Fail("was saved from " + GetDPPString(fileDPP) + " firmware, but the digitizer runs " + GetDPPString() + ".");
   }
+  Reg info = DPP::BoardInfo_R;
+  uint32_t fileNCh = (fromFile[info.Index(0)] >> 16) & 0xFF;
+  if( isConnected && fileNCh != 0 && (int) fileNCh != NumInputCh ){
+    return Fail("was saved from a " + std::to_string(fileNCh) + "-channel board, but the digitizer has " + std::to_string(NumInputCh) + " channels.");
+  }
+
+  /// load binary to memoery
+  DPPType = fileDPP;
+  printf("DPPType in the file is %s(0x%X). Board Type is %s \n", GetDPPString(fileDPP).c_str(), fileDPP, GetDPPString().c_str());
+  memcpy(setting, fromFile.data(), sizeof(setting));
+  isSettingFileExist = true;
+  settingFileName = fileName;
+
+  uint32_t boardInfo = GetSettingFromMemory(DPP::BoardInfo_R);
+  if( (boardInfo & 0xFF) == 0x0E ) {tick2ns = 4.0;  if(!isConnected) NumRegChannel = 16;}// 725
+  if( (boardInfo & 0xFF) == 0x0B ) {tick2ns = 2.0;  if(!isConnected) NumRegChannel = 16;}// 730
+  if( (boardInfo & 0xFF) == 0x04 ) {tick2ns = 16.0; if(!isConnected) NumRegChannel =  8;}// 740
+
+  return 0;
 }
     
 unsigned int Digitizer::ReadSettingFromFile(Reg registerAddress, unsigned short ch){

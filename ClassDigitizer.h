@@ -8,6 +8,7 @@
 #include <cstring>  ///memset
 #include <iostream> ///cout
 #include <bitset>
+#include <vector>
 
 #include "CAENDigitizer.h"
 #include "CAENDigitizerType.h"
@@ -59,9 +60,13 @@ class Digitizer{
     FILE *       settingFile;              /// 
     bool         isSettingFileExist;         /// 
     bool         isSettingFileUpdate;
-    bool         isSettingFilledinMemeory; /// false for disabled ReadAllSettingFromBoard()   
+    bool         isSettingFilledinMemeory; /// false for disabled ReadAllSettingFromBoard()
     bool         hasOverThresholdWidth;  /// for QDC
+    bool         programmedFromFile;       /// the board was programmed from a settings file that loaded without problems
     unsigned int setting[SETTINGSIZE];     /// Setting, 4bytes x 2048 = 8192 bytes
+
+    /// the registers ProgramSettingsToBoard() writes, in the order it writes them, as (register, channel)
+    std::vector<std::pair<Reg, int>> ProgrammedRegisters();
     
     //^-------- other protected functions
     void         ErrorMsg(std::string header = "");
@@ -155,11 +160,15 @@ class Digitizer{
     std::string GetFamilyName()              const {return familyName;}
     bool        HasOverThresholdWidth_QDC()  const {return hasOverThresholdWidth;}
     
-    //^================ Setting 
-    Reg FindRegister(uint32_t address);
-    /// board <--> memory functions
-    void           ReadAllSettingsFromBoard  (bool force = false);
-    void           ProgramSettingsToBoard    ();
+    //^================ Setting
+    /// board <--> memory functions; both return the number of register reads/writes that failed
+    int            ReadAllSettingsFromBoard  (bool force = false);
+    int            ProgramSettingsToBoard    ();
+    /// load a settings file, write it to the board and read the board back. Returns -1 if the file
+    /// was not loaded (why in problems), else the number of problems: failed writes or reads, and
+    /// registers that differ from the file after programming (listed in problems).
+    int            LoadAndProgramSettings    (std::string fileName, std::vector<std::string> & problems);
+    bool           IsProgrammedFromFile()    const {return programmedFromFile;}
 
     /// simply read settings from memory
     void           SetSettingToMemory        (Reg registerAddress, unsigned int value, unsigned short ch = 0);
@@ -179,8 +188,8 @@ class Digitizer{
     /// if not exist, call SaveAllSettinsAsBin();
     void         SetSettingBinaryPath        (std::string fileName);
     /// load setting file to memory
-    /// if problem, return -1; load without problem, return 0;
-    int          LoadSettingBinaryToMemory   (std::string fileName); 
+    /// if problem, return -1 (and the reason in *why); load without problem, return 0;
+    int          LoadSettingBinaryToMemory   (std::string fileName, std::string * why = nullptr);
     void         SaveSettingToFile           (Reg registerAddress, unsigned int value,  unsigned short ch = 0); /// also save to memory
     unsigned int ReadSettingFromFile         (Reg registerAddress, unsigned short ch = 0); /// read from setting binary
 
