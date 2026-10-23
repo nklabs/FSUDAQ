@@ -28,14 +28,14 @@ pair rule "never", K = inf), `--time-offsets` (ns per channel) and `--setting hi
     ./setup-venv.sh                      # once: numpy, numba, inotify into online/venv
     python online_dashboard.py --data-path /path/to/data          # what the button runs
     python online_dashboard.py --run RUNDIR --replay               # play a finished run at real-time pace
-    python pipeline_fsu.py RUNDIR --workers 16 --slice-s 3          # offline: whole run, parallel
-    python fsu_fast.py --selftest RUNDIR/*_000.fsu                  # check the numba kernels
+    python fsu_fast.py RUNDIR/*_000.fsu                             # check the numba decoder against fsu.py
 
 Files: `fsu.py` (format decoder), `fsu_fast.py` (numba kernels), `finder/` and
-`finder_fast.py` (the track finder, online), `pipeline.py` / `detector.py` /
-`online_classify.py` / `momentum_map.*` (the earlier event building and classifier, still
-used by the offline driver `pipeline_fsu.py`), `dashboard.html` (the page; no external
-resources).
+`finder_fast.py` (the track finder, online), `daq_hist.py` (per-channel histograms),
+`dashboard.html` (the page; no external resources). The earlier event building, classifier
+and offline driver (pipeline_fsu.py, pipeline.py, detector.py, online_classify.py, merge.py
+and their momentum_map.csv) were superseded by the finder in finder/ and removed; they are in
+the history before Oct 2026.
 
 The file following borrows from A. Sampat's `compass-pseudo-online.py`: inotify
 CREATE/CLOSE_WRITE announce new and finished files, the growing file is polled for
