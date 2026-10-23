@@ -5,27 +5,34 @@
     online_dashboard.py --run /path/to/prefix_012                  (one run folder)
     online_dashboard.py --run /path/to/finished_run --replay        (play a finished run at real-time pace)
 
-Follows the run folder FSUDAQ names when a saving run starts (GET /run?folder=..., or
---follow at start-up), else the newest run folder in the data path; a run recorded again
-under the same number (old files replaced) starts over. Tails every board's growing .fsu file
-(the indexer stops at a partial aggregate, so a file being written is safe to read),
-merges the boards with a watermark (everything older than min(newest per board) - lag),
-builds bunches and runs the track finder on each (finder_fast.py: a numba fast path that
-reproduces finder/online_finder.py exactly, and that reference itself for bunches with two
-or more candidates), and
-serves http://localhost:<port>/ (the page) and /state (JSON) from a background thread.
-Kernels: numba (fsu_fast) when importable, numpy otherwise.
+Follows the run folder FSUDAQ names when a saving run starts (GET /run?folder=..., or --follow at
+start-up), else the newest run folder in the data path; a run recorded again under the same number
+(old files replaced) starts over. Serves http://localhost:<port>/ (the page) and /state (JSON).
 
-File following borrows from A. Sampat's compass-pseudo-online.py (inotify CREATE /
-CLOSE_WRITE to learn about new and finished files, polling the growing file for data
-instead of reacting to every MODIFY): when the `inotify` package is importable the
-loop wakes on those events, otherwise it polls; a file that is closed and fully
-decoded is never indexed again.
+How the data are read. A board writes a couple's (channel pair's) events when that couple's buffer
+is full, so a quiet channel's hits reach the disk long after a busy channel's newer ones. Every
+board file is indexed as it grows (fsu_fast.FileScan: only the new bytes, each couple aggregate
+with its first and last time; damage is stepped over and counted, a format the decoders do not
+read is counted and left out). Then two things happen:
+
+* the DAQ tab: every couple aggregate is decoded once when it reaches the disk, in any time order
+  (counts, pulse height, PSD, time since the previous hit, hits per second): exact;
+* the track finder needs all boards in time order: it takes time slices up to the oldest newest
+  time among the couples still writing (a couple silent for --hold-s no longer holds it back), so
+  every hit of those couples up to there is on disk. A hit that still arrives behind a slice
+  already taken is counted as "late" and shown, never silently dropped. When no couple has
+  written for --stall-s (the run ended, or a pause), everything up to the newest hit is taken.
+
+Slices go to worker processes (results are added in any order; a worker that dies is replaced
+and its task run again once). The run's setting, cabling, gains and time offsets come from
+experiment.json (re-read for each run), else the command line; anything missing is a placeholder
+the page says so about.
 """
 from __future__ import annotations
 
 import argparse
 import collections
+import concurrent.futures as cf
 import glob
 import json
 import math
@@ -38,13 +45,14 @@ import sys
 import threading
 import time
 import urllib.parse
+from concurrent.futures.process import BrokenProcessPool
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-import fsu                                   # noqa: E402
+import fsu_fast                              # noqa: E402  file index and decoder
 import finder_fast as ff                     # noqa: E402  bunch building + track finder (finder/online_finder.py)
 import daq_hist as dh                        # noqa: E402  per-channel monitoring (no cabling needed)
 
@@ -57,282 +65,369 @@ def say(msg):
         print(msg, flush=True)
     except (OSError, ValueError):
         pass
-try:
-    import fsu_fast
-    FAST = fsu_fast.HAVE_NUMBA
-except ImportError:
-    fsu_fast = None
-    FAST = False
-try:
-    import inotify.adapters
-    import inotify.constants
-    HAVE_INOTIFY = True
-except ImportError:
-    HAVE_INOTIFY = False
 
+
+FAST = fsu_fast.HAVE_NUMBA
 DEFAULT_BOARDS = "15880,15879,58918,62839,1443,30508"
 EIGHT_CHANNEL_BOARDS = "1443,30508"           # the DT5730s
+CONFIG = os.path.join(HERE, "experiment.json")
 HISTORY_S = 600                               # seconds of rate history kept
+PS = 1_000_000_000_000                        # ps per second
+FILE_RE = re.compile(r"_(\d+)_(PSD|PHA|QDC)_\d+_(\d+)\.fsu$")   # <prefix>_<run>_<serial>_<DPP>_<tick>_<index>.fsu
+BATCH_HITS = 4_000_000                        # hits per DAQ task
 
 
-def _index(words):
-    return fsu_fast.index_file(words) if FAST else fsu.index_file(words)
+# ---------------------------------------------------------------- run configuration
+def load_config(a):
+    """Setting, cabling, gains, time offsets and map: the command line first, then the config file.
+    Returns (values, where each came from, problems)."""
+    cfg, problems, src = {}, [], {}
+    path = a.config
+    if path and os.path.exists(path):
+        try:
+            with open(path) as f:
+                cfg = json.load(f)
+            if not isinstance(cfg, dict):
+                raise ValueError("not a JSON object")
+        except (OSError, ValueError) as ex:
+            problems.append(f"{path} not read: {ex}")
+            cfg = {}
+    base = os.path.dirname(os.path.abspath(path)) if path else HERE
+    out = {}
+    for key in ("setting", "cabling", "gains", "time_offsets", "map"):
+        v = getattr(a, key)
+        if v is not None:
+            src[key] = "command line"
+        else:
+            v = cfg.get(key)
+            if v in (None, ""):
+                v = None
+                src[key] = None
+            else:
+                src[key] = os.path.basename(path)
+                if key != "setting" and not os.path.isabs(str(v)):
+                    v = os.path.join(base, str(v))
+        out[key] = v
+    if out["setting"] not in (None, "high", "low"):
+        problems.append(f"setting '{out['setting']}' is neither high nor low")
+        out["setting"] = None; src["setting"] = None
+    for key in ("cabling", "gains", "time_offsets", "map"):
+        if out[key] and not os.path.exists(out[key]):
+            problems.append(f"{key}: {out[key]} not found")
+            out[key] = None; src[key] = None
+    return out, src, problems
 
 
-def _decode(words, ix):
-    if FAST:
-        return fsu_fast.decode_range(words, ix, short=True)
-    d = fsu._decode_chunk(words, ix, 0, len(ix.nev))
-    if d is None:
-        return np.zeros(0, np.int64), np.zeros(0, np.uint8), np.zeros(0, np.uint16), np.zeros(0, np.uint16)
-    return d["ts_ps"].astype(np.int64), d["ch"], d["qlong"], d["qshort"]
+class Setup:
+    """Everything the finder needs for one run, with what is missing or wrong said in words."""
+
+    def __init__(self, a, serials, nch):
+        cfg, src, problems = load_config(a)
+        self.src = src
+        self.files = {k: cfg[k] for k in ("cabling", "gains", "time_offsets", "map")}
+        self.key = json.dumps([cfg, {k: os.path.getmtime(v) for k, v in self.files.items() if v}], sort_keys=True)
+        warnings = []                         # placeholders and problems, shown at the top of the page
+        self.setting = cfg["setting"] or "high"
+        if cfg["setting"] is None:
+            warnings.append("beam setting not given (experiment.json \"setting\"): the HIGH map is used")
+        rows = None
+        if cfg["cabling"]:
+            try:
+                rows = ff.load_cabling(cfg["cabling"])
+            except (OSError, ValueError, KeyError) as ex:
+                problems.append(f"cabling {cfg['cabling']} not read: {ex!r}")
+        if rows is None:
+            rows = ff.default_cabling(serials, nch)
+            self.cabling = "placeholder (sequential)"
+            warnings.append("cabling is a sequential placeholder: tracker channels and counters are not where the plots say")
+        else:
+            self.cabling = cfg["cabling"]
+        gains = offs = None
+        if cfg["gains"]:
+            try:
+                gains = ff.load_per_channel(cfg["gains"], "mevee_per_count")
+            except (OSError, ValueError, KeyError) as ex:
+                problems.append(f"gains {cfg['gains']} not read: {ex!r}")
+        if gains is None:
+            warnings.append("no light calibration (gains): light tests off, every cluster reads as one track")
+        if cfg["time_offsets"]:
+            try:
+                offs = ff.load_per_channel(cfg["time_offsets"], "offset_ns")
+            except (OSError, ValueError, KeyError) as ex:
+                problems.append(f"time offsets {cfg['time_offsets']} not read: {ex!r}")
+        if offs is None:
+            warnings.append("no cable time offsets: the timing tests see the raw delays")
+        self.tables = ff.Tables(self.setting, map_path=cfg["map"], calibrated=gains is not None)
+        plane_channels = [max(self.tables.T["gang"][i]) for i in range(3)]
+        rows, cab_problems = ff.check_cabling(rows, serials, nch, plane_channels)
+        problems += cab_problems
+        self.chans = ff.Channels(serials, rows, gains, offs)
+        if self.chans.uncalibrated:
+            problems.append("no gain for " + ", ".join(f"{s} ch{c}" for s, c in self.chans.uncalibrated[:12])
+                            + (f" and {len(self.chans.uncalibrated) - 12} more" if len(self.chans.uncalibrated) > 12 else "")
+                            + ": their hits are left out of the finder")
+        self.map_path = cfg["map"] or os.path.join(ff.FINDER_DIR, "momentum_map.csv")
+        self.calibrated = gains is not None
+        self.has_offsets = offs is not None
+        self.max_offset_ps = int(np.abs(self.chans.toff_ps).max(initial=0))
+        self.warnings, self.problems = warnings, problems
 
 
-# ---------------------------------------------------------------- slice processing (in a worker)
-# Same scheme as pipeline_fsu.py's time-slice mode: a worker decodes the files that
-# overlap its slice [t0, t1) with a margin on both sides, sorts, builds events and keeps
-# those whose FIRST hit lies in the slice. Nothing large crosses a process boundary and
-# no event is counted twice at a boundary.
+# ---------------------------------------------------------------- work done in the worker processes
 _G: dict = {}
 
 
 def _init_worker(tables, chans, window_ps):
+    try:
+        os.nice(10)                           # below the DAQ, which shares the machine
+    except OSError:
+        pass
+    signal.signal(signal.SIGINT, signal.SIG_IGN)   # the main process decides when to stop
     _G.update(tables=tables, chans=chans, window_ps=window_ps)
 
 
-def _decode_file_range(path, t_lo, t_hi):
-    words = np.memmap(path, dtype="<u4", mode="r")
-    ix = _index(words)
-    if len(ix.nev) == 0:
-        return None
-    if FAST:
-        return fsu_fast.decode_range(words, ix, t_lo, t_hi, short=True)
-    ts, ch, e, qs = _decode(words, ix)
-    m = (ts >= t_lo) & (ts < t_hi)
-    return ts[m], ch[m], e[m], qs[m]
+def ingest_task(task: dict) -> dict:
+    """The DAQ tab's exact part for some couple aggregates of one file, each decoded once."""
+    t_start = time.perf_counter()
+    A = task["aggs"]
+    ts, ch, e, qs = fsu_fast.decode_aggs(task["path"], A["ev_start"], A["nev"], A["couple"], A["wpe"])
+    slot = task["bi"] * task["board_channels"] + ch.astype(np.int64)
+    r, (secs, slots, cnt) = dh.process_exact(ts, slot, e, qs, task["late_before"], task["n_slots"])
+    return dict(daq=r.to_dict(), secs=(secs, slots, cnt), n=int(ts.size), bi=task["bi"], dt=time.perf_counter() - t_start)
 
 
-def process_slice(task: dict) -> dict:
-    """task: t0, t1, margin (ps), files {board_id: [paths]}. Returns increments only: the finder's
-    histograms and counters for the bunches whose first hit lies in [t0, t1)."""
+def slice_task(task: dict) -> dict:
+    """The track finder (and the DAQ tab's time-ordered part) for the bunches whose first hit, on the
+    common clock, is in [t0, t1). Decodes only the couple aggregates that overlap the slice."""
     t_start = time.perf_counter()
     t0, t1, margin = task["t0"], task["t1"], task["margin"]
     tables, chans, window_ps = _G["tables"], _G["chans"], _G["window_ps"]
     parts = []
-    hits_by_board = {}
-    for bid, paths in task["files"].items():
-        for p in paths:
-            try:
-                r = _decode_file_range(p, t0 - margin, t1 + margin)
-            except (ValueError, OSError):
-                continue
-            if r is None or r[0].size == 0:
-                continue
-            ts, ch, e, qs = r
-            parts.append((ts, ch, e, np.full(ts.size, bid, np.int16), qs))
-            hits_by_board[bid] = hits_by_board.get(bid, 0) + int(np.count_nonzero((ts >= t0) & (ts < t1)))
-    ref = task.get("ref")
+    for bi, path, A in task["files"]:
+        ts, ch, e, qs = fsu_fast.decode_aggs(path, A["ev_start"], A["nev"], A["couple"], A["wpe"], t0 - margin, t1 + margin)
+        if ts.size:
+            parts.append((ts, ch, e, np.full(ts.size, bi, np.int64)))
     if parts:
-        ts = np.concatenate([p[0] for p in parts]); ch = np.concatenate([p[1] for p in parts])
+        ts = np.concatenate([p[0] for p in parts]); ch = np.concatenate([p[1] for p in parts]).astype(np.int64)
         e = np.concatenate([p[2] for p in parts]); bd = np.concatenate([p[3] for p in parts])
-        qs = np.concatenate([p[4] for p in parts])
-        order = np.argsort(ts)
-        res = ff.process_sorted(tables, chans, ts, bd, ch, e, order, window_ps, t0, t1)
-        slot = bd.astype(np.int64) * chans.board_channels + ch.astype(np.int64)
-        daq = dh.process(ts, slot, e, qs, order, t0, t1, ref, chans.n_slots)
+        res = ff.process_hits(tables, chans, ts, bd, ch, e.astype(np.float64), window_ps, t0, t1)
+        slot = bd * chans.board_channels + ch
+        daq = dh.process_ordered(ts, slot, np.argsort(ts, kind="stable"), t0, t1, task["ref"], chans.n_slots)
     else:
         res = ff.Result(chans.n_slots)
         daq = dh.DaqResult(chans.n_slots, np.uint32)
-    out = res.to_dict()
-    out.update(W=t1, hits_by_board=hits_by_board, daq=daq.to_dict(), ref=ref, dt=time.perf_counter() - t_start)
-    return out
+    return dict(t0=t0, t1=t1, res=res.to_dict(), daq=daq.to_dict(), ref=task["ref"], dt=time.perf_counter() - t_start)
 
 
-# ---------------------------------------------------------------- following the files (main process)
-def _first_last(words, ix):
-    """(first ts, last ts) of an indexed file from its first and last board aggregate only."""
-    n = len(ix.nev)
-    first_ctr, last_ctr = ix.agg_counter[0], ix.agg_counter[-1]
-    hi0 = int(np.searchsorted(ix.agg_counter != first_ctr, True)) if n > 1 else 1
-    lo1 = n - int(np.searchsorted(ix.agg_counter[::-1] != last_ctr, True)) if n > 1 else 0
-    d0 = fsu._decode_chunk(words, ix, 0, max(hi0, 1))
-    d1 = fsu._decode_chunk(words, ix, min(lo1, n - 1), n)
-    return int(d0["ts_ps"].min()), int(d1["ts_ps"].max())
+class _Done:
+    """A finished task when there are no worker processes (--workers 0)."""
+
+    def __init__(self, fn, arg):
+        try:
+            self._r, self._ex = fn(arg), None
+        except Exception as ex:               # noqa: BLE001  reported like a worker's
+            self._r, self._ex = None, ex
+
+    def done(self):
+        return True
+
+    def result(self):
+        if self._ex:
+            raise self._ex
+        return self._r
 
 
-class BoardFiles:
-    """What is on disk for one board: per-file time spans, the newest timestamp, sizes."""
+# ---------------------------------------------------------------- the files of one board
+class BoardStream:
+    def __init__(self, serial: int, bi: int):
+        self.serial, self.bi = serial, bi
+        self.scans: dict[str, fsu_fast.FileScan] = {}
+        self.order: list[str] = []            # file paths by index
+        self.done: dict[str, int] = {}        # couple aggregates already given to the DAQ part
+        self.released: set[str] = set()       # rolled-over files read and passed: index dropped
+        self.newest = np.full(8, -1, np.int64)        # per couple: newest time on disk
+        self.newest_wall = np.zeros(8)                # when it last moved
+        self.first = None                     # oldest time seen
+        self.hits = 0                         # hits indexed (all files)
 
-    def __init__(self, serial: int, board_id: int):
-        self.serial, self.board_id = serial, board_id
-        self.files: list[str] = []
-        self.span: dict[str, list] = {}         # file -> [first_ts, last_ts, complete]
-        self.bytes = 0
-        self.newest = None
-        self.newest_wall = time.time()
-        self.skipped_start = False
-        self.hits_seen = 0                      # couple aggregates x events, for the display only
+    def discover(self, folder):
+        names = []
+        for p in glob.glob(os.path.join(folder, "*.fsu")):
+            m = FILE_RE.search(p)
+            if m and int(m.group(1)) == self.serial:
+                names.append((int(m.group(3)), p))
+        for _, p in sorted(names):
+            if p not in self.scans:
+                self.scans[p] = fsu_fast.FileScan(p)
+                self.order.append(p)
+                self.done[p] = 0
 
-    def scan(self, folder: str, closed=None, from_start=True):
-        pat = os.path.join(folder, f"*_{self.serial}_*.fsu")
-        files = sorted(glob.glob(pat), key=lambda p: int(re.search(r"_(\d+)\.fsu$", p).group(1)))
-        self.files = files
-        self.bytes = sum(os.path.getsize(f) for f in files)
-        for k, f in enumerate(files):
-            sp = self.span.get(f)
-            if sp is not None and sp[2]:
-                continue                        # complete file, nothing changes
-            is_last = k == len(files) - 1
-            if not from_start and not self.skipped_start and not is_last:
-                self.span[f] = [None, None, True]   # live start: older files are ignored
+    def update(self):
+        for p in self.order:
+            if p not in self.released:
+                fs = self.scans[p]
+                n0 = fs.hits
+                fs.update()
+                self.hits += fs.hits - n0
+
+    def replaced(self):
+        return any(self.scans[p].replaced() for p in self.order if p not in self.released)
+
+    def take_new(self, now, limit=None):
+        """The couple aggregates not yet given to the DAQ part, per file, in file order; with a limit
+        (replay) only up to the first one ending after it."""
+        out = []
+        for p in self.order:
+            if p in self.released:
                 continue
-            try:
-                if os.path.getsize(f) < 16:
-                    continue
-                words = np.memmap(f, dtype="<u4", mode="r")
-                ix = _index(words)
-            except (ValueError, OSError):
+            A = self.scans[p].arrays()
+            a, b = self.done[p], A["nev"].size
+            if limit is not None and b > a:
+                over = np.flatnonzero(A["t_last"][a:b] > limit)
+                if over.size:
+                    b = a + int(over[0])
+            if b <= a:
                 continue
-            if len(ix.nev) == 0:
+            sel = {k: A[k][a:b] for k in A}
+            self.done[p] = b
+            for c in np.unique(sel["couple"]):
+                t = int(sel["t_last"][sel["couple"] == c].max())
+                if t > self.newest[c]:
+                    self.newest[c] = t; self.newest_wall[c] = now
+            t = int(sel["t_first"].min())
+            self.first = t if self.first is None else min(self.first, t)
+            out.append((p, sel))
+        return out
+
+    def skip_all(self, now):
+        """Mark everything written so far as seen (a live start: the dashboard reads from now)."""
+        for p, sel in self.take_new(now):
+            pass
+
+    def overlapping(self, lo, hi):
+        """(path, couple aggregates given to the DAQ part that overlap [lo, hi)) per file."""
+        out = []
+        for p in self.order:
+            if p in self.released or self.done[p] == 0:
                 continue
-            first, last = _first_last(words, ix)
-            complete = (not is_last) or (closed is not None and f in closed)
-            if sp is None or sp[1] != last:
-                self.span[f] = [first, last, complete and ix.truncated_words == 0]
-                if self.newest is None or last > self.newest:
-                    self.newest = last; self.newest_wall = time.time()
-                self.hits_seen = int(ix.nev.sum())
-            elif complete:
-                sp[2] = True
-        self.skipped_start = True
+            A = self.scans[p].arrays()
+            n = self.done[p]
+            m = np.flatnonzero((A["t_last"][:n] >= lo) & (A["t_first"][:n] < hi))
+            if m.size:
+                out.append((p, {k: A[k][m] for k in ("ev_start", "nev", "couple", "wpe")}))
+        return out
 
-    def files_for(self, t_lo, t_hi):
-        return [f for f in self.files if (sp := self.span.get(f)) and sp[0] is not None
-                and sp[1] >= t_lo and sp[0] < t_hi]
+    def release(self, before):
+        """Drop the index of rolled-over files read completely and ending before `before`."""
+        for p in self.order[:-1]:
+            if p in self.released:
+                continue
+            fs = self.scans[p]
+            A = fs.arrays()
+            if self.done[p] == A["nev"].size and (A["nev"].size == 0 or int(A["t_last"].max()) < before):
+                fs.parts = {k: [] for k in fs.FIELDS}
+                self.released.add(p)
+
+    def summary(self):
+        f = [self.scans[p] for p in self.order]
+        return dict(files=len(f), bytes=sum(s.size for s in f), indexed=sum(s.pos * 4 for s in f),
+                    skipped_words=sum(s.skipped for s in f), other_format=sum(s.other for s in f),
+                    malformed=sum(s.malformed for s in f))
 
 
+# ---------------------------------------------------------------- the analysis
 class Online:
-    def __init__(self, a):
-        self.a = a
+    def __init__(self, a, clock=time.time):
+        self.a, self.clock = a, clock
         self.serials = [int(x) for x in a.boards.split(",") if x.strip()]
         eight = {int(x) for x in a.eight_channel_boards.split(",") if x.strip()}
-        nch = {s: (8 if s in eight else 16) for s in self.serials}
-        if a.cabling:
-            rows, self.cabling_src = ff.load_cabling(a.cabling), a.cabling
-        else:
-            rows, self.cabling_src = ff.default_cabling(self.serials, nch), "placeholder (sequential)"
-        gains = ff.load_per_channel(a.gains, "mevee_per_count") if a.gains else None
-        offs = ff.load_per_channel(a.time_offsets, "offset_ns") if a.time_offsets else None
-        self.tables = ff.Tables(a.setting, map_path=a.map, calibrated=gains is not None)
-        self.chans = ff.Channels(self.serials, rows, gains, offs)
+        self.nch = {s: (8 if s in eight else 16) for s in self.serials}
         self.window_ps = int(round(a.window * 1000))
-        # digitizer channels that exist, and how to call them; the role only when a cabling file says so
-        self.slots, self.labels = [], {}
+        self.lock = threading.RLock()           # the loop and the web server's threads
+        self.pool = None
+        self.setup = None
+        self.ref_slot = a.ref_slot
+        self.follow = a.follow                  # run folder FSUDAQ named (--follow or GET /run); None = newest in the data path
+        self.restart = False                    # set by GET /run: a new run starts, even in the same folder
+        self.wake = threading.Event()
+        self.lost = 0                           # tasks that failed twice
+        self.folder = None
+        self.reset(None, from_start=bool(a.replay or a.from_start))
+
+    # ------------------------------------------------------------ pool
+    def _kill_pool(self):
+        if self.pool is not None:
+            procs = list((getattr(self.pool, "_processes", None) or {}).values())
+            self.pool.shutdown(wait=False, cancel_futures=True)
+            for p in procs:
+                try:
+                    p.kill()
+                except Exception:                 # noqa: BLE001
+                    pass
+            self.pool = None
+
+    def _make_pool(self):
+        self._kill_pool()
+        if self.a.workers > 0:
+            self.pool = cf.ProcessPoolExecutor(self.a.workers, mp_context=mp.get_context("fork"), initializer=_init_worker,
+                                               initargs=(self.setup.tables, self.setup.chans, self.window_ps))
+        else:
+            _init_worker(self.setup.tables, self.setup.chans, self.window_ps)
+
+    def _submit(self, kind, task, tries=0, epoch=None):
+        fn = ingest_task if kind == "ingest" else slice_task
+        fut = _Done(fn, task) if self.pool is None else self.pool.submit(fn, task)
+        self.pending[fut] = (kind, task, self.clock(), tries, self.epoch if epoch is None else epoch)
+
+    # ------------------------------------------------------------ a run
+    def reset(self, folder, from_start):
+        setup = Setup(self.a, self.serials, self.nch)
+        new_setup = self.setup is None or setup.key != self.setup.key
+        if new_setup:
+            self.setup = setup
+        else:
+            self.setup.warnings, self.setup.problems = setup.warnings, setup.problems
+        if self.folder is not None or new_setup or self.pool is None:
+            self._make_pool()                   # drops the previous run's tasks; new tables if the setup changed
+        S = self.setup
+        self.folder = folder
+        self.boards = {sn: BoardStream(sn, i) for i, sn in enumerate(self.serials)}
+        self.pending = {}
+        self.epoch = 0
+        self.W = None                           # the finder has slices up to here (ps, raw time)
+        self.t_first = None
+        self.first_data_wall = None
+        self.skip_existing = not from_start
+        self.since = None                       # live start: the time from which data are read
+        self.acc = ff.Result(S.chans.n_slots)   # the finder's histograms and counters
+        self.daq = dh.DaqResult(S.chans.n_slots)
+        self.secs = {}                          # second of data time -> hits per slot
+        self.slices = []                        # (t0, t1, bunches, statuses, tracks) of every folded slice
+        self.proc_s = 0.0; self.steps = 0
+        self.ingested_hits = np.zeros(len(self.serials), np.int64)
+        self.flushed = False
+        self.last_fold_wall = None
+        self.replay_t0 = None
+        self.reset_wall = self.clock()
+        self.status = "waiting for data"
+        self.first_files = {}
+        self.others = set()                     # serials with files in the folder that are not analysed
+        self.labels = {}
+        self.slots = []
+        ch = S.chans
         for bi, sn in enumerate(self.serials):
-            for c in range(nch[sn]):
-                sl = bi * self.chans.board_channels + c
+            for c in range(self.nch[sn]):
+                sl = bi * ch.board_channels + c
                 role = ""
-                if a.cabling:
-                    pl_, chn, cn = self.chans.plane[bi, c], self.chans.ch[bi, c], self.chans.counter[bi, c]
+                if not S.cabling.startswith("placeholder"):
+                    pl_, chn, cn = ch.plane[bi, c], ch.ch[bi, c], ch.counter[bi, c]
                     role = f"T{pl_}:{chn}" if pl_ >= 0 else (ff.COUNTERS[cn] if pl_ == -1 else "")
                 self.slots.append(sl)
                 self.labels[sl] = dict(board=sn, ch=c, role=role)
-        self.ref_slot = a.ref_slot if a.ref_slot is not None else None
-        self.lag_ps = int(a.lag_ms * 1e9)
-        self.margin = self.lag_ps + self.window_ps
-        self.lock = threading.Lock()
-        self.pool = None
-        if a.workers > 0:
-            ctx = mp.get_context("fork")
-            self.pool = ctx.Pool(a.workers, initializer=_init_worker,
-                                 initargs=(self.tables, self.chans, self.window_ps))
-        else:
-            _init_worker(self.tables, self.chans, self.window_ps)
-        self.pending: list = []
-        self.follow = a.follow                  # run folder FSUDAQ named (--follow or GET /run); None = newest in the data path
-        self.restart = False                    # set by GET /run: a new run starts, even in the same folder
-        self.reset(None)
-
-    def reset(self, folder):
-        self.folder = folder
-        self.boards = {sn: BoardFiles(sn, i) for i, sn in enumerate(self.serials)}
-        self.W = None
-        self.t_first = None
-        self.acc = ff.Result(self.chans.n_slots)      # the run's histograms and counters
-        self.daq = dh.DaqResult(self.chans.n_slots)   # per-channel histograms, since the run start or Clear
-        self.cleared_beam_s = 0.0
-        self.history = collections.deque()
-        self.proc_s = 0.0; self.steps = 0
-        self.replay_t0 = None
-        self.flushed = False
-        self.status = "waiting for data"
-        self.closed: set[str] = set()
-        self.pending = []                       # slices of the previous run still in the workers: their results are dropped
-        self.first_files = {}                   # first file of each board -> inode: a re-recorded run replaces them
-        self.wake = threading.Event()
-        if folder and HAVE_INOTIFY and not self.a.replay:
-            threading.Thread(target=self._watch, args=(folder,), daemon=True).start()
-
-    def _watch(self, folder):
-        """inotify: wake the loop when a file is created or closed by the writer."""
-        try:
-            notifier = inotify.adapters.Inotify()
-            notifier.add_watch(folder, mask=inotify.constants.IN_CREATE | inotify.constants.IN_CLOSE_WRITE)
-            for _, types, path, name in notifier.event_gen(yield_nones=False):
-                if folder != self.folder:
-                    return
-                if "IN_CLOSE_WRITE" in types:
-                    self.closed.add(os.path.join(path, name))
-                self.wake.set()
-        except Exception as ex:
-            say(f"inotify watcher stopped: {ex!r}")
-
-    def step(self):
-        a = self.a
-        folder = a.run or self.follow or newest_run_folder(a.data_path)
-        if folder != self.folder or self.restart or (folder and self._run_replaced(folder)):
-            self.restart = False
-            with self.lock:
-                self.reset(folder)
-        if folder is None:
-            self.status = f"no run folder under {a.data_path}"
-            return
-        for b in self.boards.values():
-            b.scan(folder, closed=self.closed if HAVE_INOTIFY else None, from_start=a.replay or a.from_start)
-        self._collect()
-        active = [b for b in self.boards.values() if b.newest is not None]
-        if not active:
-            self.status = "no data yet"
-            return
-        if self.t_first is None:
-            self.t_first = min(sp[0] for b in active for sp in b.span.values() if sp[0] is not None)
-            self.replay_t0 = time.time()
-        now = time.time()
-        newest = {b.board_id: b.newest for b in active}
-        if a.replay:
-            limit = self.t_first + int((now - self.replay_t0) * a.replay_speed * 1e12)
-            newest = {k: min(v, limit) for k, v in newest.items()}
-            live = [b for b in active if newest[b.board_id] < b.newest or now - b.newest_wall < a.stall_s]
-        else:
-            live = [b for b in active if now - b.newest_wall < a.stall_s]
-        if not live:
-            if not self.flushed and self.W is not None:
-                self._submit(self.W, np.int64(1) << 62, now)
-                self.flushed = True
-            self.status = "run ended, buffers flushed" if self.flushed else "all boards stalled"
-            return
-        self.flushed = False
-        W = min(newest[b.board_id] for b in live) - self.lag_ps
-        if self.W is not None and W - self.W < int(a.min_step_s * 1e12):
-            self.status = "waiting for the watermark to advance"
-            return
-        t_lo = self.W if self.W is not None else self.t_first
-        self._submit(t_lo, W, now)
-        self.W = W
 
     def _run_replaced(self, folder):
-        """True when a first file seen earlier is gone or is a new file: the run number was recorded
-        again in the same folder (FSUDAQ deletes the old files on "Overwrite"). New boards' files are fine."""
+        """True when a file seen earlier is gone or is a new file: the run number was recorded again in
+        the same folder (FSUDAQ deletes the old files on "Overwrite")."""
         now = {}
         for f in glob.glob(os.path.join(folder, "*_000.fsu")):
             try:
@@ -342,64 +437,190 @@ class Online:
         replaced = any(now.get(f) != ino for f, ino in self.first_files.items())
         if not replaced:
             self.first_files.update(now)
-        return replaced
+        return replaced or any(b.replaced() for b in self.boards.values())
 
-    def _submit(self, t0, t1, now):
-        files = {}
-        for b in self.boards.values():
-            sel = b.files_for(t0 - self.margin, t1 + self.margin)
-            if sel:
-                files[b.board_id] = sel
-        if not files:
+    def margin_ps(self):
+        return self.window_ps + 2 * self.setup.max_offset_ps + 1_000_000   # + 1 us
+
+    # ------------------------------------------------------------ one step of the loop
+    def step(self):
+        with self.lock:
+            self._step()
+
+    def _step(self):
+        a = self.a
+        folder = a.run or self.follow or newest_run_folder(a.data_path)
+        if folder != self.folder or self.restart or (folder and self._run_replaced(folder)):
+            # a run that starts while we watch is read from its start; the one running when the
+            # dashboard started only from then on (unless --from-start)
+            from_start = bool(a.replay or a.from_start or self.restart or self.folder is not None)
+            self.restart = False
+            self.reset(folder, from_start)
+        if folder is None:
+            self.status = f"no run folder under {a.data_path}"
             return
-        task = dict(t0=int(t0), t1=int(t1), margin=int(self.margin), files=files, ref=self.ref_slot)
-        bytes_by_board = {b.board_id: b.bytes for b in self.boards.values()}
-        if self.pool is None:
-            self._fold(process_slice(task), now, bytes_by_board)
+        self._collect()
+        now = self.clock()
+
+        # 1. index what was written since the last step
+        for b in self.boards.values():
+            b.discover(folder)
+            b.update()
+        self.others = {int(m.group(1)) for p in glob.glob(os.path.join(folder, "*.fsu"))
+                       if (m := FILE_RE.search(p)) and int(m.group(1)) not in self.boards}
+        if self.skip_existing:
+            for b in self.boards.values():
+                b.skip_all(now)
+            tops = [int(b.newest.max()) for b in self.boards.values() if b.newest.max() >= 0]
+            self.since = max(tops) if tops else None
+            self.skip_existing = False
+
+        # 2. the DAQ tab: every couple aggregate once, as it reaches the disk
+        limit = None
+        if a.replay:
+            firsts = [s.arrays()["t_first"].min() for b in self.boards.values() for s in b.scans.values() if s.n]
+            if firsts:
+                if self.replay_t0 is None:
+                    self.replay_t0 = now
+                limit = int(min(firsts)) + int((now - self.replay_t0) * a.replay_speed * PS)
+        late_before = self.W if self.W is not None else -(1 << 62)
+        for b in self.boards.values():
+            for path, sel in b.take_new(now, limit):
+                cum = np.cumsum(sel["nev"])
+                cuts = np.searchsorted(cum, np.arange(BATCH_HITS, int(cum[-1]), BATCH_HITS))
+                for lo, hi in zip(np.r_[0, cuts], np.r_[cuts, sel["nev"].size]):
+                    if hi > lo:
+                        self._submit("ingest", dict(path=path, aggs={k: v[lo:hi] for k, v in sel.items()}, bi=b.bi,
+                                                    late_before=late_before, n_slots=self.setup.chans.n_slots,
+                                                    board_channels=self.setup.chans.board_channels))
+
+        # 3. the track finder: time slices up to where every couple still writing is on disk
+        boards = list(self.boards.values())
+        seen = [(b, c) for b in boards for c in range(8) if b.newest[c] >= 0]
+        if not seen:
+            self.status = "no data yet"
+            return
+        if self.first_data_wall is None:
+            self.first_data_wall = now
+        if self.t_first is None:
+            # wait a moment for every board's first data, so a slower board's first hits are not late
+            if any(b.newest.max() < 0 for b in boards) and now - self.first_data_wall < a.hold_s:
+                self.status = "waiting for every board's first data"
+                return
+            self.t_first = self.since if self.since is not None else min(b.first for b in boards if b.first is not None)
+            self.W = self.t_first
+        top = max(int(b.newest[c]) for b, c in seen)
+        writing = [(b, c) for b, c in seen if now - b.newest_wall[c] < a.stall_s]
+        margin = self.margin_ps()
+        if not writing:                         # nothing written for a while: the run ended, or a pause
+            target = top + margin + 1
+            self.status = "run ended or paused: everything on disk processed" if self.W >= target else "no new data: processing what is on disk"
         else:
-            while len(self.pending) >= 2 * self.a.workers:   # backpressure: lag grows, the page says so
-                self.pending[0][1].wait(0.2); self._collect()
-            self.pending.append((t1, self.pool.apply_async(process_slice, (task,)), now, bytes_by_board))
-        self.status = "running"
+            holding = [(b, c) for b, c in seen if now - b.newest_wall[c] < a.hold_s]
+            target = min(int(b.newest[c]) for b, c in holding) - margin
+            self.status = "running"
+        n_slices = sum(1 for k, *_ in self.pending.values() if k == "slice")
+        max_slice = int(a.max_slice_s * PS); min_step = int(a.min_step_s * PS)
+        while self.W < target and n_slices < 2 * max(1, a.workers):
+            if target - self.W < min_step and writing:
+                break                           # too thin a slice: wait for more
+            t1 = min(target, self.W + max_slice)
+            files = [(b.bi, p, A) for b in boards for p, A in b.overlapping(self.W - margin, t1 + margin)]
+            self._submit("slice", dict(t0=int(self.W), t1=int(t1), margin=int(margin), files=files, ref=self.ref_slot))
+            self.W = t1; n_slices += 1
+        if self.W < target and n_slices >= 2 * max(1, a.workers):
+            self.status = "falling behind: every worker is busy"
+        for b in boards:
+            b.release(self.W - margin - int(a.hold_s * PS))
+        # tasks that never come back (a hung worker) are said on the page, see state()
 
     def _collect(self):
-        while self.pending and self.pending[0][1].ready():
-            W, ar, now, bytes_by_board = self.pending.pop(0)
+        again = []                              # (kind, task, tries, epoch) to run (again)
+        broken = False
+        for fut in [f for f in self.pending if f.done()]:
+            kind, task, t_sub, tries, epoch = self.pending.pop(fut)
             try:
-                self._fold(ar.get(), now, bytes_by_board)
-            except Exception as ex:
-                say(f"slice failed: {ex!r}")
+                r = fut.result()
+            except Exception as ex:             # noqa: BLE001  BrokenProcessPool: a worker died
+                broken = broken or isinstance(ex, BrokenProcessPool)
+                if tries == 0:
+                    say(f"{kind} task failed ({ex!r}); running it again")
+                    again.append((kind, task, 1, epoch))
+                else:
+                    self.lost += 1
+                    say(f"{kind} task failed twice ({ex!r}); its data are missing from the dashboard")
+                continue
+            self._fold(kind, r, epoch)
+        if broken:
+            say("a worker process died; the workers are restarted")
+            for fut, (kind, task, t_sub, tries, epoch) in self.pending.items():
+                again.append((kind, task, tries, epoch))   # out with the dead pool: run them again
+            self.pending = {}
+            self._make_pool()
+        for kind, task, tries, epoch in again:
+            self._submit(kind, task, tries, epoch)
 
-    def _fold(self, r: dict, now, bytes_by_board):
+    def _fold(self, kind, r, epoch):
         with self.lock:
-            for k in ff.Result.ARRAYS:
-                getattr(self.acc, k)[...] += r[k]
-            for k in ff.Result.SCALARS:
-                setattr(self.acc, k, getattr(self.acc, k) + r[k])
-            top = max(b.newest for b in self.boards.values() if b.newest is not None)
-            beam_s = (min(r["W"], top) - self.t_first) * 1e-12
-            status = {ff.STATUS[i]: int(c) for i, c in enumerate(r["h_status"]) if c}
-            n_trk = int((r["h_ntrk"] * np.arange(ff.NTRK)).sum())
-            d = r["daq"]
-            if r["ref"] != self.ref_slot:         # made before the reference channel changed: keep all but dt
-                d = dict(d); d["dt"] = np.zeros_like(d["dt"])
-            self.daq.add(d)
-            self.history.append((now, beam_s, r["hits_by_board"], bytes_by_board, int(r["n_bunches"]), status, n_trk,
-                                 d["counts"]))
-            while self.history and now - self.history[0][0] > HISTORY_S:
-                self.history.popleft()
+            self.last_fold_wall = self.clock()
             self.proc_s += r["dt"]; self.steps += 1
+            if kind == "ingest":
+                self.ingested_hits[r["bi"]] += r["n"]
+                secs, slots, cnt = r["secs"]
+                n_slots = self.setup.chans.n_slots
+                for s in np.unique(secs):
+                    row = self.secs.get(int(s))
+                    if row is None:
+                        row = self.secs[int(s)] = np.zeros(n_slots, np.int64)
+                    m = secs == s
+                    np.add.at(row, slots[m], cnt[m])
+                if self.secs:
+                    newest = max(self.secs)
+                    for s in [s for s in self.secs if s < newest - HISTORY_S]:
+                        del self.secs[s]
+                if epoch == self.epoch:
+                    self.daq.add(r["daq"])
+            else:
+                res = r["res"]
+                if epoch == self.epoch:
+                    for k in ff.Result.ARRAYS:
+                        getattr(self.acc, k)[...] += res[k]
+                    for k in ff.Result.SCALARS:
+                        setattr(self.acc, k, getattr(self.acc, k) + res[k])
+                    d = r["daq"]
+                    if r["ref"] != self.ref_slot:   # made before the reference channel changed: keep all but dt
+                        d = dict(d); d["dt"] = np.zeros_like(d["dt"])
+                    self.daq.add(d)
+                n_trk = int((res["h_ntrk"] * np.arange(ff.NTRK)).sum())
+                status = {ff.STATUS[i]: int(c) for i, c in enumerate(res["h_status"]) if c}
+                self.slices.append((r["t0"], r["t1"], int(res["n_bunches"]), status, n_trk))
+                newest = max(s[1] for s in self.slices)
+                self.slices = [s for s in self.slices if s[1] > newest - HISTORY_S * PS]
+
+    # ------------------------------------------------------------ what the page shows
+    def _finder_done(self):
+        """Data time up to which every slice has come back."""
+        t0s = [task["t0"] for kind, task, *_ in self.pending.values() if kind == "slice"]
+        if self.W is None:
+            return None
+        return min(t0s) if t0s else self.W
 
     def state(self) -> dict:
         with self.lock:
-            hist = list(self.history)
+            now = self.clock()
+            S, A, ch = self.setup, self.acc, self.setup.chans
             boards = []
+            late = self.daq.late
+            pending = list(self.pending.values())
             for sn, b in self.boards.items():
-                boards.append(dict(serial=sn, id=b.board_id, files=len(b.files), bytes=b.bytes, hits=b.hits_seen,
-                                   newest_s=None if b.newest is None or self.t_first is None else (b.newest - self.t_first) * 1e-12,
-                                   stalled=b.newest is not None and time.time() - b.newest_wall >= self.a.stall_s,
-                                   buffered=0))
-            A, ch = self.acc, self.chans
+                seen = b.newest >= 0
+                top = int(b.newest.max()) if seen.any() else None
+                boards.append(dict(serial=sn, id=b.bi, **b.summary(), hits=int(b.hits), read_hits=int(self.ingested_hits[b.bi]),
+                                   late=int(late[b.bi * ch.board_channels:(b.bi + 1) * ch.board_channels].sum()),
+                                   newest_s=None if top is None or self.t_first is None else (top - self.t_first) / PS,
+                                   quiet_s=None if not seen.any() else float(now - b.newest_wall[seen].max()),
+                                   slow_couples=[int(c) for c in range(8) if seen[c] and now - b.newest_wall[c] >= self.a.stall_s
+                                                 and now - b.newest_wall.max() < self.a.stall_s]))
             occ = [[0] * (int(n) + 1) for n in (ch.ch[ch.plane == p].max(initial=0) for p in range(3))]
             counters = {}
             for bi in range(ch.plane.shape[0]):
@@ -410,25 +631,53 @@ class Online:
                     elif ch.plane[bi, c] == -1:
                         name = ff.COUNTERS[ch.counter[bi, c]]
                         counters[name] = counters.get(name, 0) + n
-            tb = self.tables
+            tb = S.tables
+            done = self._finder_done()
+            tops = [int(b.newest.max()) for b in self.boards.values() if b.newest.max() >= 0]
+            newest = max(tops) if tops and self.t_first is not None else None
+            ages = [now - t_sub for _, _, t_sub, *_ in pending]
+            health = []
+            if not FAST:
+                health.append("numba is not installed (online/setup-venv.sh): the analysis cannot keep up")
+            if ages and max(ages) > self.a.task_timeout:
+                health.append(f"a task has not come back for {max(ages):.0f} s: the analysis is stalled")
+            if self.lost:
+                health.append(f"{self.lost} task(s) failed twice: their data are missing")
+            if self.others:
+                health.append("files of boards not analysed: " + ", ".join(str(s) for s in sorted(self.others))
+                              + " (not in --boards)")
+            for b in boards:
+                if b["skipped_words"]:
+                    health.append(f"Digi-{b['serial']}: {b['skipped_words'] * 4:,} bytes of damaged data stepped over")
+                if b["other_format"]:
+                    health.append(f"Digi-{b['serial']}: {b['other_format']:,} couple aggregates in a format the online "
+                                  "decoder does not read (extras option 2 with time tag and charges needed); left out")
+                if b["malformed"]:
+                    health.append(f"Digi-{b['serial']}: {b['malformed']:,} malformed couple aggregates left out")
+            n_late = int(late.sum())
             return dict(
-                folder=self.folder, status=self.status, kernels="numba" if FAST else "numpy",
-                workers=self.a.workers, in_flight=len(self.pending),
-                replay=bool(self.a.replay), lag_ms=self.a.lag_ms, window_ns=self.a.window,
-                processed_s=None if self.W is None or self.t_first is None else (self.W - self.t_first) * 1e-12,
-                hits=A.n_hits, bunches=A.n_bunches, unmapped=A.n_bad,
-                proc_s=self.proc_s, steps=self.steps,
+                server_time=now, folder=self.folder, status=self.status, kernels="numba" if FAST else "numpy",
+                workers=self.a.workers, in_flight=len(self.pending), oldest_task_s=max(ages) if ages else None,
+                last_result_s=None if self.last_fold_wall is None else now - self.last_fold_wall,
+                replay=bool(self.a.replay), window_ns=self.a.window,
+                live_start=self.since is not None, since_wall=self.reset_wall,
+                processed_s=None if done is None or self.t_first is None else (done - self.t_first) / PS,
+                newest_s=None if newest is None else (newest - self.t_first) / PS,
+                hits=A.n_hits, late=n_late, bunches=A.n_bunches, unmapped=A.n_bad,
+                proc_s=self.proc_s, steps=self.steps, health=health,
+                warnings=S.warnings, problems=S.problems,
                 boards=boards,
-                finder=dict(setting=tb.setting, map_rows=tb.map_n, calibrated=tb.calibrated, cabling=self.cabling_src,
+                finder=dict(setting=tb.setting, setting_src=S.src.get("setting"), map=S.map_path, map_rows=tb.map_n,
+                            calibrated=tb.calibrated, cabling=S.cabling,
                             installed=[c for c, i in zip(ff.COUNTERS, ch.installed) if i],
                             missing=[c for c, i in zip(ff.COUNTERS, ch.installed) if not i],
-                            channels=[len(o) - 1 for o in occ], timing="offsets file" if self.a.time_offsets else "no offsets",
+                            channels=[len(o) - 1 for o in occ], timing="offsets file" if S.has_offsets else "no offsets",
                             fast=int(A.n_fast[0]), reference=A.n_slow, reference_s=A.slow_s, overflow=A.n_over,
-                            k=None if math.isinf(tb.k) else tb.k, nsig=tb.nsig, threshold=tb.threshold),
+                            k=None if math.isinf(tb.k) else tb.k, nsig=tb.nsig, threshold=tb.threshold,
+                            uncalibrated=len(ch.uncalibrated)),
                 statuses=list(ff.STATUS),
                 status_counts={ff.STATUS[i]: int(c) for i, c in enumerate(A.h_status)},
-                history=[dict(wall=h[0], beam_s=h[1], hits=h[2], bytes=h[3], bunches=h[4], status=h[5], tracks=h[6])
-                         for h in hist],
+                history=self._slice_history(),
                 hist_p=dict(edges=ff.P_EDGES.tolist(), counts=A.h_p.tolist()),
                 hist_res=dict(edges=ff.RES_EDGES.tolist(), t10=A.h_res[0].tolist(), t21=A.h_res[1].tolist()),
                 hist_dt=dict(edges=ff.DT_EDGES.tolist(), counts=A.h_dt.tolist()),
@@ -436,43 +685,74 @@ class Online:
                 hist_cl=A.h_cl.tolist(), hist_ncand=A.h_ncand.tolist(), hist_ntrk=A.h_ntrk.tolist(),
                 hist_nhit=A.h_nhit.tolist(), lucite=dict(yes=int(A.h_lucite[0]), no=int(A.h_lucite[1])),
                 occupancy=occ, counters=counters,
-                daq=self._daq_state(hist, boards),
+                daq=self._daq_state(boards, newest, done),
             )
 
-    def _daq_state(self, hist, boards):
-        """The DAQ tab: per-channel counts and rates, data volume and disk, how much has been processed."""
+    def _slice_history(self):
+        """The finder's slices in time order, merged into 1 s steps."""
+        if self.t_first is None:
+            return []
+        out = []
+        for t0, t1, nb, st, ntrk in sorted(self.slices):
+            if out and t1 - out[-1]["t0_ps"] < PS and out[-1]["t1_ps"] == t0:
+                o = out[-1]
+                o["t1_ps"] = t1; o["bunches"] += nb; o["tracks"] += ntrk
+                for k, v in st.items():
+                    o["status"][k] = o["status"].get(k, 0) + v
+            else:
+                out.append(dict(t0_ps=t0, t1_ps=t1, bunches=nb, status=dict(st), tracks=ntrk))
+        return [dict(t0=(o["t0_ps"] - self.t_first) / PS, t1=(o["t1_ps"] - self.t_first) / PS, bunches=o["bunches"],
+                     status=o["status"], tracks=o["tracks"]) for o in out]
+
+    def _complete_seconds(self):
+        """Whole seconds of data time inside the run, all of whose hits from the couples still writing
+        are on disk (a second the run starts or ends in is left out: its rate would read low)."""
+        now = self.clock()
+        tops = [int(b.newest[c]) for b in self.boards.values() for c in range(8)
+                if b.newest[c] >= 0 and now - b.newest_wall[c] < self.a.hold_s]
+        if not tops:
+            tops = [int(b.newest.max()) for b in self.boards.values() if b.newest.max() >= 0]
+            if not tops:
+                return []
+            last = max(tops) // PS - 1        # nothing writing: all is on disk, but the last second is cut
+        else:
+            last = min(tops) // PS - 1
+        firsts = [b.first for b in self.boards.values() if b.first is not None]
+        first = -(-min(firsts) // PS) if firsts else 0
+        if self.t_first is not None:
+            first = max(first, -(-self.t_first // PS))
+        return [s for s in sorted(self.secs) if first <= s <= last]
+
+    def _daq_state(self, boards, newest, done):
         D = self.daq
+        secs = self._complete_seconds()
         rate = {}
-        if len(hist) >= 2:                        # the newest step's counts over its beam time
-            dt_s = hist[-1][1] - hist[-2][1]
-            if dt_s > 0:
-                rate = {sl: float(hist[-1][7][sl]) / dt_s for sl in self.slots}
-        newest = max((b["newest_s"] or 0) for b in boards) if boards else 0
-        if self.a.replay and self.replay_t0 is not None:   # a replay only "has" the data up to its clock
-            newest = min(newest, (time.time() - self.replay_t0) * self.a.replay_speed)
-        processed = None if self.W is None or self.t_first is None else (self.W - self.t_first) * 1e-12
-        # keeping up: the lag now against the lag 30 s of wall time ago
-        lag = None if processed is None else max(0.0, newest - processed)
+        if secs and self.status == "running":       # the newest complete second; nothing after the run ended
+            row = self.secs[secs[-1]]
+            rate = {sl: float(row[sl]) for sl in self.slots}
         try:
             du = shutil.disk_usage(self.folder or self.a.data_path or "/")
             disk = dict(free_gb=du.free / 1e9, total_gb=du.total / 1e9)
         except OSError:
             disk = None
-        run_bytes = sum(b["bytes"] for b in boards)
-        files = sum(b["files"] for b in boards)
+        nbc = self.setup.chans.board_channels
+        t0s = self.t_first // PS if self.t_first is not None else (secs[0] if secs else 0)
         return dict(
-            slots=[dict(slot=sl, **self.labels[sl], count=int(D.counts[sl]), rate=rate.get(sl)) for sl in self.slots],
+            slots=[dict(slot=sl, **self.labels[sl], count=int(D.counts[sl]), rate=rate.get(sl), late=int(D.late[sl])) for sl in self.slots],
             ref=self.ref_slot, total_rate=sum(rate.values()) if rate else None,
-            processed_pct=None if processed is None or newest <= 0 else min(100.0, 100.0 * processed / newest),
-            lag_s=lag, in_flight=len(self.pending), backpressure=len(self.pending) >= 2 * max(1, self.a.workers),
-            run_bytes=run_bytes, files=files, disk=disk, n_windows=D.n_seg,
-            history=[dict(beam_s=h[1], total=int(sum(int(h[7][sl]) for sl in self.slots))) for h in hist])
+            lag_s=None if newest is None or done is None else max(0.0, (newest - done) / PS),
+            processed_pct=None if newest is None or done is None or newest <= self.t_first else
+            min(100.0, 100.0 * (done - self.t_first) / (newest - self.t_first)),
+            in_flight=len(self.pending), backpressure=self.status.startswith("falling behind"),
+            run_bytes=sum(b["bytes"] for b in boards), files=sum(b["files"] for b in boards), disk=disk, n_windows=D.n_seg,
+            seconds=[dict(t=s - t0s, boards=[int(self.secs[s][bi * nbc:(bi + 1) * nbc].sum()) for bi in range(len(self.serials))])
+                     for s in secs[-HISTORY_S:]])
 
     def channel(self, sl, view=None):
         """One channel's histograms for the DAQ tab (sl = -1: all channels together, spectrum only).
         view = (lo, hi, nb, log): the Qlong range [lo, hi) and binning the page shows."""
         with self.lock:
-            D, hist = self.daq, list(self.history)
+            D = self.daq
             f = 0.5 * (dh.F_EDGES[:-1] + dh.F_EDGES[1:])
             if sl == -1:
                 n = float(D.spec_tot_n[0])
@@ -481,10 +761,8 @@ class Online:
             if sl not in self.labels:
                 return None
             n = float(D.spec_n[sl])
-            rates = []
-            for a, b in zip(hist[:-1], hist[1:]):
-                if b[1] > a[1]:
-                    rates.append([b[1], float(b[7][sl]) / (b[1] - a[1])])
+            t0s = self.t_first // PS if self.t_first is not None else 0
+            rates = [[s - t0s, int(self.secs[s][sl])] for s in self._complete_seconds()]
             lo, hi, nb, log = view or (0, 65536, 4096, False)
             e = dh.q_edges(lo, hi, nb, log)
             row = D.q[sl]
@@ -495,7 +773,7 @@ class Online:
             i0 = max(0, int(np.searchsorted(dh.PX_EDGES, e[0], side="right")) - 1)
             i1 = min(dh.NPX, int(np.searchsorted(dh.PX_EDGES, e[-1], side="left")))
             P = D.psd[sl, i0:i1]
-            return dict(slot=sl, **self.labels[sl], count=int(D.counts[sl]), ref=self.ref_slot,
+            return dict(slot=sl, **self.labels[sl], count=int(D.counts[sl]), late=int(D.late[sl]), ref=self.ref_slot,
                         q=dict(edges=e.tolist(), counts=shown.tolist(), total=tot, zero=int(row[0]), sat=int(row[65535]),
                                outside=int(inside - shown.sum()), log=bool(log)),
                         psd=dict(xedges=dh.PX_EDGES[i0:i1 + 1].tolist(), ny=dh.NPY, counts=P.tolist(),
@@ -515,9 +793,11 @@ class Online:
                         slots=[dict(slot=sl, **self.labels[sl], counts=C[i].tolist()) for i, sl in enumerate(self.slots)])
 
     def clear(self):
+        """The page's Clear: accumulated histograms start again; tasks already out are not added."""
         with self.lock:
-            self.acc = ff.Result(self.chans.n_slots)
-            self.daq = dh.DaqResult(self.chans.n_slots)
+            self.acc = ff.Result(self.setup.chans.n_slots)
+            self.daq = dh.DaqResult(self.setup.chans.n_slots)
+            self.epoch += 1
 
     def set_ref(self, sl):
         with self.lock:
@@ -598,7 +878,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers(); self.wfile.write(body)
 
 
-def main(argv=None):
+def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--data-path", help="FSUDAQ data path; the newest run folder in it is followed")
     p.add_argument("--run", help="one run folder instead of following the data path")
@@ -606,33 +886,39 @@ def main(argv=None):
     p.add_argument("--replay", action="store_true", help="play a finished run at real-time pace")
     p.add_argument("--replay-speed", type=float, default=1.0)
     p.add_argument("--boards", default=DEFAULT_BOARDS, help="serials in detector-map board order")
-    p.add_argument("--map", default=None, help="momentum map (default finder/momentum_map.csv); columns per finder/INTERFACE.md")
-    p.add_argument("--setting", choices=("high", "low"), default="high", help="T1/T2 position installed for this run")
-    p.add_argument("--cabling", help="CSV serial,channel,kind,plane,ch (kind trk/veto/cherenkov/lucite); "
-                                     "default: a sequential placeholder")
-    p.add_argument("--gains", help="CSV serial,channel,mevee_per_count; without it the light tests are off")
-    p.add_argument("--time-offsets", help="CSV serial,channel,offset_ns subtracted from each channel's time")
     p.add_argument("--eight-channel-boards", default=EIGHT_CHANNEL_BOARDS, help="serials of 8-channel boards")
+    p.add_argument("--config", default=CONFIG, help="the run's setting, cabling, gains, time offsets and map (JSON, "
+                                                     "re-read for each run); the options below override it")
+    p.add_argument("--setting", choices=("high", "low"), default=None, help="T1/T2 position installed for this run")
+    p.add_argument("--map", default=None, help="momentum map (default finder/momentum_map.csv); columns per finder/INTERFACE.md")
+    p.add_argument("--cabling", default=None, help="CSV serial,channel,kind,plane,ch (kind trk/veto/cherenkov/lucite)")
+    p.add_argument("--gains", default=None, help="CSV serial,channel,mevee_per_count; without it the light tests are off")
+    p.add_argument("--time-offsets", default=None, help="CSV serial,channel,offset_ns subtracted from each channel's time")
     p.add_argument("--ref-slot", type=int, default=None,
                    help="reference channel for the time differences (board index x 16 + channel); the page can change it")
     p.add_argument("--window", type=float, default=25.0,
                    help="bunch building: a gap longer than this starts a new bunch [ns]. 25 = the finder's +-10 ns gate "
                         "around each plane's expected arrival plus the 4.3 ns T0->T2 flight at beta 0.75")
-    p.add_argument("--lag-ms", type=float, default=100.0, help="merge watermark margin [ms]")
-    p.add_argument("--stall-s", type=float, default=5.0, help="a board silent this long no longer holds the watermark")
-    p.add_argument("--min-step-s", type=float, default=1.0, help="do not cut slices shorter than this (edge decode cost)")
-    p.add_argument("--interval", type=float, default=1.0, help="seconds between processing steps (inotify wakes it earlier)")
-    p.add_argument("--from-start", action="store_true", help="live mode: process the run from its first file instead of from now")
+    p.add_argument("--stall-s", type=float, default=5.0, help="no couple written for this long: process all that is on disk")
+    p.add_argument("--hold-s", type=float, default=30.0, help="a couple silent this long no longer holds the finder back "
+                                                              "(its later hits are counted as late)")
+    p.add_argument("--min-step-s", type=float, default=0.5, help="do not cut finder slices shorter than this while data come in")
+    p.add_argument("--max-slice-s", type=float, default=2.0, help="the longest finder slice (memory per worker)")
+    p.add_argument("--task-timeout", type=float, default=120.0, help="a task out longer than this is reported as stalled")
+    p.add_argument("--interval", type=float, default=1.0, help="seconds between processing steps")
+    p.add_argument("--from-start", action="store_true", help="read the run already running at start-up from its beginning")
     p.add_argument("--port", type=int, default=8050)
-    p.add_argument("--workers", type=int, default=16,
-                   help="processes for sort / bunch building / finder (0 = in the main loop); 16 keep up with about "
-                        "1 GB/s of noise data on odin, 8 with about 500 MB/s")
+    p.add_argument("--workers", type=int, default=8, help="worker processes (0 = in the main loop)")
     p.add_argument("--open-browser", action="store_true", help="open the page in the default browser once the server is up")
     p.add_argument("--exit-with-parent", action="store_true", help="stop when the process that started us (FSUDAQ) is gone")
     a = p.parse_args(argv)
     if not a.run and not a.data_path:
-        sys.exit("give --data-path or --run")
+        p.error("give --data-path or --run")
+    return a
 
+
+def main(argv=None):
+    a = parse_args(argv)
     online = Online(a)
     Handler.online = online
     with open(os.path.join(HERE, "dashboard.html"), "rb") as fh:
@@ -642,18 +928,22 @@ def main(argv=None):
     if a.open_browser:
         import webbrowser
         threading.Thread(target=lambda: webbrowser.open(f"http://localhost:{a.port}/"), daemon=True).start()
-    say(f"online dashboard: http://localhost:{a.port}/   kernels={'numba' if FAST else 'numpy'}  "
-          f"files={'inotify' if HAVE_INOTIFY and not a.replay else 'polling'}  "
-          f"{'replay of ' + a.run if a.replay else ('run ' + a.run if a.run else 'following ' + (a.follow or a.data_path))}")
+    say(f"online dashboard: http://localhost:{a.port}/   kernels={'numba' if FAST else 'numpy (slow)'}  "
+        f"{'replay of ' + a.run if a.replay else ('run ' + a.run if a.run else 'following ' + (a.follow or a.data_path))}")
+    for w in online.setup.warnings + online.setup.problems:
+        say("  setup: " + w)
     last_report = 0.0
     last_seen = None                     # (status, processed_s, hits): report only when this changes
 
-    def _term(signum, frame):            # SIGTERM from FSUDAQ (or kill): leave like Ctrl-C
-        raise KeyboardInterrupt
+    stopping = threading.Event()
+
+    def _term(signum, frame):            # SIGTERM from FSUDAQ, or Ctrl-C: leave at the next step
+        stopping.set(); online.wake.set()
     signal.signal(signal.SIGTERM, _term)
+    signal.signal(signal.SIGINT, _term)
     parent = os.getppid()
     try:
-        while True:
+        while not stopping.is_set():
             t0 = time.time()
             if a.exit_with_parent and os.getppid() != parent:   # FSUDAQ died: free the port for the next one
                 say("FSUDAQ is gone; stopping")
@@ -668,23 +958,20 @@ def main(argv=None):
                 seen = (s['status'], round(s['processed_s'] or 0, 1), s['hits'])
                 if seen != last_seen:    # quiet while nothing happens (between runs, page closed)
                     say(f"{time.strftime('%H:%M:%S')} {s['status']}: processed {s['processed_s'] or 0:.1f} s of beam, "
-                          f"{s['hits']:,} hits, {s['bunches']:,} bunches, "
-                          f"{s['status_counts']['unique'] + s['status_counts']['tracks']:,} accepted, {s['proc_s']:.1f} s worker CPU, "
-                          f"{s['in_flight']} steps in flight")
+                        f"{s['hits']:,} hits in the finder, {s['late']:,} late, {s['bunches']:,} bunches, "
+                        f"{s['status_counts']['unique'] + s['status_counts']['tracks']:,} accepted, {s['proc_s']:.1f} s worker CPU, "
+                        f"{s['in_flight']} tasks out")
                     last_seen = seen
                 last_report = t0
             online.wake.wait(max(0.0, a.interval - (time.time() - t0)))
             online.wake.clear()
-    except KeyboardInterrupt:
-        pass
     finally:
         try:
             srv.shutdown()
         except Exception:
             pass
-        # Pool.terminate() waits on the task queue's lock; a worker killed while holding it (a signal
-        # to the whole process group: Ctrl-C, timeout, systemd) makes that wait forever and the port
-        # stays taken. Kill the workers directly and leave without the pool's exit handlers.
+        # kill the workers directly and leave without the pool's exit handlers, which wait on a
+        # queue lock a killed worker may hold (the port would stay taken)
         for child in mp.active_children():
             child.kill()
         say("online dashboard stopped")

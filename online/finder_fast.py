@@ -17,7 +17,10 @@ Inputs the reference expects (INTERFACE.md), and where they come from here:
   light     Energy (Qlong) x MeVee per count from the gains file. WITHOUT gains the light
             tests are switched off the reference's own way (pair rule "never", K = inf):
             every cluster reads as one track, nothing is split, no multitrack by light.
-  time      Timestamp - per-channel offset (time-offsets file), in ns
+            With a gains file, a cabled tracker channel missing from it has no light and its
+            hits are left out (listed on the page), not given 1 MeVee per count.
+  time      Timestamp - per-channel offset (time-offsets file), in ns, removed BEFORE the hits
+            are ordered and bunched: "a common clock, with cable delays removed"
   gate      the event-building window; there is no bunch clock in the data yet
   counters  veto / cherenkov / lucite channels from the cabling; absent = None
 """
@@ -114,10 +117,6 @@ def default_cabling(serials, n_channels, planes=(16, 35, 59), counters=COUNTERS)
     the counters. Rows: (serial, channel, kind, plane, ch) with kind 'trk' or a counter name."""
     slots = [(s, c) for s in serials for c in range(n_channels.get(s, 16))]
     want = [("trk", p, ch) for p, n in enumerate(planes) for ch in range(1, n + 1)] + [(c, -1, 0) for c in counters]
-    if len(want) > len(slots):
-        lost = want[len(slots):]
-        print(f"default cabling: {len(want)} channels wanted, {len(slots)} on the boards; not read out: "
-              + ", ".join(f"T{p}:{ch}" if k == "trk" else k for k, p, ch in lost), file=sys.stderr)
     return [(s, c, kind, p, ch) for (s, c), (kind, p, ch) in zip(slots, want)]
 
 
@@ -129,6 +128,33 @@ def load_cabling(path):
             rows.append((int(r["serial"]), int(r["channel"]), r["kind"].strip(),
                          int(r.get("plane") or -1), int(r.get("ch") or 0)))
     return rows
+
+
+def check_cabling(rows, serials, n_channels, plane_channels):
+    """(usable rows, problems): a row is left out if its plane is not 0-2, its channel is outside the
+    plane, its kind is unknown, its digitizer channel does not exist, or it repeats a digitizer channel
+    or a plane channel already taken. Rows for boards not open are left out with a note."""
+    good, problems, seen_dig, seen_plane = [], [], {}, {}
+    for s, c, kind, p, ch in rows:
+        where = f"{s} ch{c}"
+        if s not in serials:
+            problems.append(f"{where}: board not open, row ignored"); continue
+        if not 0 <= c < n_channels.get(s, 16):
+            problems.append(f"{where}: Digi-{s} has no channel {c}"); continue
+        if kind == "trk":
+            if p not in (0, 1, 2) or not 1 <= ch <= plane_channels[p if p in (0, 1, 2) else 0]:
+                problems.append(f"{where}: T{p}:{ch} is not a tracker channel (T0 1-{plane_channels[0]}, "
+                                f"T1 1-{plane_channels[1]}, T2 1-{plane_channels[2]})"); continue
+            if (p, ch) in seen_plane:
+                problems.append(f"{where}: T{p}:{ch} already on {seen_plane[(p, ch)]}"); continue
+            seen_plane[(p, ch)] = where
+        elif kind not in COUNTERS:
+            problems.append(f"{where}: unknown kind '{kind}' (trk, " + ", ".join(COUNTERS) + ")"); continue
+        if (s, c) in seen_dig:
+            problems.append(f"{where}: given twice"); continue
+        seen_dig[(s, c)] = kind
+        good.append((s, c, kind, p, ch))
+    return good, problems
 
 
 def load_per_channel(path, column):
@@ -153,6 +179,7 @@ class Channels:
         self.counter = np.full((nb, board_channels), -1, np.int64)
         self.gain = np.ones((nb, board_channels), np.float64)
         self.toff = np.zeros((nb, board_channels), np.float64)
+        self.uncalibrated = []                   # cabled tracker channels a gains file does not give
         self.rows = rows
         self.installed = np.zeros(len(COUNTERS), np.bool_)
         for s, c, kind, p, ch in rows:
@@ -164,14 +191,18 @@ class Channels:
             elif kind in COUNTERS:
                 k = COUNTERS.index(kind)
                 self.plane[b, c] = -1; self.counter[b, c] = k; self.installed[k] = True
-        if gains:
+        if gains is not None:
+            self.gain[...] = np.nan               # no light unless the file gives it
             for (s, c), v in gains.items():
                 if s in bidx and 0 <= c < board_channels:
                     self.gain[bidx[s], c] = v
+            self.uncalibrated = [(s, c) for s, c, kind, p, ch in rows
+                                 if kind == "trk" and s in bidx and 0 <= c < board_channels and np.isnan(self.gain[bidx[s], c])]
         if offsets_ns:
             for (s, c), v in offsets_ns.items():
                 if s in bidx and 0 <= c < board_channels:
                     self.toff[bidx[s], c] = v
+        self.toff_ps = np.round(self.toff * 1000).astype(np.int64)
         # occupancy index: one slot per (board, channel)
         self.n_slots = nb * board_channels
 
@@ -376,13 +407,13 @@ def _fill_track(trk, h_p, h_r, h_res, h_dt):
 
 
 @njit(cache=True, nogil=True)
-def _bunch_kernel(ts, board, chan, energy, order, plane_of, ch_of, counter_of, gain, toff, installed, calibrated,
+def _bunch_kernel(ts, board, chan, energy, order, plane_of, ch_of, counter_of, gain, installed, calibrated,
                   threshold, window, t0, t1,
                   lut, map_p, gang, sigma_t, light_p, light_q, s_mm, rule, k, has_nsig, nsig, max_cands, max_combos,
                   occ, h_nhit, h_status, h_p, h_r, h_res, h_dt, h_cl, h_ncand, h_ntrk, h_lucite, n_fast,
                   sl_start, sl_plane, sl_ch, sl_q, sl_t, sl_aux):
-    """Build bunches from the time-ordered hits and decide each one as it closes. Bunches whose
-    first hit is in [t0, t1) are kept. Slow bunches are written to the sl_* arrays (CSR);
+    """Build bunches from the time-ordered hits (time offsets already removed) and decide each one as
+    it closes. Bunches whose first hit is in [t0, t1) are kept. Slow bunches are written to the sl_* arrays (CSR);
     returns (n_bunches, n_hits_kept, n_unmapped, n_slow, n_slow_hits, n_overflow, full)."""
     nb_max = plane_of.shape[0]; nc_max = plane_of.shape[1]
     bp = np.empty(MAXB, np.int64); bc = np.empty(MAXB, np.int64)
@@ -462,13 +493,13 @@ def _bunch_kernel(ts, board, chan, energy, order, plane_of, ch_of, counter_of, g
             aux |= 1 << counter_of[b, c]
             continue
         q = energy[i] * gain[b, c] if calibrated else 1.0
-        if calibrated and q < threshold:
+        if calibrated and not (q >= threshold):   # below threshold, or no gain for the channel (NaN)
             continue
         if nb >= MAXB:
             over = True
             continue
         bp[nb] = p; bc[nb] = ch_of[b, c]; bq[nb] = q
-        bt[nb] = (t - first) * 1e-3 - toff[b, c]
+        bt[nb] = (t - first) * 1e-3
         nb += 1
     return n_b, n_hits, n_bad, n_slow, n_sh, n_over, full
 
@@ -547,12 +578,18 @@ def decide_slow(tables, chans, res, sl_start, sl_plane, sl_ch, sl_q, sl_t, sl_au
     res.slow_s += _time.perf_counter() - t_start
 
 
-def process_sorted(tables, chans, ts, board, chan, energy, order, window_ps, t0=None, t1=None):
-    """Bunches of the time-ordered hits (order sorts ts) whose first hit is in [t0, t1)."""
+def process_hits(tables, chans, ts, board, chan, energy, window_ps, t0=None, t1=None):
+    """Bunches whose first hit is in [t0, t1). Each channel's time offset is removed first, then the
+    hits are ordered and bunched: the reference wants times on a common clock, cable delays removed,
+    and a delay longer than the bunch window would otherwise split every track into two bunches."""
     if t0 is None:
         t0 = np.int64(-1) << 62
     if t1 is None:
         t1 = np.int64(1) << 62
+    board = np.ascontiguousarray(board, np.int64); chan = np.ascontiguousarray(chan, np.int64)
+    ok = (board >= 0) & (board < chans.toff_ps.shape[0]) & (chan >= 0) & (chan < chans.toff_ps.shape[1])
+    ts = np.asarray(ts, np.int64) - np.where(ok, chans.toff_ps[np.where(ok, board, 0), np.where(ok, chan, 0)], 0)
+    order = np.argsort(ts, kind="stable")
     res = Result(chans.n_slots)
     n = order.size
     cap_b = max(1024, n // 50); cap_h = max(4096, n // 10)
@@ -565,7 +602,7 @@ def process_sorted(tables, chans, ts, board, chan, energy, order, window_ps, t0=
         out = _bunch_kernel(np.ascontiguousarray(ts, np.int64), np.ascontiguousarray(board, np.int64),
                             np.ascontiguousarray(chan, np.int64), np.ascontiguousarray(energy, np.float64),
                             np.ascontiguousarray(order, np.int64), chans.plane, chans.ch, chans.counter,
-                            chans.gain, chans.toff, chans.installed, tables.calibrated, tables.threshold,
+                            chans.gain, chans.installed, tables.calibrated, tables.threshold,
                             np.int64(window_ps), np.int64(t0), np.int64(t1), *tables.kernel_args(),
                             r0.occ, r0.h_nhit, r0.h_status, r0.h_p, r0.h_r, r0.h_res, r0.h_dt, r0.h_cl,
                             r0.h_ncand, r0.h_ntrk, r0.h_lucite, r0.n_fast,
@@ -699,7 +736,7 @@ def selftest_stream(n=50000, seed=2):
         tb = Tables("high", calibrated=calibrated)
         T = tb.T
         gains = {(s, c): float(rng.uniform(0.002, 0.004)) for s, c, *_ in rows}
-        offs = {(s, c): float(rng.normal(0, 2.0)) for s, c, *_ in rows}
+        offs = {(s, c): float(rng.normal(0, 30.0)) for s, c, *_ in rows}   # cable delays: larger than the window
         chans = Channels(serials, rows, gains if calibrated else None, offs)
         where = {}                               # (kind, plane, ch) -> (board index, channel)
         for s, c, kind, p, ch in rows:
@@ -729,15 +766,16 @@ def selftest_stream(n=50000, seed=2):
             t_bunch += int(rng.integers(250_000, 2_000_000))
         ts = np.asarray(ts, np.int64); bd = np.asarray(bd, np.int64); chv = np.asarray(chv, np.int64)
         en = np.asarray(en, np.float64)
-        order = np.argsort(ts, kind="stable")
-        res = process_sorted(tb, chans, ts, bd, chv, en, order, window)
-        # the same bunches, built in Python and decided by the reference only
+        res = process_hits(tb, chans, ts, bd, chv, en, window)
+        # the same bunches, built in Python on the corrected times and decided by the reference only
+        tc = ts - np.round(np.asarray([offs[(serials[b], c)] for b, c in zip(bd, chv)]) * 1000).astype(np.int64)
+        order = np.argsort(tc, kind="stable")
         ref = Result(chans.n_slots)
         o = order
-        starts = np.flatnonzero(np.diff(np.concatenate([[ts[o[0]] - 2 * window], ts[o]])) > window)
+        starts = np.flatnonzero(np.diff(np.concatenate([[tc[o[0]] - 2 * window], tc[o]])) > window)
         bounds = list(starts) + [o.size]
         for a, b in zip(bounds[:-1], bounds[1:]):
-            first = ts[o[a]]
+            first = tc[o[a]]
             hits = {0: [], 1: [], 2: []}; aux = 0
             ref.h_nhit[min(b - a, NHIT - 1)] += 1
             for x in o[a:b]:
@@ -749,7 +787,7 @@ def selftest_stream(n=50000, seed=2):
                 q = en[x] * chans.gain[bi, c] if calibrated else 1.0
                 if calibrated and q < tb.threshold:
                     continue
-                hits[int(p)].append((int(chans.ch[bi, c]), float(q), (ts[x] - first) * 1e-3 - chans.toff[bi, c]))
+                hits[int(p)].append((int(chans.ch[bi, c]), float(q), (tc[x] - first) * 1e-3))
             r = of.find(T, hits, veto=bool(aux & 1), cherenkov=bool(aux & 2), lucite=bool(aux & 4))
             ref.h_status[ST[r["status"]]] += 1
             if r["status"] != "incomplete":

@@ -1,0 +1,8 @@
+{
+  "_comment": "Copy to experiment.json and fill in. Read by online_dashboard.py at every new run; paths relative to this file. Anything left out is a placeholder the dashboard warns about.",
+  "setting": "high",
+  "cabling": "cabling.csv",
+  "gains": "gains.csv",
+  "time_offsets": "time_offsets.csv",
+  "map": null
+}

@@ -2,7 +2,8 @@
 """Per-channel monitoring for the dashboard's DAQ tab: everything keyed by digitizer channel,
 so it needs no cabling and works whatever is plugged in where.
 
-Per channel (slot = board index x 16 + channel), for hits in a slice [t0, t1):
+Two parts. process_exact() takes the hits of newly written couple aggregates, each aggregate once,
+in file order (each channel's hits are in time order there), whenever they reach the disk:
   counts    hits
   q         pulse height (Qlong), one bin per count over the full 16-bit range (65535 = saturated, or
             a negative integral on the DPP-PSD). The page asks for any range and binning (rebin()).
@@ -10,7 +11,12 @@ Per channel (slot = board index x 16 + channel), for hits in a slice [t0, t1):
             [0, 1] (1 in the last). Hits with Q = 0 or 65535 are left out (the page reports those), and
             so are hits with Qshort saturated (32767) or above Qlong (PSD < 0), counted in psd_out.
   iat       time since the previous hit on the same channel, log bins 1 ns .. 1 s
-            (shows the trigger hold-off as a cut, pile-up, and a pulser as a peak)
+            (shows the trigger hold-off as a cut, pile-up, and a pulser as a peak); the first hit of a
+            channel in each batch has no previous one
+  late      hits older than the track finder's boundary when they reached the disk (not in the finder)
+  per second: hits per channel and second of data time (the rate plots)
+process_ordered() takes the time-ordered hits of a finder slice [t0, t1), which need all channels
+together:
   dt        time to every hit of the reference channel within +-DT_W ns (t_channel - t_ref)
   spectrum  rate spectrum: hits counted in 10 us bins over fixed 0.33 s windows (aligned to the
             absolute time, so slices do not change them), |FFT|^2 / hits. Random hits give a flat 1;
@@ -54,7 +60,7 @@ F_EDGES = np.arange(NF + 1) * F_GROUP / (SEG * BIN_PS * 1e-12) + 0.5 / (SEG * BI
 
 
 class DaqResult:
-    ARRAYS = ("counts", "psd_out", "iat", "dt", "spec_p", "spec_n", "spec_tot_p", "spec_tot_n")
+    ARRAYS = ("counts", "psd_out", "iat", "late", "dt", "spec_p", "spec_n", "spec_tot_p", "spec_tot_n")
     SPARSE = ("q", "psd")
     SCALARS = ("n_seg",)
 
@@ -65,6 +71,7 @@ class DaqResult:
         self.psd = np.zeros((n_slots, NPX, NPY), big)
         self.psd_out = np.zeros(n_slots, np.int64)
         self.iat = np.zeros((n_slots, IAT_EDGES.size - 1), np.int64)
+        self.late = np.zeros(n_slots, np.int64)
         self.dt = np.zeros((n_slots, NDT), np.int64)
         self.spec_p = np.zeros((n_slots, NF), np.float64)
         self.spec_n = np.zeros(n_slots, np.float64)
@@ -96,23 +103,19 @@ class DaqResult:
 
 
 @njit(cache=True, nogil=True)
-def _kernel(ts, slot, e, qs, order, t0, t1, ref_ts, dt_w_ps, pxlut, counts, q, psd, psd_out, iat, dt):
+def _exact_kernel(ts, slot, e, qs, late_before, pxlut, counts, q, psd, psd_out, iat, late):
     n_slots = counts.size
     last = np.full(n_slots, np.int64(-1))
-    lo = 0
-    nref = ref_ts.size
     niat = iat.shape[1]
-    ndt = dt.shape[1]
-    for j in range(order.size):
-        i = order[j]
+    for i in range(ts.size):
         t = ts[i]; s = slot[i]
         if s < 0 or s >= n_slots:
             continue
         prev = last[s]
         last[s] = t
-        if t < t0 or t >= t1:
-            continue
         counts[s] += 1
+        if t < late_before:
+            late[s] += 1
         en = e[i]
         q[s, en] += 1
         if en > 0 and en < 65535:
@@ -128,36 +131,56 @@ def _kernel(ts, slot, e, qs, order, t0, t1, ref_ts, dt_w_ps, pxlut, counts, q, p
             x = math.log10((t - prev) * 1e-3) * 10.0      # 10 bins per decade from 1 ns
             if x >= 0.0 and x < niat:
                 iat[s, int(x)] += 1
-        if nref > 0:
-            while lo < nref and ref_ts[lo] < t - dt_w_ps:
-                lo += 1
-            k = lo
-            while k < nref and ref_ts[k] <= t + dt_w_ps:
-                d = t - ref_ts[k]
-                x = (d + dt_w_ps) * ndt / (2 * dt_w_ps)
-                bx = int(x)
-                if bx >= 0 and bx < ndt:
-                    dt[s, bx] += 1
-                k += 1
 
 
-def process(ts, slot, e, qs, order, t0, t1, ref_slot, n_slots):
-    """DaqResult for the hits whose time is in [t0, t1). e, qs: Qlong, Qshort. order sorts ts; hits
-    outside the slice still count as the 'previous hit' of a channel. The reference channel's own hits
-    are not paired with themselves."""
+def process_exact(ts, slot, e, qs, late_before, n_slots):
+    """DaqResult (counts, q, psd, iat, late) of a batch of hits in file order, and the hits per
+    (slot, second of data time) as (seconds, slots, counts)."""
+    r = DaqResult(n_slots, np.uint32)
+    if ts.size == 0:
+        return r, (np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros(0, np.int64))
+    ts = np.ascontiguousarray(ts, np.int64); slot = np.ascontiguousarray(slot, np.int64)
+    _exact_kernel(ts, slot, np.ascontiguousarray(e, np.int64), np.ascontiguousarray(qs, np.int64), np.int64(late_before),
+                  PXLUT, r.counts, r.q, r.psd, r.psd_out, r.iat, r.late)
+    ok = (slot >= 0) & (slot < n_slots)
+    key, cnt = np.unique((ts[ok] // 1_000_000_000_000) * n_slots + slot[ok], return_counts=True)
+    return r, (key // n_slots, key % n_slots, cnt.astype(np.int64))
+
+
+@njit(cache=True, nogil=True)
+def _dt_kernel(ts, slot, order, t0, t1, ref_ts, dt_w_ps, dt):
+    n_slots = dt.shape[0]
+    lo = 0
+    nref = ref_ts.size
+    ndt = dt.shape[1]
+    for j in range(order.size):
+        i = order[j]
+        t = ts[i]; s = slot[i]
+        if s < 0 or s >= n_slots or t < t0 or t >= t1:
+            continue
+        while lo < nref and ref_ts[lo] < t - dt_w_ps:
+            lo += 1
+        k = lo
+        while k < nref and ref_ts[k] <= t + dt_w_ps:
+            d = t - ref_ts[k]
+            x = (d + dt_w_ps) * ndt / (2 * dt_w_ps)
+            bx = int(x)
+            if bx >= 0 and bx < ndt:
+                dt[s, bx] += 1
+            k += 1
+
+
+def process_ordered(ts, slot, order, t0, t1, ref_slot, n_slots):
+    """DaqResult (dt, spectra) of the hits whose time is in [t0, t1); order sorts ts. The reference
+    channel's own hits are not paired with themselves."""
     r = DaqResult(n_slots, np.uint32)
     if order.size == 0:
         return r
     ts = np.ascontiguousarray(ts, np.int64); slot = np.ascontiguousarray(slot, np.int64)
-    e = np.ascontiguousarray(e, np.int64); qs = np.ascontiguousarray(qs, np.int64)
     order = np.ascontiguousarray(order, np.int64)
     if ref_slot is not None and 0 <= ref_slot < n_slots:
         ref_ts = np.sort(ts[slot == ref_slot])
-    else:
-        ref_ts = np.zeros(0, np.int64)
-    _kernel(ts, slot, e, qs, order, np.int64(t0), np.int64(t1), ref_ts, np.int64(DT_W_NS * 1000), PXLUT, r.counts,
-            r.q, r.psd, r.psd_out, r.iat, r.dt)
-    if ref_ts.size and 0 <= ref_slot < n_slots:
+        _dt_kernel(ts, slot, order, np.int64(t0), np.int64(t1), ref_ts, np.int64(DT_W_NS * 1000), r.dt)
         r.dt[ref_slot, NDT // 2] -= int(np.count_nonzero((ref_ts >= t0) & (ref_ts < t1)))   # itself at 0
     _spectra(ts, slot, order, t0, t1, n_slots, r)
     return r
@@ -230,11 +253,23 @@ def selftest():
     qs[::17] = 0; qs[::19] = QS_SAT; qs = np.minimum(qs, QS_SAT)
     order = np.argsort(ts, kind="stable")
     t0, t1 = SEG_PS // 2, T - SEG_PS // 4
-    r = DaqResult(n_slots).add(process(ts, sl, e, qs, order, t0, t1, 5, n_slots).to_dict())   # through the sparse transfer
+    m = (ts >= t0) & (ts < t1)
+    # the exact part takes the slice's hits in time order (each channel in order, as in a file), in
+    # three batches; the ordered part the slice
+    late_before = t0 + SEG_PS
+    r = DaqResult(n_slots)
+    secs = {}
+    for part in np.array_split(order[m[order]], 3):
+        x, (sc, ss, cc) = process_exact(ts[part], sl[part], e[part], qs[part], late_before, n_slots)
+        r.add(x.to_dict())                                           # through the sparse transfer
+        for a, b, c in zip(sc, ss, cc):
+            secs[(a, b)] = secs.get((a, b), 0) + c
+    r.add(process_ordered(ts, sl, order, t0, t1, 5, n_slots).to_dict())
     ok = True
     # plain numpy reference
-    m = (ts >= t0) & (ts < t1)
     ok &= np.array_equal(r.counts, np.bincount(sl[m], minlength=n_slots))
+    ok &= np.array_equal(r.late, np.bincount(sl[m & (ts < late_before)], minlength=n_slots))
+    ok &= sum(secs.values()) == int(m.sum()) and all(c == int(np.count_nonzero(m & (sl == b) & (ts // 10**12 == a))) for (a, b), c in list(secs.items())[:50])
     for s in (0, 5, 9):
         mm = m & (sl == s)
         ok &= np.array_equal(r.q[s], np.bincount(e[mm], minlength=NQ))
@@ -247,10 +282,12 @@ def selftest():
         np.add.at(ref, (np.searchsorted(PX_EDGES, e[good], side="right") - 1,
                         np.minimum((e[good] - qs[good]) * NPY // e[good], NPY - 1)), 1)
         ok &= np.array_equal(r.psd[s], ref) and r.psd_out[s] == np.count_nonzero(keep & ~good)
-        tt = np.sort(ts[sl == s]); prev = np.concatenate([[-1], tt[:-1]])
-        keep = (tt >= t0) & (tt < t1) & (prev >= 0)
-        d = (tt[keep] - prev[keep]) * 1e-3
-        ok &= np.array_equal(r.iat[s], np.histogram(d, IAT_EDGES)[0])
+        # time since the previous hit: within each batch (the first hit of a batch has none)
+        ref_iat = np.zeros(IAT_EDGES.size - 1, np.int64)
+        for part in np.array_split(order[m[order]], 3):
+            tt = ts[part][sl[part] == s]
+            ref_iat += np.histogram((tt[1:] - tt[:-1]) * 1e-3, IAT_EDGES)[0]
+        ok &= np.array_equal(r.iat[s], ref_iat)
     # time difference: slot 9 is the pulser 37 ns later
     peak = DT_EDGES[np.argmax(r.dt[9])] + 0.25
     ok &= abs(peak - 37.0) < 0.6

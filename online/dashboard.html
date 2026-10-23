@@ -59,18 +59,24 @@
   .card.drop { outline:2px dashed var(--muted); outline-offset:2px; }
   @media (max-width: 720px) { .card.w2, .card.wfull { grid-column:auto; } }
   [hidden] { display:none !important; }
+  .banner { margin:0 0 10px; display:flex; flex-direction:column; gap:4px; }
+  .banner div { border-radius:6px; padding:5px 10px; background:var(--card); border:1px solid var(--line); }
+  .banner .bad { border-color:var(--heavy); color:var(--heavy); font-weight:600; }
+  .banner .ph { border-color:#c77700; }
+  body.stale .tiles, body.stale section { opacity:.45; filter:grayscale(1); }
 </style>
 </head>
 <body>
 <h1>FSUDAQ Online <span class="st" id="folder">–</span> <span class="st" id="status">connecting…</span>
   <button id="layout_reset" title="Put every card back to its original place and size">reset layout</button></h1>
+<div class="banner" id="banner"></div>
 <div class="tiles">
   <div class="tile"><span class="big" id="t_hits">–</span><small>hits / s, all channels</small></div>
   <div class="tile"><span class="big" id="t_mb">–</span><small>MB / s written</small></div>
   <div class="tile"><span class="big" id="t_gb">–</span><small>this run, GB in files</small></div>
   <div class="tile"><span class="big" id="t_disk">–</span><small>disk free</small></div>
-  <div class="tile"><span class="big" id="t_proc">–</span><small>of the data processed</small></div>
-  <div class="tile"><span class="big" id="t_lag">–</span><small>analysis behind by (s)</small></div>
+  <div class="tile"><span class="big" id="t_proc">–</span><small>of the data in the track finder</small></div>
+  <div class="tile"><span class="big" id="t_lag">–</span><small>track finder behind by (s of data)</small></div>
 </div>
 <div class="tabs"><button data-tab="daq" class="on">DAQ channels</button><button data-tab="trk">Tracker (track finder)</button></div>
 
@@ -85,8 +91,8 @@
     <div class="card wfull"><h2>Hits per digitizer channel</h2>
       <div class="ctl"><label>show <select id="occ_mode"><option value="rate">rate (Hz), last update</option><option value="count">hits since Clear</option></select></label>
         <label><input type="checkbox" id="occ_log" checked> log scale</label><span>click a bar to pick that channel</span></div>
-      <canvas id="c_chan"></canvas><div class="legend" id="leg_chan"></div></div>
-    <div class="card"><h2>Total hit rate, all channels and per board (Hz)</h2><canvas id="c_total"></canvas><div class="legend" id="leg_total"></div></div>
+      <canvas id="c_chan"></canvas><div class="legend" id="leg_chan"></div><div class="note" id="note_chan"></div></div>
+    <div class="card"><h2>Total hit rate, all channels and per board (Hz, by second of data time)</h2><canvas id="c_total"></canvas><div class="legend" id="leg_total"></div></div>
     <div class="card"><h2>Pulse height (Qlong) · <b class="chname">–</b></h2>
       <div class="ctl"><label>x <select id="q_x"><option value="lin">linear</option><option value="log">log</option></select></label>
         <label>bins <select id="q_nb"></select></label><label><input type="checkbox" id="q_log" checked> log y</label>
@@ -103,7 +109,7 @@
       <canvas id="c_iat"></canvas><div class="note">The cut at short times is the trigger hold-off; a pulser shows as a peak at its period.</div></div>
     <div class="card"><h2>Time to hits on the reference channel (t − t<sub>ref</sub>, ns) · <b class="chname">–</b></h2>
       <div class="ctl"><label><input type="checkbox" id="dt_log"> log scale</label><span id="dt_ref"></span></div><canvas id="c_dt"></canvas></div>
-    <div class="card"><h2>Hit rate over time (Hz) · <b class="chname">–</b></h2><canvas id="c_crate"></canvas></div>
+    <div class="card"><h2>Hit rate over time (Hz, by second of data time) · <b class="chname">–</b></h2><canvas id="c_crate"></canvas></div>
     <div class="card"><h2>Rate spectrum: periodic signals in the hit times</h2>
       <div class="ctl"><label>for <select id="spec_which"><option value="ch">this channel</option><option value="all">all channels</option></select></label></div>
       <canvas id="c_spec"></canvas><div class="note" id="note_spec"></div></div>
@@ -118,7 +124,6 @@
     <div class="tile"><span class="big" id="rate_trk">–</span><small>accepted tracks / s</small></div>
     <div class="tile"><span class="big" id="acc_share">–</span><small>accepted, of bunches with all planes hit</small></div>
   </div>
-  <div class="warnbox" id="setup_warn" hidden></div>
   <div class="grid" data-grid="trk">
     <div class="card"><h2>Bunches per second, by finder result</h2><canvas id="c_status"></canvas><div class="legend" id="leg_status"></div></div>
     <div class="card"><h2>Momentum of accepted tracks (MeV/c, from the map)</h2><canvas id="c_p"></canvas></div>
@@ -274,9 +279,33 @@ document.getElementById('sel_ref').onchange = async e=>{ await fetch('/set?ref='
 document.getElementById('btn_clear').onclick = async ()=>{ await fetch('/clear'); document.getElementById('clear_note').textContent='cleared at '+new Date().toLocaleTimeString(); await tick(); fetchChannel(); };
 ['occ_mode','occ_log','q_log','dt_log','spec_which','grid_log'].forEach(id=>document.getElementById(id).onchange=()=>{ if(id==='spec_which') fetchChannel(); else draw(); });
 
+let lastOK = null, PREV = null, MBPS = null;   // when /state last answered; the previous answer, for the MB/s
 async function tick(){
-  try { S = await (await fetch('/state')).json(); } catch(e){ document.getElementById('status').textContent='no connection to the analysis'; return; }
+  let r = null;
+  try { const res = await fetch('/state', {cache:'no-store'}); if(res.ok) r = await res.json(); } catch(e){ r = null; }
+  if(!r){ document.body.classList.add('stale'); banner(); return; }
+  document.body.classList.remove('stale');
+  if(S && r.folder===S.folder && r.server_time>S.server_time){
+    const db = r.daq.run_bytes - S.daq.run_bytes, dt = r.server_time - S.server_time;
+    MBPS = db>=0 ? db/dt/1e6 : null; }
+  else MBPS = null;
+  S = r; lastOK = new Date();
   fillSelects(); draw();
+}
+// what must be seen first: no connection, a stalled analysis, data problems, placeholders in the setup
+function banner(){
+  const out = [];
+  if(document.body.classList.contains('stale'))
+    out.push(['bad', `NO CONNECTION to the analysis${lastOK?' since '+lastOK.toLocaleTimeString():''}: the values below are from then, not live.`]);
+  if(S){
+    if(S.in_flight>0 && S.last_result_s!=null && S.last_result_s>15)
+      out.push(['bad', `No analysis result for ${S.last_result_s.toFixed(0)} s (${S.in_flight} tasks out): the plots are not updating.`]);
+    for(const h of S.health) out.push(['bad', h]);
+    for(const p of S.problems) out.push(['bad', 'Setup: '+p]);
+    for(const w of S.warnings) out.push(['ph', 'Placeholder: '+w]);
+    if(S.live_start) out.push(['', `Started while this run was going (${new Date(S.since_wall*1000).toLocaleTimeString()}): counts and histograms are from then on.`]);
+  }
+  document.getElementById('banner').innerHTML = out.map(([c,t])=>`<div class="${c}">${t}</div>`).join('');
 }
 async function fetchChannel(){
   if(selSlot===null) return;
@@ -290,13 +319,12 @@ async function fetchChannel(){
 // ---------------------------------------------------------------- drawing
 function draw(){
   if(!S) return;
-  const D=S.daq, H=S.history;
+  const D=S.daq;
+  banner();
   document.getElementById('folder').textContent = S.folder ? S.folder.split('/').slice(-1)[0] : '';
-  document.getElementById('status').textContent = `${S.status} · ${S.workers} workers${S.replay?' · REPLAY':''}`;
-  const last=H[H.length-1], prev=H.length>1?H[H.length-2]:null, wdt = prev ? last.wall-prev.wall : 0;
-  const bytes = h => h ? Object.values(h.bytes).reduce((a,b)=>a+b,0) : 0;
+  document.getElementById('status').textContent = `${S.status} · ${S.workers} workers · ${S.kernels}${S.replay?' · REPLAY':''}`;
   document.getElementById('t_hits').textContent = fmt(D.total_rate);
-  document.getElementById('t_mb').textContent = wdt>0 ? ((bytes(last)-bytes(prev))/wdt/1e6).toFixed(1) : '–';
+  document.getElementById('t_mb').textContent = MBPS==null ? '–' : MBPS.toFixed(1);
   document.getElementById('t_gb').textContent = (D.run_bytes/1e9).toFixed(2);
   document.getElementById('t_disk').textContent = D.disk ? (D.disk.free_gb/1e3).toFixed(2)+' TB' : '–';
   const tp=document.getElementById('t_proc'); tp.textContent = D.processed_pct==null ? '–' : D.processed_pct.toFixed(1)+' %';
@@ -315,20 +343,21 @@ function drawDaq(){
   const edges = slots.map((_,i)=>i).concat([slots.length]);
   const colors = slots.map(s=>s.slot===selSlot ? css('--sel') : BOARD_COLOR[boardIndex(s.board)%BOARD_COLOR.length]);
   const A = plot('c_chan', {x0:0, x1:slots.length, ylog, xticks:false, series:[{kind:'bars', edges, y:vals, colors, gap:1}],
-                            empty:'no hits yet', ylabel: mode==='rate'?'Hz':'hits'});
+                            empty: mode==='rate' && D.total_rate==null ? 'no rate now: no data are coming in (show "hits since Clear" for the counts)' : 'no hits yet',
+                            ylabel: mode==='rate'?'Hz':'hits'});
   if(A){ const g=document.getElementById('c_chan').getContext('2d'); g.fillStyle=css('--muted'); g.font='10px system-ui'; g.textAlign='center';
     let start=0; for(let i=1;i<=slots.length;i++){ if(i===slots.length || slots[i].board!==slots[start].board){
         g.fillText(`Digi-${slots[start].board} ch0–${slots[i-1].ch}`, (A.X(start)+A.X(i))/2, A.h-7); start=i; } } }
   document.getElementById('c_chan').onclick = ev=>{ if(!A) return; const r=ev.target.getBoundingClientRect(); const x=ev.clientX-r.left;
     const i=Math.floor((x-A.L)/((A.w-A.L-A.R)/slots.length)); if(i>=0 && i<slots.length){ selSlot=slots[i].slot; store.set('fsudaq-sel-slot', selSlot); fillSelects(); fetchChannel(); } };
   legend('leg_chan', S.boards.map((b,i)=>({name:'Digi-'+b.serial, color:BOARD_COLOR[i%BOARD_COLOR.length]})).concat([{name:'selected channel', color:css('--sel')}]));
-  // total rate over time, and per board
-  const H=S.history, ser=[];
-  const tot = {x:[], y:[]}; for(let i=1;i<D.history.length;i++){ const a=D.history[i-1], b=D.history[i]; if(b.beam_s>a.beam_s){ tot.x.push(b.beam_s); tot.y.push(b.total/(b.beam_s-a.beam_s)); } }
-  ser.push({kind:'line', x:tot.x, y:tot.y, color:css('--fg'), width:2});
-  S.boards.forEach((bd,i)=>{ const s={x:[],y:[]}; for(let j=1;j<H.length;j++){ const dt=H[j].beam_s-H[j-1].beam_s; if(dt<=0) continue; s.x.push(H[j].beam_s); s.y.push((H[j].hits[bd.id]||0)/dt); }
-    ser.push({kind:'line', x:s.x, y:s.y, color:BOARD_COLOR[i%BOARD_COLOR.length]}); });
-  if(tot.x.length>1) plot('c_total', {x0:tot.x[0], x1:tot.x[tot.x.length-1], xfmt:v=>sinum(v)+' s', series:ser, ylabel:'Hz'}); else message('c_total','no data yet');
+  document.getElementById('note_chan').innerHTML = (mode==='rate' ? 'Rate: the newest second all of whose hits are on disk. ' : '') +
+    (S.late ? warn(`${S.late.toLocaleString()} hits reached the disk after the track finder had passed their time`) + ' (in these counts, not in the finder: a channel pair whose buffer fills slowly writes late; fewer events per aggregate on the board shortens it).' : '');
+  // total rate over time, and per board: hits in each second of data time
+  const secs=D.seconds, ser=[];
+  ser.push({kind:'line', x:secs.map(s=>s.t), y:secs.map(s=>s.boards.reduce((a,b)=>a+b,0)), color:css('--fg'), width:2});
+  S.boards.forEach((bd,i)=>ser.push({kind:'line', x:secs.map(s=>s.t), y:secs.map(s=>s.boards[i]||0), color:BOARD_COLOR[i%BOARD_COLOR.length]}));
+  if(secs.length>1) plot('c_total', {x0:secs[0].t, x1:secs[secs.length-1].t, xfmt:v=>sinum(v)+' s', series:ser, ylabel:'Hz'}); else message('c_total','no data yet');
   legend('leg_total', [{name:'all channels', color:css('--fg')}].concat(S.boards.map((b,i)=>({name:'Digi-'+b.serial, color:BOARD_COLOR[i%BOARD_COLOR.length]}))));
   drawGrid();
   if(!CH || CH.slot!==selSlot){ ['c_q','c_psd','c_iat','c_dt','c_crate'].forEach(id=>{ message(id,'loading…'); PLOTS[id]=null; }); }
@@ -368,10 +397,14 @@ function drawDaq(){
   document.getElementById('t_data').innerHTML =
     row('run folder', S.folder||'–') + row('files', D.files.toLocaleString()) + row('data', (D.run_bytes/1e9).toFixed(2)+' GB') +
     row('disk', D.disk ? `${(D.disk.free_gb).toFixed(0)} GB free of ${(D.disk.total_gb).toFixed(0)} GB` + (hoursLeft!==null ? ` · full in ${hoursLeft<2?warn(hoursLeft.toFixed(1)+' h'):hoursLeft.toFixed(1)+' h'} at the current rate` : '') : '–') +
-    row('processed', D.processed_pct==null ? '–' : `${D.processed_pct.toFixed(1)} % of the data on disk · ${D.lag_s.toFixed(1)} s behind`) +
-    row('analysis', `${S.workers} workers, ${D.in_flight} slices in flight` + (D.backpressure ? ' · '+warn('falling behind: every worker is busy') : (D.lag_s>30 ? ' · '+warn('more than 30 s behind') : ' · keeping up')));
-  document.getElementById('t_boards').innerHTML = '<tr><th>board</th><th>files</th><th>MB</th><th>newest (s)</th><th></th></tr>' +
-    S.boards.map((b,i)=>`<tr><td>${sw(BOARD_COLOR[i%BOARD_COLOR.length])}Digi-${b.serial}</td><td>${b.files}</td><td>${(b.bytes/1e6).toFixed(0)}</td><td>${b.newest_s==null?'–':b.newest_s.toFixed(2)}</td><td>${b.stalled?warn('no new data'):(b.newest_s==null?'no data':'')}</td></tr>`).join('');
+    row('track finder', D.processed_pct==null ? '–' : `${D.processed_pct.toFixed(1)} % of the data time on disk · ${D.lag_s.toFixed(1)} s behind`) +
+    row('analysis', `${S.workers} workers (${S.kernels}), ${D.in_flight} tasks out` + (S.oldest_task_s!=null ? `, oldest ${S.oldest_task_s.toFixed(0)} s` : '') +
+        (S.last_result_s!=null ? ` · last result ${S.last_result_s.toFixed(0)} s ago` : '') +
+        (D.backpressure ? ' · '+warn('falling behind: every worker is busy') : (D.lag_s>60 ? ' · '+warn('more than a minute behind') : ' · keeping up')));
+  document.getElementById('t_boards').innerHTML = '<tr><th>board</th><th>files</th><th>MB</th><th>read</th><th>newest (s)</th><th>late hits</th><th></th></tr>' +
+    S.boards.map((b,i)=>`<tr><td>${sw(BOARD_COLOR[i%BOARD_COLOR.length])}Digi-${b.serial}</td><td>${b.files}</td><td>${(b.bytes/1e6).toFixed(0)}</td>` +
+      `<td>${b.bytes ? (100*b.indexed/b.bytes).toFixed(0)+' %' : '–'}</td><td>${b.newest_s==null?'–':b.newest_s.toFixed(2)}</td><td>${b.late?warn(b.late.toLocaleString()):0}</td>` +
+      `<td>${b.newest_s==null ? warn('no data') : (b.quiet_s!=null && b.quiet_s>10 ? warn(`quiet ${b.quiet_s.toFixed(0)} s`) : '')}</td></tr>`).join('');
 }
 
 // every channel's Qlong spectrum over the shown range: one row per board, one panel per channel
@@ -412,19 +445,14 @@ const ST_NOTE = {unique:'one track accepted', tracks:'2+ tracks accepted', ambig
                  dropped:'too many combinations or candidates', none:'no triplet in the map fits', incomplete:'a plane has no hit'};
 function drawTrk(){
   const F=S.finder, SC=S.status_counts, H=S.history;
-  const last=H[H.length-1], prev=H.length>1?H[H.length-2]:null, dt = prev ? last.beam_s-prev.beam_s : 0;
+  const last=H[H.length-1], dt = last ? last.t1-last.t0 : 0;
   document.getElementById('rate_bunch').textContent = dt>0 ? fmt(last.bunches/dt) : '–';
   document.getElementById('rate_trk').textContent = dt>0 ? fmt(last.tracks/dt, 1) : '–';
   const complete = S.bunches - (SC.incomplete||0), accepted = (SC.unique||0)+(SC.tracks||0);
   document.getElementById('acc_share').textContent = complete>0 ? (100*accepted/complete).toFixed(2)+' %' : '–';
-  const full=[16,35,59], ph=[];
-  if(F.cabling.startsWith('placeholder')) ph.push('cabling is a sequential placeholder (give --cabling)');
-  if(!F.calibrated) ph.push('no light calibration: light tests off');
-  F.channels.forEach((n,p)=>{ if(n<full[p]) ph.push(`T${p} reads ${n} of ${full[p]} channels`); });
-  if(F.missing.length) ph.push('not cabled: '+F.missing.join(', ')+' (no information)');
-  const wb=document.getElementById('setup_warn'); wb.hidden=!ph.length; wb.innerHTML = ph.length ? '<b>Placeholders:</b> '+ph.join(' · ') : '';
+  const full=[16,35,59];
   const ser=[], leg=[];
-  for(const n of STATUS_ORDER){ const s={x:[],y:[]}; for(let i=1;i<H.length;i++){ const d=H[i].beam_s-H[i-1].beam_s; if(d<=0) continue; s.x.push(H[i].beam_s); s.y.push((H[i].status[n]||0)/d); }
+  for(const n of STATUS_ORDER){ const s={x:[],y:[]}; for(const h of H){ const d=h.t1-h.t0; if(d<=0) continue; s.x.push(h.t1); s.y.push((h.status[n]||0)/d); }
     if(s.y.some(v=>v>0)){ ser.push({kind:'line', x:s.x, y:s.y, color:ST_COLOR[n]}); leg.push({name:n, color:ST_COLOR[n]}); } }
   if(ser.length && ser[0].x.length>1) plot('c_status', {x0:ser[0].x[0], x1:ser[0].x[ser[0].x.length-1], ylog:true, xfmt:v=>sinum(v)+' s', series:ser, ylabel:'bunches / s'}); else message('c_status','no data yet');
   legend('leg_status', leg);
@@ -458,14 +486,16 @@ function drawTrk(){
     `<tr><td>decided by</td><td>${fmt(F.fast)}</td><td></td><td style="text-align:left;color:var(--muted)">fast path · ${fmt(F.reference)} by the reference finder (${F.reference_s.toFixed(1)} s CPU)${F.overflow?' · '+warn(F.overflow+' bunches over 1024 hits'):''}</td></tr>`;
   const row = (k,v) => `<tr><td>${k}</td><td style="text-align:left">${v}</td></tr>`;
   document.getElementById('t_setup').innerHTML =
-    row('setting', F.setting + ' (T1/T2 position; from the run, not the data)') +
-    row('momentum map', `${F.map_rows.toLocaleString()} triplets (simulation, n_cal ≥ 5)`) +
-    row('light', F.calibrated ? `gains file · threshold ${F.threshold} MeVee · K ${F.k===null?'∞':F.k}` : warn('no gains file: pair rule never, K = ∞')) +
+    row('setting', (F.setting_src ? `${F.setting} (from ${F.setting_src})` : warn(`${F.setting}: not given, assumed`)) + ' · T1/T2 position, from the run, not the data') +
+    row('momentum map', `${F.map.split('/').slice(-1)[0]}: ${F.map_rows.toLocaleString()} triplets`) +
+    row('light', F.calibrated ? `gains file · threshold ${F.threshold} MeVee · K ${F.k===null?'∞':F.k}` + (F.uncalibrated ? ' · '+warn(`${F.uncalibrated} cabled channels without a gain: left out`) : '') : warn('no gains file: pair rule never, K = ∞')) +
     row('cabling', F.cabling.startsWith('placeholder') ? warn(F.cabling) : F.cabling) +
     row('channels', F.channels.map((n,p)=>n<full[p]?warn(`T${p} ${n}/${full[p]}`):`T${p} ${n}/${full[p]}`).join(' · ')) +
     row('counters', (F.installed.length?F.installed.join(', '):'none') + (F.missing.length?' · '+warn('not cabled: '+F.missing.join(', ')):'')) +
-    row('timing', (F.timing==='no offsets'?warn('no cable offsets'):F.timing) + ` · accepted within ${F.nsig} σ · no bunch clock: the 25 ns window is the gate`) +
-    row('bunch window', `${S.window_ns} ns gap`);
+    row('timing', (F.timing==='no offsets'?warn('no cable offsets'):F.timing + ', removed before bunching') + ` · accepted within ${F.nsig} σ · no bunch clock: the ${S.window_ns} ns window is the gate` +
+        ' · counters (veto, Cherenkov) count anywhere in the bunch, at any charge') +
+    row('bunch window', `${S.window_ns} ns gap`) +
+    row('late hits', S.late ? warn(`${S.late.toLocaleString()} hits reached the disk after their time was processed: not in the finder`) : 'none');
 }
 
 // ---------------------------------------------------------------- card layout (per tab)

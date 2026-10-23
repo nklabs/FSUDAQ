@@ -7,3 +7,4 @@ test_daq
 # the top-level .gitignore drops qmake Makefiles and data folders; these belong to the tests
 !Makefile
 !data
+__pycache__/
