@@ -4208,6 +4208,7 @@ void DigiSettingsPanel::LoadSetting(){
     QMessageBox::warning(this, "Settings not loaded", digiName + ": the settings file was not loaded.\n\n" + QString::fromStdString(problems.front()));
     return;
   }
+  if( digi[ID]->IsRecordTrace() ) SendLogMsg("<font style=\"color: orange;\">" + digiName + ": waveform recording switched off, as at open.</font>");
   digi[ID]->SetTrace(false); // as at open
   leSaveFilePath[ID]->setText(fileName);
   UpdatePanelFromMemory();

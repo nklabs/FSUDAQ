@@ -13,6 +13,7 @@
 #include <bitset>
 #include <vector>
 #include <sys/stat.h>
+#include <unistd.h> // ftruncate
 #include <cerrno>
 #include <atomic>
 #include <mutex>
@@ -558,7 +559,12 @@ inline void Data::SaveData(){
   }
 
   if( nByte > 0 && fwrite(buffer, nByte, 1, outFile) != 1 ){
+    // cut the part written back off and write nothing more: later buffers after half a buffer
+    // would not be readable; the file ends on a whole aggregate
     RecordSaveFailure("cannot write " + outFileName + " (" + strerror(errno) + ")");
+    if( ftruncate(fileno(outFile), (off_t) outFileSize) != 0 ) printf("cannot cut %s back to %lu bytes\n", outFileName.c_str(), (unsigned long) outFileSize);
+    CloseSaveFile();
+    return;
   }
 
   off_t pos = ftello(outFile);

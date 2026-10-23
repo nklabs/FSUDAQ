@@ -20,7 +20,9 @@ locks=(/dev/shm/CAENV_LCK_*)
 if [[ -e "${locks[0]}" ]]; then
   if pgrep -x FSUDAQ_Qt6 >/dev/null || pgrep -x CoMPASS >/dev/null || pgrep -x CAENDPPServer >/dev/null; then
     echo "CAEN lock files kept: a CAEN program is running."
-  elif command -v fuser >/dev/null && fuser -s "${locks[@]}" 2>/dev/null; then
+  elif ! command -v fuser >/dev/null; then
+    echo "CAEN lock files kept: fuser (package psmisc) is missing, so it cannot be told whether they are in use."
+  elif fuser -s "${locks[@]}" 2>/dev/null; then
     echo "CAEN lock files kept: in use by process(es) $(fuser "${locks[@]}" 2>/dev/null | tr -s ' ')."
   else
     rm -f "${locks[@]}"

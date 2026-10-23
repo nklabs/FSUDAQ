@@ -33,6 +33,8 @@ public:
   ~FSUDAQ();
 
   void closeEvent(QCloseEvent * event){
+    // a run (or the scope's acquisition) going: stop it properly first, files closed and recorded
+    StopEverything("FSUDAQ was closed");
     if( scope ) {
       delete scope;
       scope = nullptr;
@@ -55,6 +57,7 @@ public:
 public slots:
   void UpdateScalar();
   void ShutdownOnSignal(int sig); // SIGINT/SIGTERM/SIGHUP: stop a run properly, then quit
+  void StopEverything(const QString & why); // the scope's acquisition, a run (recorded with why) and a series
 
 private slots:
 
@@ -153,6 +156,7 @@ private:
     qint64 pauseMs = 0;
   } series;
   void UpdateRunControls();     // enable the run widgets for the present state (open, running, pausing, scope)
+  bool lastStopHadProblems;     // the run just stopped had failures (a series then ends)
   void RunTimeUp();
   void PauseOver();
   void StopPressed();

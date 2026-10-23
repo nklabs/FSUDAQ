@@ -18,6 +18,7 @@
 #include <cstring>
 #include <iostream>
 #include <execinfo.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 // On SIGSEGV: say where it happened and dump this thread's stack to stderr (the
@@ -117,7 +118,7 @@ int main(int argc, char *argv[]){
     FSUDAQ w;
     w.show();
 
-    if( pipe(signalPipe) == 0 ){
+    if( pipe2(signalPipe, O_NONBLOCK | O_CLOEXEC) == 0 ){
         struct sigaction sa;
         memset(&sa, 0, sizeof(sa));
         sa.sa_handler = shutdownHandler;
@@ -129,7 +130,9 @@ int main(int argc, char *argv[]){
         QObject::connect(notifier, &QSocketNotifier::activated, &w, [&w, notifier](){
             unsigned char s = 0;
             if( read(signalPipe[0], &s, 1) != 1 ) return;
-            notifier->setEnabled(false); // once; a second Ctrl-C while stopping changes nothing
+            notifier->setEnabled(false);
+            // a second Ctrl-C while stopping ends the program at once
+            signal(SIGINT, SIG_DFL); signal(SIGTERM, SIG_DFL); signal(SIGHUP, SIG_DFL);
             w.ShutdownOnSignal(s);
         });
     }

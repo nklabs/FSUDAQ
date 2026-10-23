@@ -652,6 +652,8 @@ bool Digitizer::StartACQ(){
 
   data->ClearTriggerRate();
   data->ClearData();
+  data->SaveFailed = 0;            // a previous run's write failure is not this run's
+  data->SaveError[0] = '\0';
   if( DPPType == DPPTypeCode::DPP_QDC_CODE ) SetQDCOptimialAggOrg();
 
   printf("    ACQ mode : %s (%d), TRG-OUT mode : %s (%d) \n", acqStr.c_str(), acqID, trgOutStr.c_str(), trgOutID);
@@ -675,6 +677,13 @@ void Digitizer::SWStopACQ(){
   if( !AcqRun ) return;
   ret = CAEN_DGTZ_SWStopAcquisition(handle);
   if( ret != 0 ) ErrorMsg("SW stop");
+  // close the aggregates still being filled, so a quiet channel's last events are read out too:
+  // a write to the broadcast of DPP-PSD's Forced Data Flush register (0x1n40 -> 0x8040). PSD only: on
+  // DPP-PHA 0x1n40 stops the channel, and its flush address is not confirmed. WriteRegister refuses while AcqRun.
+  if( DPPType == DPPTypeCode::DPP_PSD_CODE ){
+    int r = CAEN_DGTZ_WriteRegister(handle, 0x8040, 1);
+    if( r != 0 ) printf("Digi-%d: forced data flush at stop failed (%d)\n", GetSerialNumber(), r);
+  }
 }
 
 void Digitizer::StopACQ(){
@@ -1064,6 +1073,10 @@ int Digitizer::ProgramSettingsToBoard(){
 int Digitizer::LoadAndProgramSettings(std::string fileName, std::vector<std::string> & problems){
   programmedFromFile = false;
   problems.clear();
+  if( !isConnected || isDummy || softwareDisable || AcqRun ){
+    problems.push_back(fileName + " not loaded: the board is " + (AcqRun ? "taking data." : "not open or disabled."));
+    return -1;
+  }
 
   std::string why;
   if( LoadSettingBinaryToMemory(fileName, &why) != 0 ){

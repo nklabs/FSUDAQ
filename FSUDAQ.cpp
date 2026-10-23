@@ -51,6 +51,7 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
   onlineAnalyzer = nullptr;
   inDataRun = false;
   scopeShown = false;
+  lastStopHadProblems = false;
   runTimer = new QTimer(this);
   runTimer->setTimerType(Qt::PreciseTimer); // the default coarse timer may fire up to 5 % early or late (3 s on a 60 s run)
   runTimer->setSingleShot(true);
@@ -411,8 +412,7 @@ FSUDAQ::~FSUDAQ(){
   DebugPrint("%s", "FSUDAQ");
   if( scalar ) {
     scalarTimingThread->Stop();
-    scalarTimingThread->quit();
-    scalarTimingThread->exit();
+    scalarTimingThread->wait();  // deleting a running QThread aborts the program
     // scalarTimer->stop();
     // if( scalarThread->isRunning() ){
     //   scalarThread->quit();
@@ -876,6 +876,7 @@ void FSUDAQ::OpenDigitizers(){
     if( readBoard ) digi[i]->ReadAllSettingsFromBoard(true);
 
     //===== set no trace, even when FSQDAQ segfault at scope, the digitizer will save no trace
+    if( digi[i]->IsRecordTrace() ) LogMsg("<font style=\"color: orange;\">" + digiName + ": waveform recording switched off (FSUDAQ opens the boards with traces off; switch it on in Digitizer Settings).</font>");
     digi[i]->SetTrace(false);
     // if( digi[i]->GetDPPType() == V1730_DPP_PHA_CODE) digi[i]->WriteRegister(DPP::BoardConfiguration, 0xE8915);
 
@@ -920,10 +921,7 @@ void FSUDAQ::CloseDigitizers(){
   //   scalarThread->exit();
   // }
   scalarTimingThread->Stop();
-  if( scalarTimingThread->isRunning() ){
-    scalarTimingThread->quit();
-    scalarTimingThread->exit();
-  }
+  scalarTimingThread->wait();    // its run() loop ends at the next 100 ms tick
   if( scalar ) CleanUpScalar();
 
   if( onlineAnalyzer ){
@@ -1755,12 +1753,17 @@ void FSUDAQ::StopACQ(){
   bnStopACQ->setEnabled(false);
   const bool save = chkSaveData->isChecked();
 
-  // 1. each readout thread stops its board (master first), reads and saves what the board still
-  //    holds, then ends; a board whose readout already ended is stopped from here
+  // 1. each readout thread stops its board, reads and saves what the board still holds, then ends;
+  //    the master (the 0-th board) first, the others once it has stopped; a board whose readout
+  //    already ended is stopped from here
   for( unsigned int i = 0; i < nDigi; i++){
     if( digi[i]->IsBoardDisabled() ) continue;
     if( readDataThread[i]->isRunning() ){
       readDataThread[i]->StopAfterDrain();
+      if( i == 0 ){
+        QElapsedTimer t; t.start();
+        while( !readDataThread[0]->BoardStopped() && readDataThread[0]->isRunning() && t.elapsed() < 1000 ) usleep(1000);
+      }
     }else{
       digiMTX[i].lock();
       digi[i]->SWStopACQ();
@@ -1769,18 +1772,22 @@ void FSUDAQ::StopACQ(){
   }
   QString stopTime = QDateTime::currentDateTime().toString("yyyy.MM.dd hh:mm:ss");
 
+  std::vector<bool> stuck(nDigi, false);  // a readout that does not end: its board and file are left alone
   for( unsigned int i = 0; i < nDigi; i++){
     if( digi[i]->IsBoardDisabled() ) continue;
     if( !readDataThread[i]->wait(10000) ){
       LogMsg("<font style=\"color: red;\">Digi-" + QString::number(digi[i]->GetSerialNumber()) + ": its readout did not end 10 s after the stop; stopped without reading the rest.</font>");
       readDataThread[i]->Stop();
-      readDataThread[i]->wait();
+      if( !readDataThread[i]->wait(5000) ){
+        stuck[i] = true;
+        LogMsg("<font style=\"color: red;\"><b>Digi-" + QString::number(digi[i]->GetSerialNumber()) + " does not answer: its readout is stuck in the CAEN library. Its file is left open; restart FSUDAQ (and power-cycle the board if it still does not answer).</b></font>");
+      }
     }
   }
 
   // 2. then the files
   for( unsigned int i = 0; i < nDigi; i++){
-    if( digi[i]->IsBoardDisabled() ) continue;
+    if( digi[i]->IsBoardDisabled() || stuck[i] ) continue;
     digiMTX[i].lock();
     digi[i]->StopACQ();
     digiMTX[i].unlock();
@@ -1852,6 +1859,8 @@ void FSUDAQ::StopACQ(){
 
   // a file that failed to close, or anything the last refresh did not see (AbortRun says it itself)
   QStringList failures = RunFailures();
+  for( bool s : stuck ) if( s ) failures << "a board's readout did not end (see the log)";
+  lastStopHadProblems = !failures.isEmpty();
   if( !failures.isEmpty() && abortComment.isEmpty() ){
     for( const QString & f : failures ) LogMsg("<font style=\"color: red;\">" + f + "</font>");
     QMessageBox::warning(this, "Problems in the run", "The run had problems:\n\n" + failures.join("\n"));
@@ -1968,6 +1977,10 @@ void FSUDAQ::RunTimeUp(){
   needManualComment = false;
   StopACQ();
   needManualComment = true;
+  if( lastStopHadProblems ){
+    EndSeries("the run had problems");
+    return;
+  }
   if( series.active && series.repeat ){
     pauseTimer->start(series.pauseMs);
     LogMsg("Next run in " + QString::number(series.pauseMs / 1000.) + " s (Stop Series ends the series).");
@@ -2004,17 +2017,22 @@ void FSUDAQ::StopPressed(){
 
 void FSUDAQ::ShutdownOnSignal(int sig){
   LogMsg("<font style=\"color: red;\">Signal " + QString::number(sig) + " (" + QString(strsignal(sig)) + "): stopping and closing FSUDAQ.</font>");
+  StopEverything("signal " + QString(strsignal(sig)));
+  QCoreApplication::quit(); // the main window's destructor closes the digitizers
+}
+
+void FSUDAQ::StopEverything(const QString & why){
+  if( scope && scopeShown ) scope->close();  // its closeEvent stops the scope's acquisition
+  runTimer->stop();
+  pauseTimer->stop();
   if( inDataRun ){
-    runTimer->stop();
-    pauseTimer->stop();
     needManualComment = false;
-    abortComment = "Run stopped by FSUDAQ: signal " + QString(strsignal(sig)) + ".";
+    abortComment = "Run stopped by FSUDAQ: " + why + ".";
     StopACQ();
     abortComment.clear();
     needManualComment = true;
   }
-  EndSeries("FSUDAQ is closing");
-  QCoreApplication::quit(); // the main window's destructor closes the digitizers
+  if( series.active ) EndSeries(why);
 }
 
 void FSUDAQ::EndSeries(const QString & why){

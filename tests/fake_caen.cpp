@@ -34,6 +34,7 @@ struct Board {
   std::chrono::steady_clock::time_point t0;
   long startIndex = 0;
   int synthEvents = 0;                   // > 0: generate the data
+  long held = 0;                         // after a stop: aggregates still being filled, read only after a forced data flush
   int readDelayUs = 0;                   // time a ReadData with data takes
   std::vector<uint32_t> handedOut;       // everything ReadData gave
 };
@@ -94,6 +95,7 @@ long Acquired(Board & b) {
 }
 
 void Clear(Board & b) {
+  b.held = 0;
   long acq = b.st.running ? Acquired(b) : b.st.aggAcquired;
   if( acq > b.st.aggRead ){ b.st.aggCleared += acq - b.st.aggRead; b.st.aggRead = acq; }
 }
@@ -119,6 +121,7 @@ void Write(Board & b, uint32_t a, uint32_t v) {
   if( IsReadOnly(a) ) return;
   if( a == 0xEF24 || a == 0xEF34 ){ ResetRegisters(b); return; }
   if( a == 0xEF28 ){ Clear(b); return; }
+  if( a == 0x8040 || (a >= 0x1000 && a < 0x2000 && (a & 0xFF) == 0x40) ){ b.held = 0; b.st.flushes++; return; }   // DPP-PSD forced data flush
   if( IsWriteOnlyAction(a) ) return;
   if( IsBroadcast(a) ){
     for( int ch = 0; ch < b.nCh; ch++ ) b.reg[(a - 0x7000) + (ch << 8)] = v;
@@ -372,7 +375,10 @@ CAEN_DGTZ_ErrorCode CAEN_DGTZ_SWStartAcquisition(int handle) {
 }
 CAEN_DGTZ_ErrorCode CAEN_DGTZ_SWStopAcquisition(int handle) {
   BOARD_OR_FAIL;
-  if( b->st.running ){ b->st.aggAcquired = Acquired(*b); b->st.running = 0; }
+  if( b->st.running ){
+    b->st.aggAcquired = Acquired(*b); b->st.running = 0;
+    b->held = (b->synthEvents > 0 && b->st.aggAcquired > b->st.aggRead) ? 1 : 0;   // the aggregate being filled
+  }
   return CAEN_DGTZ_Success;
 }
 CAEN_DGTZ_ErrorCode CAEN_DGTZ_ClearData(int handle) { BOARD_OR_FAIL; Clear(*b); return CAEN_DGTZ_Success; }
@@ -381,7 +387,7 @@ CAEN_DGTZ_ErrorCode CAEN_DGTZ_ClearData(int handle) { BOARD_OR_FAIL; Clear(*b); 
 CAEN_DGTZ_ErrorCode CAEN_DGTZ_ReadData(int handle, CAEN_DGTZ_ReadMode_t mode, char * buffer, uint32_t * bufferSize) {
   (void) mode; BOARD_OR_FAIL;
   if( b->fail == "read" ){ *bufferSize = 0; return CAEN_DGTZ_CommError; }
-  long acq = b->st.running ? Acquired(*b) : b->st.aggAcquired;
+  long acq = b->st.running ? Acquired(*b) : b->st.aggAcquired - b->held;
   long perBLT = Read(*b, 0xEF1C) & 0x3FF;
   if( perBLT <= 0 ) perBLT = 1;
   uint32_t bytes = 0;

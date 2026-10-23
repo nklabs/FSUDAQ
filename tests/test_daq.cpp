@@ -124,6 +124,7 @@ public:
       CHECK(st.aggRead == st.aggAcquired, "%s: Digi-%d took %ld aggregates, %ld were read", what, s, st.aggAcquired, st.aggRead);
       CHECK(st.aggCleared == 0, "%s: Digi-%d: %ld aggregates were cleared without being read", what, s, st.aggCleared);
       CHECK(!st.running, "%s: Digi-%d still running", what, s);
+      CHECK(st.flushes > 0, "%s: Digi-%d was stopped without a forced data flush (its last aggregate stays on the board)", what, s);
     }
   }
 
@@ -250,7 +251,37 @@ public:
     QStringList rec = RecordLines();
     CHECK(rec.size() == 2 && rec[1].contains("cannot open the next data file"), "stop record: %s", qPrintable(rec.join(" / ")));
     if( nFail == 0 ) OK("stopped, alarm shown, the record says why");
+
+    // the next run, not saved: the old write failure is not this run's
+    w->chkSaveData->setChecked(false);
+    dialogs.clear();
+    w->AutoRun();
+    Pump(2500);
+    CHECK(w->inDataRun, "a non-saved run after the write failure was stopped (%s)", qPrintable(dialogs.join(" | ")));
+    w->StopPressed();
+    CHECK(dialogs.isEmpty(), "dialogs: %s", qPrintable(dialogs.join(" | ")));
+    if( nFail == 0 ) OK("the next, non-saved run runs: the old failure is not held against it");
     w->CloseDigitizers();
+  }
+
+  void CloseWindowDuringRun(){
+    printf("== the window closed during a run: the run is read out and recorded, nothing aborts\n");
+    NewWorkDir(); AddBoards(100, 2); NewFSUDAQ();
+    for( int s : Serials ) fake_caen_set_read_delay(s, 1000);
+    Open();
+    w->chkSaveData->setChecked(true);
+    dialogs.clear();
+    w->AutoRun();
+    Pump(800);
+    QString runDir = w->RunFolder();
+    w->close();                      // closeEvent
+    CHECK(!w->inDataRun, "still in a run after the window closed");
+    CheckAllSaved(QStringList() << runDir, "window closed");
+    QStringList rec = RecordLines();
+    CHECK(rec.size() == 2 && rec[1].contains("FSUDAQ was closed"), "stop record: %s", qPrintable(rec.join(" / ")));
+    CHECK(dialogs.isEmpty(), "dialogs: %s", qPrintable(dialogs.join(" | ")));
+    delete w; w = nullptr;           // the destructor closes the digitizers (and waits for the Run Monitor's thread)
+    if( nFail == 0 ) OK("all data saved, stop record says why, the window's destructor completes");
   }
 
   void RepeatedRuns(){
@@ -389,6 +420,7 @@ int main(int argc, char ** argv){
   t.RepeatedRuns();
   t.BoardAlsoOnUSB();
   t.SignalStopsRunProperly();
+  t.CloseWindowDuringRun();
   t.ScopeKeepsSaveData();
 
   delete t.w;

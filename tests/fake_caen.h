@@ -25,6 +25,7 @@ typedef struct {
   long aggRead;        // aggregates handed out by ReadData
   long aggCleared;     // aggregates discarded by ClearData or a reset
   int overflows;       // ReadData calls whose data did not fit the readout buffer
+  int flushes;         // forced data flushes (0x8040 / 0x1n40 written)
   int running;
 } fake_caen_stats;
 

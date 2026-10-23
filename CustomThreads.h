@@ -35,10 +35,11 @@ public:
   }
   /// start the readout. Use this, not start(): the stop request is cleared here, before the thread
   /// runs; cleared in run(), a Stop() right after the start was lost and the thread never ended
-  void Start() { stop = false; drain = false; failed = false; failReason.clear(); start(); }
-  void Stop() { this->stop = true;}                          /// leave at once; what the board still holds is not read
+  void Start() { stop = false; drain = false; failed = false; boardStopped = false; failReason.clear(); start(); }
+  void Stop() { drain = false; this->stop = true;}          /// leave at once (also ends a drain); what the board still holds is not read
   void StopAfterDrain() { drain = true; this->stop = true; }  /// stop the board (from this thread), read and save what it still holds, then leave
   bool Failed() const { return failed; }                     /// the last run of this thread ended on a read error, not on Stop
+  bool BoardStopped() const { return boardStopped; }         /// in a drain: this thread has stopped its board
   QString FailReason() const { return failReason; }
   void SetSaveData(bool onOff)  {this->isSaveData = onOff;}
   void SetScopeMode(bool onOff) {this->isScope = onOff;}
@@ -92,7 +93,6 @@ public:
 
     printf("ReadDataThread for digi-%d running.\n", digi->GetSerialNumber());
     int emptyReads = 0;                                   // reads in a row that found nothing, once the board is stopped
-    bool boardStopped = false;                            // this thread stopped the board for the drain
     std::chrono::steady_clock::time_point drainStart{};
     do{
       
@@ -125,9 +125,10 @@ public:
           if( isScope ) CopyScopeTraces(digi->GetData());
           digiMTX[ID].unlock();
         }else if( boardStopped ){
-          // empty twice, 10 ms apart: the stopped board has nothing left
-          if( ++emptyReads >= 2 ) break;
-          usleep(10000);
+          // empty three times, 50 ms apart: the stopped board has nothing left (the flush written at
+          // the stop releases the aggregates still being filled)
+          if( ++emptyReads >= 3 ) break;
+          usleep(50000);
         }
         if( boardStopped && std::chrono::steady_clock::now() - drainStart > std::chrono::seconds(5) ){
           printf("\033[31mDigi-%d: still reading data 5 s after the stop; the rest is left on the board.\033[0m\n", digi->GetSerialNumber());
@@ -206,6 +207,7 @@ private:
   std::atomic<bool> stop;
   std::atomic<bool> drain;
   std::atomic<bool> failed;
+  std::atomic<bool> boardStopped;   // this thread stopped its board for the drain
   QString failReason;      // written before failed is set
   int ID;
   timespec ta, tb, t1, t2, t0;
