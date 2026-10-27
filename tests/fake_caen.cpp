@@ -49,12 +49,18 @@ struct Board {
   std::shared_ptr<std::atomic<bool>> overRead = std::make_shared<std::atomic<bool>>(false);
   int opens = 0;
   std::vector<uint32_t> handedOut;       // everything ReadData gave
+  std::chrono::steady_clock::time_point settleUntil{};  // the PLL locks to a new reference until then
+  bool hung = false;                     // touched while settling: answers nothing any more
 };
 
 std::vector<Board> boards;
 std::atomic<long> sequence{0};           // SWStart / SWStop calls over all boards (readout threads call SWStop)
 
-uint32_t Sentinel(uint32_t address) { return 0xDEAD0000u | ((address >> 2) & 0xFFFF); }
+// 0x8100's sentinel has bit 6 clear: a board is on its internal clock at power-up and after a reset
+uint32_t Sentinel(uint32_t address) { return (0xDEAD0000u | ((address >> 2) & 0xFFFF)) & (address == 0x8100 ? ~0x40u : ~0u); }
+
+int clockSettleMs = 30;
+bool Settling(const Board & b) { return std::chrono::steady_clock::now() < b.settleUntil; }
 
 unsigned short ImageIndex(uint32_t a) { // FSUDAQ's Reg::Index for an actual address
   if( a < 0x8000 ) return a / 4;
@@ -130,7 +136,11 @@ void ResetRegisters(Board & b) {
 }
 
 uint32_t Read(Board & b, uint32_t a) {
-  if( a == 0x8104 ) return (1u << 8) | (b.st.running ? (1u << 2) : 0) | (b.st.aggAcquired > b.st.aggRead ? (1u << 3) : 0);
+  if( a == 0x8104 ){
+    uint32_t extClock = (Read(b, 0x8100) >> 6) & 1;
+    return (Settling(b) ? 0 : (1u << 8)) | (1u << 7) | (extClock << 5)
+           | (b.st.running ? (1u << 2) : 0) | (b.st.aggAcquired > b.st.aggRead ? (1u << 3) : 0);
+  }
   if( IsReadOnly(a) ){
     unsigned short i = ImageIndex(a);
     return i < b.image.size() ? b.image[i] : 0;
@@ -142,6 +152,11 @@ uint32_t Read(Board & b, uint32_t a) {
 void Write(Board & b, uint32_t a, uint32_t v) {
   b.st.writes++;
   if( IsReadOnly(a) ) return;
+  if( b.model == "DT5730" && (a == 0x8100 || a == 0xEF24 || a == 0xEF34) ){
+    uint32_t refNow = (Read(b, 0x8100) >> 6) & 1;
+    uint32_t refNew = a == 0x8100 ? (v >> 6) & 1 : 0;   // a reset: back to the internal clock
+    if( refNew != refNow ) b.settleUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(clockSettleMs);
+  }
   if( a == 0xEF24 || a == 0xEF34 ){ ResetRegisters(b); return; }
   if( a == 0xEF28 ){ Clear(b); return; }
   if( a == 0x8040 || (a >= 0x1000 && a < 0x2000 && (a & 0xFF) == 0x40) ){   // DPP-PSD forced data flush
@@ -301,6 +316,13 @@ extern "C" void fake_caen_fail(int serial, const char * what) {
   b->overRead->store(b->fail == "overread");
 }
 
+extern "C" void fake_caen_set_clock_settle_ms(int ms) { clockSettleMs = ms; }
+
+extern "C" int fake_caen_is_hung(int serial) {
+  Board * b = FromSerial(serial);
+  return b && b->hung;
+}
+
 extern "C" void fake_caen_drop_write(int serial, uint32_t address) {
   Board * b = FromSerial(serial);
   if( b ) b->dropWrite = address;
@@ -308,6 +330,12 @@ extern "C" void fake_caen_drop_write(int serial, uint32_t address) {
 
 //======================================================================= CAEN API
 #define BOARD_OR_FAIL Board * b = FromHandle(handle); if( !b ) return CAEN_DGTZ_InvalidHandle;
+
+// Only the status registers may be read while the PLL settles; anything else hangs the board.
+bool Unreachable(Board * b, uint32_t a) {
+  if( !b->hung && Settling(*b) && a != 0x8104 && a != 0xEF04 && a != 0x8178 ) b->hung = true;
+  return b->hung;
+}
 
 CAEN_DGTZ_ErrorCode CAEN_DGTZ_OpenDigitizer(CAEN_DGTZ_ConnectionType LinkType, int LinkNum, int ConetNode, uint32_t VMEBaseAddress, int * handle) {
   (void) VMEBaseAddress;
@@ -345,6 +373,7 @@ CAEN_DGTZ_ErrorCode CAEN_DGTZ_GetInfo(int handle, CAEN_DGTZ_BoardInfo_t * info) 
 
 CAEN_DGTZ_ErrorCode CAEN_DGTZ_WriteRegister(int handle, uint32_t Address, uint32_t Data) {
   BOARD_OR_FAIL;
+  if( Unreachable(b, Address) ) return CAEN_DGTZ_CommError;
   if( b->fail == "write" ) return CAEN_DGTZ_WriteDeviceRegisterFail;
   if( b->dropWrite != 0 && Address == b->dropWrite ) return CAEN_DGTZ_Success;   // lost on the way
   Write(*b, Address, Data);
@@ -353,6 +382,7 @@ CAEN_DGTZ_ErrorCode CAEN_DGTZ_WriteRegister(int handle, uint32_t Address, uint32
 
 CAEN_DGTZ_ErrorCode CAEN_DGTZ_ReadRegister(int handle, uint32_t Address, uint32_t * Data) {
   BOARD_OR_FAIL;
+  if( Unreachable(b, Address) ) return CAEN_DGTZ_CommError;
   *Data = Read(*b, Address);
   return CAEN_DGTZ_Success;
 }

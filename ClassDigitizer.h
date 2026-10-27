@@ -99,6 +99,7 @@ class Digitizer{
     int  CloseDigitizer();
     void Initalization();
     void Reset();
+    bool WaitClockSettled(); /// after a change of the PLL reference: wait until the PLL is locked and the board is ready
     bool IsDummy()         {return isDummy;}
     bool IsConnected()     {return isConnected;}
     
@@ -168,6 +169,7 @@ class Digitizer{
     /// board <--> memory functions; both return the number of register reads/writes that failed
     int            ReadAllSettingsFromBoard  (bool force = false);
     int            ProgramSettingsToBoard    ();
+    static int     clockSettleTimeoutMs;     /// how long WaitClockSettled waits (5 s)
     static int     programPauseMs;           /// pause after each channel register written by ProgramSettingsToBoard (20 ms, as upstream)
     /// load a settings file, write it to the board and read the board back. Returns -1 if the file
     /// was not loaded (why in problems), else the number of problems: failed writes or reads, and

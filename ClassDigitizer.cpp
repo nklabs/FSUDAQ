@@ -1,5 +1,8 @@
 #include "ClassDigitizer.h"
 
+#include <chrono>
+
+int Digitizer::clockSettleTimeoutMs = 5000;
 int Digitizer::programPauseMs = 20;
 
 Digitizer::Digitizer(){
@@ -68,10 +71,38 @@ void Digitizer::Reset(){
   // ret |= CAEN_DGTZ_WriteRegister(handle, DPP::SoftwareClear_W, 1);
   // if( ret != 0 ) ErrorMsg("Reset-SoftwareClear_W");
 
+  /// the reset puts the board back on its internal clock: a board on CLK-IN changes its reference
+  uint32_t acqCtrl = 0;
+  bool onExtClock = DPPType != DPPTypeCode::DPP_QDC_CODE && CAEN_DGTZ_ReadRegister(handle, DPP::AcquisitionControl, &acqCtrl) == 0
+                    && ExtractBits(acqCtrl, DPP::Bit_AcquistionControl::PLLRef) == 1;
+
   // Clear data off the Output Buffer, the event counter, perform a FPGA global reset to default configuration
   ret = CAEN_DGTZ_WriteRegister(handle, DPP::SoftwareReset_W, 1);
   if( ret != 0 ) ErrorMsg("Reset-SoftwareReset_W");
+  if( ret == 0 && onExtClock ) WaitClockSettled();
 
+}
+
+bool Digitizer::WaitClockSettled(){
+  DebugPrint("%s", "Digitizer");
+  /// only the acquisition status is read until then: any other register can hang the board
+  auto t0 = std::chrono::steady_clock::now();
+  uint32_t status = 0;
+  while( true ){
+    int r = CAEN_DGTZ_ReadRegister(handle, DPP::AcquisitionStatus_R, &status);
+    long ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    if( r == 0 && ExtractBits(status, DPP::Bit_AcqStatus::PLLLock) == 1 && ExtractBits(status, DPP::Bit_AcqStatus::BoardReady) == 1 ){
+      printf("Digi-%d: clock source changed to %s; PLL locked and board ready after %ld ms (0x8104 = 0x%X).\n",
+             GetSerialNumber(), ExtractBits(status, DPP::Bit_AcqStatus::ClockSource) ? "external" : "internal", ms, status);
+      return true;
+    }
+    if( ms >= clockSettleTimeoutMs ){
+      printf("\033[31mDigi-%d: clock source changed, but after %ld ms the board is not ready (0x8104 = 0x%X%s). "
+             "Accessing it now may hang it.\033[0m\n", GetSerialNumber(), ms, status, r == 0 ? "" : ", read failed");
+      return false;
+    }
+    usleep(10000);
+  }
 }
 
 void Digitizer::PrintBoard (){
@@ -847,7 +878,21 @@ void Digitizer::WriteRegister (Reg registerAddress, uint32_t value, int ch, bool
   // QDC firmware too old for the over-threshold width; on PSD boards the same address is the PUR-GAP threshold
   if( DPPType == DPPTypeCode::DPP_QDC_CODE && !hasOverThresholdWidth && registerAddress == DPP::QDC::OverThresholdWidth ) return ;
   
+  /// a DT5730 accessed while its PLL locks to a new reference stops answering until it is power-cycled
+  /// (PSI, 27 Oct 2026; CoMPASS sets the same bit and only reads the status after it)
+  bool clockChange = false;
+  if( registerAddress == DPP::AcquisitionControl && DPPType != DPPTypeCode::DPP_QDC_CODE ){
+    uint32_t now = 0;
+    if( CAEN_DGTZ_ReadRegister(handle, DPP::AcquisitionControl, &now) == 0 )
+      clockChange = ExtractBits(now, DPP::Bit_AcquistionControl::PLLRef) != ExtractBits(value, DPP::Bit_AcquistionControl::PLLRef);
+  }
+
   ret = CAEN_DGTZ_WriteRegister(handle, registerAddress.ActualAddress(ch), value);
+  if( ret == 0 && clockChange ){
+    int writeRet = ret;
+    WaitClockSettled();
+    ret = writeRet;  /// the write itself succeeded
+  }
 
   if( ret == 0 && isSave2MemAndFile && !AcqRun && registerAddress.GetRWType() == RW::ReadWrite ) {
     if( ch < 0 ) {

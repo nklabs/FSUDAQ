@@ -60,6 +60,11 @@ size_t fake_caen_handed_out(int serial, const uint32_t ** words);
 void fake_caen_fail(int serial, const char * what);
 // A write to this address returns success but is lost (a write dropped on the link); 0 = none.
 void fake_caen_drop_write(int serial, uint32_t address);
+// A DT5730 whose PLL reference changes (0x8100 bit 6, or a reset while on CLK-IN) is settling for
+// this long: 0x8104 shows it not ready, and any access but the status registers (0x8104, 0xEF04,
+// 0x8178) hangs it for good, like the boards at PSI on 27 Oct 2026. Default 30 ms.
+void fake_caen_set_clock_settle_ms(int ms);
+int  fake_caen_is_hung(int serial);
 // At a stop the board holds nHeld aggregates still being filled (default 1, generated data only);
 // they are read only after a forced data flush, which makes them readable one every latencyMs
 // (default 0: all at once).

@@ -130,6 +130,67 @@ static void CheckRefused(const std::string & dir) {
   remove(tmp.c_str());
 }
 
+// A DT5730 changing its PLL reference must not be touched until it is ready (PSI, 27 Oct 2026):
+// the settings panel, a settings file and a reset all change it.
+static void CheckClockChange(const std::string & dir) {
+  printf("== changing the clock source of a DT5730\n");
+  const int serial = 30599, port = 6;   // 30508's identity, its own serial (ports 0-5 and 7 are taken)
+  fake_caen_set_clock_settle_ms(50);
+  fake_caen_add_board(1, port, 0, serial, "DT5730", (dir + "/Digi-30508_PSD.bin").c_str());
+  Digitizer digi(0, port);
+  CHECK(digi.IsConnected(), "Digi-%d did not open", serial);
+  if( !digi.IsConnected() ) return;
+
+  auto ExtClock = [&](){ return (fake_caen_reg(serial, 0x8100) >> 6) & 1; };
+  auto Answers = [&](const char * what){
+    digi.ReadRegister(DPP::ChannelStatus_R, 0, false);
+    bool ok = digi.GetErrorCode() == 0 && !fake_caen_is_hung(serial);
+    CHECK(ok, "%s: the board stopped answering", what);
+    if( ok ) printf("   ok    %s\n", what);
+    return ok;
+  };
+
+  //---- the settings panel's PLL Ref. Clock
+  digi.SetBits(DPP::AcquisitionControl, DPP::Bit_AcquistionControl::PLLRef, 1, 0);
+  CHECK(ExtClock() == 1, "panel: CLK-IN not set");
+  if( !Answers("panel: internal -> CLK-IN, then a channel register") ) return;
+  digi.SetBits(DPP::AcquisitionControl, DPP::Bit_AcquistionControl::PLLRef, 0, 0);
+  CHECK(ExtClock() == 0, "panel: internal clock not set");
+  if( !Answers("panel: CLK-IN -> internal, then a channel register") ) return;
+
+  //---- a settings file on CLK-IN loaded on a board on its internal clock
+  std::vector<uint32_t> file(SETTINGSIZE);
+  FILE * f = fopen((dir + "/Digi-30508_PSD.bin").c_str(), "rb");
+  if( !f || fread(file.data(), 4, SETTINGSIZE, f) != SETTINGSIZE ){ printf("cannot read Digi-30508_PSD.bin\n"); nFail++; if( f ) fclose(f); return; }
+  fclose(f);
+  Reg acqCtrl = DPP::AcquisitionControl;
+  file[acqCtrl.Index(0)] |= 0x40;
+  std::string tmp = "/tmp/fsudaq_test_clock_" + std::to_string(getpid()) + ".bin";
+  FILE * out = fopen(tmp.c_str(), "wb");
+  fwrite(file.data(), 4, SETTINGSIZE, out);
+  fclose(out);
+  std::vector<std::string> problems;
+  int n = digi.LoadAndProgramSettings(tmp, problems);
+  for( auto & p : problems ) printf("         %s\n", p.c_str());
+  CHECK(n == 0 && ExtClock() == 1, "file on CLK-IN: %d problem(s)", n);
+  if( !Answers("file on CLK-IN loaded on a board on its internal clock") ){ remove(tmp.c_str()); return; }
+  remove(tmp.c_str());
+
+  //---- a reset of a board on CLK-IN (Program Default) puts it back on its internal clock
+  digi.Reset();
+  CHECK(ExtClock() == 0, "reset: still on CLK-IN");
+  if( !Answers("reset of a board on CLK-IN, then a channel register") ) return;
+
+  //---- the control: without the wait the fake board hangs, as the real one did
+  int keep = Digitizer::clockSettleTimeoutMs;
+  Digitizer::clockSettleTimeoutMs = 0;
+  digi.SetBits(DPP::AcquisitionControl, DPP::Bit_AcquistionControl::PLLRef, 1, 0);
+  digi.ReadRegister(DPP::ChannelStatus_R, 0, false);
+  CHECK(fake_caen_is_hung(serial), "control: a board touched while settling did not hang (the fake does not model it)");
+  if( fake_caen_is_hung(serial) ) printf("   ok    control: touched while settling, the board hangs\n");
+  Digitizer::clockSettleTimeoutMs = keep;
+}
+
 int main(int argc, char ** argv) {
   Digitizer::programPauseMs = 0; // the fake boards need no pause between register writes
   std::string dir = argc > 1 ? argv[1] : "tests/data/odin-runB";
@@ -147,6 +208,7 @@ int main(int argc, char ** argv) {
   int port = 0;
   for( auto & [serial, path] : files ) CheckBoard(path, serial, port++);
   CheckRefused(dir);
+  CheckClockChange(dir);
 
   printf("\n%s: %d problem(s) in %zu board(s)\n", nFail ? "FAILED" : "PASSED", nFail, files.size());
   return nFail ? 1 : 0;
