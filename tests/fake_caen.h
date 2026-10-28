@@ -64,6 +64,10 @@ void fake_caen_drop_write(int serial, uint32_t address);
 // this long: 0x8104 shows it not ready, and any access but the status registers (0x8104, 0xEF04,
 // 0x8178) hangs it for good, like the boards at PSI on 27 Oct 2026. Default 30 ms.
 void fake_caen_set_clock_settle_ms(int ms);
+// A DC offset write keeps the channel's SPI bus busy (0x1n88 bit 2) for this long; a DC offset written
+// to a busy channel is lost, as a DAC write on a busy bus would be. Default 2 ms.
+void fake_caen_set_spi_busy_ms(int ms);
+int  fake_caen_dropped_dc_writes(int serial);
 int  fake_caen_is_hung(int serial);
 // At a stop the board holds nHeld aggregates still being filled (default 1, generated data only);
 // they are read only after a forced data flush, which makes them readable one every latencyMs

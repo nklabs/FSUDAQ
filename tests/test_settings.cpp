@@ -191,6 +191,35 @@ static void CheckClockChange(const std::string & dir) {
   Digitizer::clockSettleTimeoutMs = keep;
 }
 
+// The DC offset goes over the channel's SPI bus: FSUDAQ waits for the bus as CoMPASS does, with no
+// fixed pause after each register, so back-to-back DC offsets all arrive.
+static void CheckSPIWait(const std::string & dir) {
+  printf("== DC offsets written back to back\n");
+  const int serial = 30598, port = 6, node = 1;   // daisy-chained behind the clock test's board
+  fake_caen_set_spi_busy_ms(5);
+  fake_caen_add_board(1, port, node, serial, "DT5730", (dir + "/Digi-30508_PSD.bin").c_str());
+  Digitizer digi(node, port);
+  CHECK(digi.IsConnected(), "Digi-%d did not open", serial);
+  if( !digi.IsConnected() ) return;
+
+  digi.WriteRegister(DPP::ChannelDCOffset, 0x1111, 0);
+  digi.WriteRegister(DPP::ChannelDCOffset, 0x2222, 0);
+  digi.WriteRegister(DPP::ChannelDCOffset, 0x3333, -1);
+  bool ok = fake_caen_reg(serial, 0x1098) == 0x3333 && fake_caen_reg(serial, 0x1798) == 0x3333 && fake_caen_dropped_dc_writes(serial) == 0;
+  CHECK(ok, "with the SPI wait: ch0 0x%X, ch7 0x%X, %d DC offset(s) lost", fake_caen_reg(serial, 0x1098), fake_caen_reg(serial, 0x1798), fake_caen_dropped_dc_writes(serial));
+  if( ok ) printf("   ok    one channel twice, then all channels: every DC offset arrived\n");
+
+  //---- the control: without the wait the fake board loses the second write
+  int keep = Digitizer::spiWaitTimeoutMs;
+  Digitizer::spiWaitTimeoutMs = 0;
+  usleep(10000);
+  digi.WriteRegister(DPP::ChannelDCOffset, 0x4444, 0);
+  digi.WriteRegister(DPP::ChannelDCOffset, 0x5555, 0);
+  CHECK(fake_caen_dropped_dc_writes(serial) > 0, "control: a DC offset written to a busy channel was not lost (the fake does not model it)");
+  if( fake_caen_dropped_dc_writes(serial) > 0 ) printf("   ok    control: without the wait the second DC offset is lost\n");
+  Digitizer::spiWaitTimeoutMs = keep;
+}
+
 int main(int argc, char ** argv) {
   Digitizer::programPauseMs = 0; // the fake boards need no pause between register writes
   std::string dir = argc > 1 ? argv[1] : "tests/data/odin-runB";
@@ -209,6 +238,7 @@ int main(int argc, char ** argv) {
   for( auto & [serial, path] : files ) CheckBoard(path, serial, port++);
   CheckRefused(dir);
   CheckClockChange(dir);
+  CheckSPIWait(dir);
 
   printf("\n%s: %d problem(s) in %zu board(s)\n", nFail ? "FAILED" : "PASSED", nFail, files.size());
   return nFail ? 1 : 0;

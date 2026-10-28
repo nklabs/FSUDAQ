@@ -51,6 +51,8 @@ struct Board {
   std::vector<uint32_t> handedOut;       // everything ReadData gave
   std::chrono::steady_clock::time_point settleUntil{};  // the PLL locks to a new reference until then
   bool hung = false;                     // touched while settling: answers nothing any more
+  std::chrono::steady_clock::time_point spiBusyUntil[16]{};  // each channel's DAC is being written until then
+  int droppedDC = 0;                     // DC offsets written while their SPI bus was busy (lost)
 };
 
 std::vector<Board> boards;
@@ -60,6 +62,7 @@ std::atomic<long> sequence{0};           // SWStart / SWStop calls over all boar
 uint32_t Sentinel(uint32_t address) { return (0xDEAD0000u | ((address >> 2) & 0xFFFF)) & (address == 0x8100 ? ~0x40u : ~0u); }
 
 int clockSettleMs = 30;
+int spiBusyMs = 2;
 bool Settling(const Board & b) { return std::chrono::steady_clock::now() < b.settleUntil; }
 
 unsigned short ImageIndex(uint32_t a) { // FSUDAQ's Reg::Index for an actual address
@@ -141,6 +144,12 @@ uint32_t Read(Board & b, uint32_t a) {
     return (Settling(b) ? 0 : (1u << 8)) | (1u << 7) | (extClock << 5)
            | (b.st.running ? (1u << 2) : 0) | (b.st.aggAcquired > b.st.aggRead ? (1u << 3) : 0);
   }
+  if( a >= 0x1000 && a < 0x2000 && (a & 0xFF) == 0x88 ){   // channel status: bit 2 = SPI bus busy
+    unsigned short i = ImageIndex(a);
+    uint32_t v = i < b.image.size() ? b.image[i] : 0;
+    bool busy = std::chrono::steady_clock::now() < b.spiBusyUntil[(a >> 8) & 0xF];
+    return (v & ~0x4u) | (busy ? 0x4u : 0);
+  }
   if( IsReadOnly(a) ){
     unsigned short i = ImageIndex(a);
     return i < b.image.size() ? b.image[i] : 0;
@@ -156,6 +165,12 @@ void Write(Board & b, uint32_t a, uint32_t v) {
     uint32_t refNow = (Read(b, 0x8100) >> 6) & 1;
     uint32_t refNew = a == 0x8100 ? (v >> 6) & 1 : 0;   // a reset: back to the internal clock
     if( refNew != refNow ) b.settleUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(clockSettleMs);
+  }
+  if( (a >= 0x1000 && a < 0x2000 && (a & 0xFF) == 0x98) || a == 0x8098 ){   // DC offset: to the DAC over the SPI bus
+    auto now = std::chrono::steady_clock::now();
+    int c0 = a == 0x8098 ? 0 : (a >> 8) & 0xF, c1 = a == 0x8098 ? b.nCh - 1 : c0;
+    for( int c = c0; c <= c1; c++ ) if( now < b.spiBusyUntil[c] ){ b.droppedDC++; return; }   // lost
+    for( int c = c0; c <= c1; c++ ) b.spiBusyUntil[c] = now + std::chrono::milliseconds(spiBusyMs);
   }
   if( a == 0xEF24 || a == 0xEF34 ){ ResetRegisters(b); return; }
   if( a == 0xEF28 ){ Clear(b); return; }
@@ -317,6 +332,12 @@ extern "C" void fake_caen_fail(int serial, const char * what) {
 }
 
 extern "C" void fake_caen_set_clock_settle_ms(int ms) { clockSettleMs = ms; }
+extern "C" void fake_caen_set_spi_busy_ms(int ms) { spiBusyMs = ms; }
+
+extern "C" int fake_caen_dropped_dc_writes(int serial) {
+  Board * b = FromSerial(serial);
+  return b ? b->droppedDC : -1;
+}
 
 extern "C" int fake_caen_is_hung(int serial) {
   Board * b = FromSerial(serial);

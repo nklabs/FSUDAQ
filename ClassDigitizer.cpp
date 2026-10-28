@@ -3,7 +3,8 @@
 #include <chrono>
 
 int Digitizer::clockSettleTimeoutMs = 5000;
-int Digitizer::programPauseMs = 20;
+int Digitizer::spiWaitTimeoutMs = 1000;
+int Digitizer::programPauseMs = 0;   /// CoMPASS waits only for the SPI bus before a DC offset (WaitSPIFree)
 
 Digitizer::Digitizer(){
   DebugPrint("%s", "Digitizer");
@@ -103,6 +104,26 @@ bool Digitizer::WaitClockSettled(){
     }
     usleep(10000);
   }
+}
+
+bool Digitizer::WaitSPIFree(int ch){
+  DebugPrint("%s", "Digitizer");
+  auto t0 = std::chrono::steady_clock::now();
+  for( int c = (ch < 0 ? 0 : ch); c < (ch < 0 ? NumInputCh : ch + 1); c++ ){
+    uint32_t status = 0;
+    while( true ){
+      int r = CAEN_DGTZ_ReadRegister(handle, DPP::ChannelStatus_R.GetAddress() + (c << 8), &status);
+      if( r == 0 && ((status >> 2) & 0x1) == 0 ) break;
+      long ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+      if( ms >= spiWaitTimeoutMs ){
+        printf("\033[31mDigi-%d ch%d: SPI bus still busy after %ld ms (0x%04X = 0x%X%s); writing the DC offset anyway.\033[0m\n",
+               GetSerialNumber(), c, ms, DPP::ChannelStatus_R.GetAddress() + (c << 8), status, r == 0 ? "" : ", read failed");
+        return false;
+      }
+      usleep(1000);
+    }
+  }
+  return true;
 }
 
 void Digitizer::PrintBoard (){
@@ -886,6 +907,9 @@ void Digitizer::WriteRegister (Reg registerAddress, uint32_t value, int ch, bool
     if( CAEN_DGTZ_ReadRegister(handle, DPP::AcquisitionControl, &now) == 0 )
       clockChange = ExtractBits(now, DPP::Bit_AcquistionControl::PLLRef) != ExtractBits(value, DPP::Bit_AcquistionControl::PLLRef);
   }
+
+  /// the DC offset goes to the channel's DAC over its SPI bus: wait until the bus is free, as CoMPASS does
+  if( registerAddress == DPP::ChannelDCOffset && DPPType != DPPTypeCode::DPP_QDC_CODE ) WaitSPIFree(ch);
 
   ret = CAEN_DGTZ_WriteRegister(handle, registerAddress.ActualAddress(ch), value);
   if( ret == 0 && clockChange ){
