@@ -24,6 +24,7 @@
 #include "analyzers/Analyser.h"
 
 class ScalarWorker; //Forward declaration
+class QScrollArea;
 
 //^#===================================================== FSUDAQ
 class FSUDAQ : public QMainWindow{
@@ -229,7 +230,11 @@ private:
 
   //@----- Scalar
   QMainWindow  * scalar;
-  QGridLayout * scalarLayout;
+  QGridLayout * scalarLayout;          // the board blocks, as many per row as the window is wide (ReflowScalar)
+  QScrollArea * scalarScroll;
+  std::vector<QWidget *> scalarBoards; // one block per board: its name, summary rows and channels
+  int scalarColumns;                   // board blocks per row now
+  void ReflowScalar();
   TimingThread * scalarTimingThread;
   // QThread * scalarThread;
   // ScalarWorker * scalarWorker;

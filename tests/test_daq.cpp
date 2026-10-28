@@ -289,6 +289,42 @@ public:
     w->CloseDigitizers();
   }
 
+  // the Run Monitor's board blocks wrap to the window width: never a sideways scroll while one block fits
+  void RunMonitorWraps(){
+    printf("== Run Monitor: board blocks re-flow with the window width\n");
+    NewWorkDir(); AddBoards(); NewFSUDAQ();
+    Open();
+    CHECK(w->scalar && w->scalarBoards.size() == 6, "Run Monitor not set up for 6 boards");
+    if( !w->scalar || w->scalarBoards.size() != 6 ) return;
+    w->scalar->show();
+    Pump(100);
+    const int blockW = w->scalarBoards[0]->width();
+    QStringList seen;
+    for( int width : {4000, 1400, 900, 500, blockW / 2} ){
+      w->scalar->resize(width, 900);
+      Pump(150);
+      QWidget * vp = w->scalarScroll->viewport();
+      const bool fits = vp->width() >= blockW + 20;
+      int perRow = w->scalarColumns;
+      QRect prev;
+      for( size_t i = 0; i < w->scalarBoards.size(); i++ ){
+        QRect r(w->scalarBoards[i]->mapTo(w->scalarScroll->widget(), QPoint(0, 0)), w->scalarBoards[i]->size());
+        if( fits ) CHECK(r.right() < vp->width(), "width %d: Digi block %zu ends at x=%d, beyond the visible %d", width, i, r.right(), vp->width());
+        if( i > 0 ){
+          bool sameRow = (int) i % perRow != 0;
+          CHECK(sameRow ? (r.left() > prev.right() && r.top() == prev.top()) : (r.top() > prev.top()), "width %d: block %zu not after block %zu in its row (%d,%d after %d,%d)", width, i, i - 1, r.left(), r.top(), prev.left(), prev.top());
+        }
+        prev = r;
+      }
+      int hMax = w->scalarScroll->horizontalScrollBar()->maximum();
+      if( fits ) CHECK(hMax == 0, "width %d: sideways scrolling (%d px) although a block (%d px) fits", width, hMax, blockW);
+      seen << QString("%1 px: %2 per row").arg(width).arg(perRow);
+    }
+    if( nFail == 0 ) OK("%s", qPrintable(seen.join(", ")));
+    w->scalar->hide();
+    w->CloseDigitizers();
+  }
+
   void ReadFailureStopsRun(){
     printf("== a board stops answering mid-run: the run is stopped and says why\n");
     NewWorkDir(); AddBoards(); NewFSUDAQ();
@@ -788,6 +824,7 @@ int main(int argc, char ** argv){
   t.SavedRunIsComplete();
   t.BoardThatCannotStart();
   t.ADCCalibrationAtStart();
+  t.RunMonitorWraps();
   t.ReadFailureStopsRun();
   t.WriteFailureStopsRun();
   t.RepeatedRuns();

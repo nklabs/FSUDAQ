@@ -22,6 +22,22 @@
 #include <QElapsedTimer>
 #include <QStorageInfo>
 #include <memory>
+#include <functional>
+#include <QEvent>
+#include <QScreen>
+#include <QGuiApplication>
+
+namespace {
+/// calls a function whenever the widget it watches is resized
+class ResizeWatcher : public QObject {
+public:
+  ResizeWatcher(QObject * parent, std::function<void()> f) : QObject(parent), onResize(std::move(f)) {}
+protected:
+  bool eventFilter(QObject * o, QEvent * e) override { if( e->type() == QEvent::Resize ) onResize(); return QObject::eventFilter(o, e); }
+private:
+  std::function<void()> onResize;
+};
+}
 
 // Run Monitor cell colours
 static const char * InputCellStyle = "background-color: #F0F0F0;";
@@ -46,6 +62,8 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
   openedWithSettings = false;
 
   scalar = nullptr;
+  scalarScroll = nullptr;
+  scalarColumns = 0;
   scope = nullptr;
   digiSettings = nullptr;
   singleHistograms = nullptr;
@@ -1126,13 +1144,13 @@ void FSUDAQ::SetupScalar(){
   scalar = new QMainWindow(this);
   scalar->setWindowTitle("Run Monitor (Scalar)");
 
-  QScrollArea * scopeScroll = new QScrollArea(scalar);
-  scalar->setCentralWidget(scopeScroll);
-  scopeScroll->setWidgetResizable(true);
-  scopeScroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+  scalarScroll = new QScrollArea(scalar);
+  scalar->setCentralWidget(scalarScroll);
+  scalarScroll->setWidgetResizable(true);
+  scalarScroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
   QWidget * layoutWidget = new QWidget(scalar);
-  scopeScroll->setWidget(layoutWidget);
+  scalarScroll->setWidget(layoutWidget);
 
   // the status lines sit above the board grid, not in its columns, so their text cannot widen
   // a board column; both are as wide as the grid and kept at the top left
@@ -1145,10 +1163,13 @@ void FSUDAQ::SetupScalar(){
   topLayout->setColumnStretch(0, 1);
   blockLayout->addLayout(topLayout);
 
+  // one block per board; ReflowScalar puts as many in a row as the window is wide
   scalarLayout = new QGridLayout();
-  scalarLayout->setSpacing(0);
-  scalarLayout->setHorizontalSpacing(3);
+  scalarLayout->setHorizontalSpacing(18);
+  scalarLayout->setVerticalSpacing(12);
   blockLayout->addLayout(scalarLayout);
+  scalarBoards.clear();
+  scalarColumns = 0;
 
   leTrigger = nullptr;
   leAccept = nullptr;
@@ -1172,11 +1193,6 @@ void FSUDAQ::SetupScalar(){
 
   // scalarThread->start();
 
-  unsigned short maxNChannel = 0;
-  for( unsigned int k = 0; k < nDigi; k ++ ){
-    if( digi[k]->GetNumInputCh() > maxNChannel ) maxNChannel = digi[k]->GetNumInputCh();
-  }
-
   // fixed cell widths: the columns never resize with the text; the board summary above them
   // uses rows rather than width, and its labels ignore their width so they cannot widen a column
   const int nCells = 4;                     // Counts/s, Input/s, Missed %, Lost %
@@ -1184,10 +1200,6 @@ void FSUDAQ::SetupScalar(){
   const int boardW = nCells * cellW + (nCells - 1) * 3;
   const int nSummary = 5;                   // board rows: Counts/s, Input/s, Missed, Lost, Read
   const int headRow = 3 + nSummary + 3;     // after the summary: written, agg/reads, problems; then column titles
-
-  const int gapW = 18;                      // empty column between boards
-
-  scalar->setGeometry(0, 0, 60 + nDigi * (boardW + gapW + 6), 160 + (headRow + maxNChannel) * 25);
 
   if( lbLastUpdateTime == nullptr ){
     lbLastUpdateTime = new QLabel("Last update : NA", scalar);
@@ -1210,21 +1222,7 @@ void FSUDAQ::SetupScalar(){
   lbTotalFileSize->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
   topLayout->addWidget(lbTotalFileSize, 1, 1);
 
-  ///==== create the header row
-  int rowID = headRow;
-  for( int ch = 0; ch < maxNChannel; ch++){
-
-    if( ch == 0 ){
-      QLabel * lbCH_H = new QLabel("Ch", scalar); 
-      lbCH_H->setAlignment(Qt::AlignCenter);
-      scalarLayout->addWidget(lbCH_H, rowID, 0);
-    }  
-
-    rowID ++;
-    QLabel * lbCH = new QLabel(QString::number(ch), scalar);
-    lbCH->setAlignment(Qt::AlignCenter);
-    scalarLayout->addWidget(lbCH, rowID, 0);
-  }
+  int rowID = 0;
 
   ///===== per board: name and run status, summary rows, diagnostics, then Counts/s, Input/s, Missed %, Lost % per channel
   leTrigger = new QLineEdit**[nDigi];
@@ -1252,15 +1250,22 @@ void FSUDAQ::SetupScalar(){
 
   for( unsigned int iDigi = 0; iDigi < nDigi; iDigi++){
     rowID = 2;
-    const int col = (nCells + 1) * iDigi + 1;
-    if( iDigi + 1 < nDigi ) scalarLayout->setColumnMinimumWidth(col + nCells, gapW);
+    const int col = 1;   // column 0: the channel numbers
+    QWidget * board = new QWidget(layoutWidget);
+    board->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    QGridLayout * boardLayout = new QGridLayout(board);
+    boardLayout->setContentsMargins(0, 0, 0, 0);
+    boardLayout->setSpacing(0);
+    boardLayout->setHorizontalSpacing(3);
+    boardLayout->setColumnMinimumWidth(0, 22);
+    scalarBoards.push_back(board);
     uint32_t chMask =  digi[iDigi]->GetRegChannelMask();
     deadWin[iDigi].assign(digi[iDigi]->GetNumInputCh(), DeadTimeWindow());
 
     QWidget * hBox = new QWidget(scalar);
     QHBoxLayout * hBoxLayout = new QHBoxLayout(hBox);
     hBox->setFixedWidth(boardW);
-    scalarLayout->addWidget(hBox, rowID, col, 1, nCells);
+    boardLayout->addWidget(hBox, rowID, col, 1, nCells);
 
     QLabel * lbDigi = new QLabel("<b>Digi-" + QString::number(digi[iDigi]->GetSerialNumber()) + "</b>", scalar); 
     lbDigi->setAlignment(Qt::AlignCenter);
@@ -1284,13 +1289,13 @@ void FSUDAQ::SetupScalar(){
       lbKey->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
       lbKey->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
       lbKey->setToolTip(tips[k] + (k == 1 || k == 2 || k == 3 ? statusTip : ""));
-      scalarLayout->addWidget(lbKey, rowID, col);
+      boardLayout->addWidget(lbKey, rowID, col);
       lbBoardValue[iDigi][k] = new QLabel("", scalar);
       lbBoardValue[iDigi][k]->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
       lbBoardValue[iDigi][k]->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
       lbBoardValue[iDigi][k]->setTextFormat(Qt::RichText);
       lbBoardValue[iDigi][k]->setToolTip(lbKey->toolTip());
-      scalarLayout->addWidget(lbBoardValue[iDigi][k], rowID, col + 1, 1, nCells - 1);
+      boardLayout->addWidget(lbBoardValue[iDigi][k], rowID, col + 1, 1, nCells - 1);
     }
 
     // file size and readout diagnostics: small and grey; problems get their own red row
@@ -1301,7 +1306,7 @@ void FSUDAQ::SetupScalar(){
     lbFileSize[iDigi]->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     lbFileSize[iDigi]->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     lbFileSize[iDigi]->setToolTip("data written for this run by this board");
-    scalarLayout->addWidget(lbFileSize[iDigi], rowID, col, 1, nCells);
+    boardLayout->addWidget(lbFileSize[iDigi], rowID, col, 1, nCells);
 
     rowID ++;
     const QString maxAgg = QString::number(digi[iDigi]->GetSettingFromMemory(DPP::MaxAggregatePerBlockTransfer));
@@ -1318,7 +1323,7 @@ void FSUDAQ::SetupScalar(){
                                   "the board has more waiting than one read can take, the readout is at its limit and\n"
                                   "Lost will follow. Well below " + maxAgg + ": the readout is ahead of the board. Many reads\n"
                                   "with few aggregates is normal at low rates: the thread polls a quiet board.");
-    scalarLayout->addWidget(lbAggCount[iDigi], rowID, col, 1, nCells);
+    boardLayout->addWidget(lbAggCount[iDigi], rowID, col, 1, nCells);
 
     rowID ++;
     lbProblems[iDigi] = new QLabel("", scalar);
@@ -1329,16 +1334,24 @@ void FSUDAQ::SetupScalar(){
                                   "bad-ch: aggregates with an impossible channel number\n"
                                   "NOT SAVED: buffers that could not be written to the file\n"
                                   "flags stuck: channels whose trigger flags are not written (no Input/Missed/Lost for them)");
-    scalarLayout->addWidget(lbProblems[iDigi], rowID, col, 1, nCells);
+    boardLayout->addWidget(lbProblems[iDigi], rowID, col, 1, nCells);
 
     rowID = headRow;
+    QLabel * lbCH_H = new QLabel("Ch", scalar);
+    lbCH_H->setAlignment(Qt::AlignCenter);
+    boardLayout->addWidget(lbCH_H, rowID, 0);
+    for( int ch = 0; ch < digi[iDigi]->GetNumInputCh(); ch++ ){
+      QLabel * lbCH = new QLabel(QString::number(ch), scalar);
+      lbCH->setAlignment(Qt::AlignCenter);
+      boardLayout->addWidget(lbCH, rowID + 1 + ch, 0);
+    }
     const char * heads[nCells] = {"Counts/s", "Input/s", "Missed %", "Lost %"};
     for( int k = 0; k < nCells; k++ ){
       QLabel * lb = new QLabel(heads[k], scalar);
       lb->setAlignment(Qt::AlignCenter);
       lb->setFixedWidth(cellW);
       lb->setToolTip(tips[k] + (k >= 1 ? statusTip : ""));
-      scalarLayout->addWidget(lb, rowID, col + k);
+      boardLayout->addWidget(lb, rowID, col + k);
     }
 
     leTrigger[iDigi] = new QLineEdit *[digi[iDigi]->GetNumInputCh()];
@@ -1356,7 +1369,7 @@ void FSUDAQ::SetupScalar(){
         le->setAlignment(Qt::AlignRight);
         if( k == 1 ) le->setStyleSheet(InputCellStyle);
         *cells[k] = le;
-        scalarLayout->addWidget(le, rowID, col + k);
+        boardLayout->addWidget(le, rowID, col + k);
       }
       bool on;
       if( digi[iDigi]->IsInputChEqRegCh() ){
@@ -1368,6 +1381,33 @@ void FSUDAQ::SetupScalar(){
     }
   }
 
+  // as many boards side by side as the screen takes, at most all of them; narrower or wider
+  // windows re-flow the boards (no sideways scrolling unless one board does not fit)
+  int blockW = 0, blockH = 0;
+  for( QWidget * b : scalarBoards ){ blockW = std::max(blockW, b->sizeHint().width()); blockH = std::max(blockH, b->sizeHint().height()); }
+  QRect screen = QGuiApplication::primaryScreen() ? QGuiApplication::primaryScreen()->availableGeometry() : QRect(0, 0, 1600, 1000);
+  const int gap = scalarLayout->horizontalSpacing(), frame = 60;
+  int perRow = std::max(1, std::min((int) nDigi, (screen.width() - frame + gap) / (blockW + gap)));
+  int rows = ((int) nDigi + perRow - 1) / perRow;
+  scalar->resize(perRow * (blockW + gap) - gap + frame, std::min(screen.height(), 80 + rows * (blockH + scalarLayout->verticalSpacing())));
+  ReflowScalar();
+  scalarScroll->viewport()->installEventFilter(new ResizeWatcher(scalar, [this](){ ReflowScalar(); }));
+
+}
+
+/// lay the board blocks out in rows, as many per row as the visible width takes
+void FSUDAQ::ReflowScalar(){
+  if( scalar == nullptr || scalarBoards.empty() ) return;
+  int boardW = 0;
+  for( QWidget * b : scalarBoards ) boardW = std::max(boardW, b->sizeHint().width());
+  const int gap = scalarLayout->horizontalSpacing();
+  const QMargins m = scalarScroll->widget()->layout()->contentsMargins();
+  int width = scalarScroll->viewport()->width() - m.left() - m.right();
+  int perRow = std::max(1, std::min((int) scalarBoards.size(), (width + gap) / (boardW + gap)));
+  if( perRow == scalarColumns ) return;
+  scalarColumns = perRow;
+  for( QWidget * b : scalarBoards ) scalarLayout->removeWidget(b);
+  for( size_t i = 0; i < scalarBoards.size(); i++ ) scalarLayout->addWidget(scalarBoards[i], i / perRow, i % perRow, Qt::AlignTop | Qt::AlignLeft);
 }
 
 void FSUDAQ::UpdateScalar(){
