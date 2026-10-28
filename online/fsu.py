@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-TICK_PS = 2000          # x730: 500 MS/s, one trigger-time-tag tick = 2 ns
+TICK_PS = 2000          # x730: 500 MS/s, one trigger-time-tag tick = 2 ns (x725: 4 ns; see tick_ps_of)
 FINE_DIV = 1024         # 10-bit fine time stamp spans one tick
 AGG_COUNTER_MOD = 1 << 23
 CHUNK_EVENTS = 20_000_000
@@ -105,6 +105,13 @@ class FileSummary:
     @property
     def span_s(self) -> float:
         return (self.ts_last - self.ts_first) / 1e12 if self.n_events else 0.0
+
+
+def tick_ps_of(path: str) -> int:
+    """The trigger-time-tag tick of a file, from FSUDAQ's name <...>_<DPP>_<tick ns>_<index>.fsu
+    (2 ns on x730, 4 ns on x725); TICK_PS when the name does not say."""
+    m = re.search(r"_(?:PSD|PHA|QDC)_(\d+)_\d+\.fsu$", os.path.basename(path))
+    return int(m.group(1)) * 1000 if m and int(m.group(1)) > 0 else TICK_PS
 
 
 def serial_from_name(path: str) -> int:
@@ -223,8 +230,8 @@ def index_file(words: np.ndarray) -> FileIndex:
         n_aggregates=n_agg, malformed=malformed, truncated_words=n - pos)
 
 
-def _decode_chunk(words, ix: FileIndex, lo: int, hi: int):
-    """Vectorised decode of couple aggregates ix[lo:hi]. Returns dict of arrays."""
+def _decode_chunk(words, ix: FileIndex, lo: int, hi: int, tick_ps: int = TICK_PS):
+    """Vectorised decode of couple aggregates ix[lo:hi] (time tags of tick_ps). Returns dict of arrays."""
     nev = ix.nev[lo:hi]
     tot = int(nev.sum())
     if tot == 0:
@@ -243,7 +250,7 @@ def _decode_chunk(words, ix: FileIndex, lo: int, hi: int):
     ext = extra_w >> 16
     fine = extra_w & 0x3FF
     flags = ((extra_w >> 10) & 0x3F).astype(np.uint8)
-    ts_ps = ((ext << 31) | ttt) * TICK_PS + (fine * TICK_PS) // FINE_DIV
+    ts_ps = ((ext << 31) | ttt) * tick_ps + (fine * tick_ps) // FINE_DIV
     pur = ((chg_w >> 15) & 1).astype(np.uint8)
     return dict(ch=ch, ts_ps=ts_ps, flags=flags, pur=pur, agg=agg,
                 qlong=(chg_w >> 16).astype(np.uint16), qshort=(chg_w & 0x7FFF).astype(np.uint16))
@@ -275,7 +282,7 @@ def decode_file(path: str, keep_events: bool = False, progress: bool = False):
         nxt = int(np.searchsorted(cum, target, side="right"))
         bounds.append(max(nxt, bounds[-1] + 1))
     for lo, hi in zip(bounds[:-1], bounds[1:]):
-        d = _decode_chunk(words, ix, lo, hi)
+        d = _decode_chunk(words, ix, lo, hi, tick_ps_of(path))
         if d is None:
             continue
         n = len(d["ch"])

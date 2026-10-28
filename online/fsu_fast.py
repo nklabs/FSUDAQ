@@ -91,12 +91,13 @@ def index_file(words: np.ndarray):
 
 
 # ------------------------------------------------------------------ decode
-TICK_PS = 2000
+TICK_PS = 2000          # x730; a file's own tick comes from its name (fsu.tick_ps_of: 4 ns on x725)
 FINE_DIV = 1024
+from fsu import tick_ps_of   # noqa: E402
 
 
 @njit(cache=True, nogil=True)
-def _decode_kernel(w, ev_start, nev, couple, wpe, has_extra, t_lo, t_hi, ts_out, ch_out, e_out, s_out):
+def _decode_kernel(w, ev_start, nev, couple, wpe, has_extra, t_lo, t_hi, tick, ts_out, ch_out, e_out, s_out):
     """Linear pass over couple aggregates: only what the pipeline needs (time, channel,
     long and short charge), keeping hits with t_lo <= ts < t_hi. Returns the number kept."""
     k = 0
@@ -111,7 +112,7 @@ def _decode_kernel(w, ev_start, nev, couple, wpe, has_extra, t_lo, t_hi, ts_out,
                 fine = extra_w & 0x3FF
             else:
                 ext = 0; fine = 0
-            ts = ((ext << 31) | (ttt_w & 0x7FFFFFFF)) * TICK_PS + (fine * TICK_PS) // FINE_DIV
+            ts = ((ext << 31) | (ttt_w & 0x7FFFFFFF)) * tick + (fine * tick) // FINE_DIV
             if ts >= t_lo and ts < t_hi:
                 ts_out[k] = ts
                 ch_out[k] = c2 + (ttt_w >> 31)
@@ -122,9 +123,9 @@ def _decode_kernel(w, ev_start, nev, couple, wpe, has_extra, t_lo, t_hi, ts_out,
     return k
 
 
-def decode_range(words: np.ndarray, ix, t_lo=None, t_hi=None, short=False):
+def decode_range(words: np.ndarray, ix, t_lo=None, t_hi=None, short=False, tick_ps=TICK_PS):
     """Hits of an indexed file with t_lo <= ts < t_hi as (ts_ps int64, ch uint8, qlong uint16),
-    and qshort uint16 (15 bits) as a fourth array with short=True."""
+    and qshort uint16 (15 bits) as a fourth array with short=True; time tags of tick_ps."""
     w = np.ascontiguousarray(words, dtype=np.uint32)
     if t_lo is None:
         t_lo = np.int64(-1) << 62
@@ -134,7 +135,7 @@ def decode_range(words: np.ndarray, ix, t_lo=None, t_hi=None, short=False):
     ts = np.empty(tot, np.int64); ch = np.empty(tot, np.uint8); e = np.empty(tot, np.uint16)
     qs = np.empty(tot, np.uint16)
     k = _decode_kernel(w, ix.ev_start, ix.nev, ix.couple, ix.wpe, ix.has_extra,
-                       np.int64(t_lo), np.int64(t_hi), ts, ch, e, qs)
+                       np.int64(t_lo), np.int64(t_hi), np.int64(tick_ps), ts, ch, e, qs)
     return (ts[:k], ch[:k], e[:k], qs[:k]) if short else (ts[:k], ch[:k], e[:k])
 
 
@@ -146,9 +147,9 @@ MAX_AGG_WORDS = 1 << 22        # 16 MB; the largest board aggregate in odin's da
 
 
 @njit(cache=True, nogil=True)
-def _event_ts(w, p, step):
+def _event_ts(w, p, step, tick):
     extra_w = np.int64(w[p + step - 2])
-    return (((extra_w >> 16) << 31) | (np.int64(w[p]) & 0x7FFFFFFF)) * TICK_PS + ((extra_w & 0x3FF) * TICK_PS) // FINE_DIV
+    return (((extra_w >> 16) << 31) | (np.int64(w[p]) & 0x7FFFFFFF)) * tick + ((extra_w & 0x3FF) * tick) // FINE_DIV
 
 
 @njit(cache=True, nogil=True)
@@ -232,7 +233,7 @@ def _follows(w, pos, size, n, eof, last_ctr):
 
 
 @njit(cache=True, nogil=True)
-def _scan_kernel(w, pos, n, stop, eof, bid, last_ctr):
+def _scan_kernel(w, pos, n, stop, eof, bid, last_ctr, tick):
     """Index the complete board aggregates starting in w[pos:stop] (w holds data up to n; eof: n is the
     end of what is written). Per couple aggregate in the readable format: ev_start, nev, couple, wpe,
     t_first, t_last (the oldest and newest hit: the two channels of a pair are not in time order inside
@@ -309,7 +310,7 @@ def _scan_kernel(w, pos, n, stop, eof, bid, last_ctr):
                 if has_ts == 1 and has_chg == 1 and has_extra == 1 and opt == 2:
                     lo = np.int64(1) << 62; hi = -(np.int64(1) << 62)
                     for j in range(m):
-                        t = _event_ts(w, p + 2 + j * wpe, wpe)
+                        t = _event_ts(w, p + 2 + j * wpe, wpe, tick)
                         if t < lo:
                             lo = t
                         if t > hi:
@@ -333,6 +334,7 @@ class FileScan:
 
     def __init__(self, path):
         self.path = path
+        self.tick = tick_ps_of(path)          # ps per time-tag tick: 2 ns on x730, 4 ns on x725
         self.pos = 0                          # words indexed so far (up to a whole board aggregate)
         self.size = 0                         # bytes when last looked at
         self.ino = None
@@ -381,7 +383,7 @@ class FileScan:
             stop = min(stop, self.pos + w.size)
             if w.size:
                 r = _scan_kernel(w, np.int64(0), np.int64(w.size), np.int64(stop - self.pos), eof,
-                                 np.int64(self.bid), np.int64(self.last_ctr))
+                                 np.int64(self.bid), np.int64(self.last_ctr), np.int64(self.tick))
                 new = int(r[0].size)
                 if new:
                     need = self.n + new
@@ -436,7 +438,8 @@ def decode_aggs(path, ev_start, nev, couple, wpe, t_lo=None, t_hi=None):
     w = np.memmap(path, dtype="<u4", mode="r", shape=(last,))
     k = _decode_kernel(w, np.ascontiguousarray(ev_start, np.int64), np.ascontiguousarray(nev, np.int64),
                        np.ascontiguousarray(couple, np.int64), np.ascontiguousarray(wpe, np.int64),
-                       np.ones(len(ev_start), np.int64), np.int64(t_lo), np.int64(t_hi), ts, ch, e, qs)
+                       np.ones(len(ev_start), np.int64), np.int64(t_lo), np.int64(t_hi), np.int64(tick_ps_of(path)),
+                       ts, ch, e, qs)
     del w
     return ts[:k], ch[:k], e[:k], qs[:k]
 
@@ -447,15 +450,16 @@ def _check_file(path):
     import fsu
     w = np.memmap(path, dtype="<u4", mode="r")
     t0 = time.perf_counter(); ix = fsu.index_file(w); t_ix = time.perf_counter() - t0
-    t0 = time.perf_counter(); d = fsu._decode_chunk(w, ix, 0, len(ix.nev)); t_np = time.perf_counter() - t0
+    tick = tick_ps_of(path)
+    t0 = time.perf_counter(); d = fsu._decode_chunk(w, ix, 0, len(ix.nev), tick); t_np = time.perf_counter() - t0
     decode_range(w[:5000], index_file(w[:5000]))  # compile
-    t0 = time.perf_counter(); ix2 = index_file(w); ts, ch, e = decode_range(w, ix2); t_nb = time.perf_counter() - t0
+    t0 = time.perf_counter(); ix2 = index_file(w); ts, ch, e = decode_range(w, ix2, tick_ps=tick); t_nb = time.perf_counter() - t0
     n = len(ts)
     assert n == len(d["ch"]), (n, len(d["ch"]))
     assert np.array_equal(ts, d["ts_ps"]) and np.array_equal(ch, d["ch"]) and np.array_equal(e, d["qlong"])
-    assert np.array_equal(decode_range(w, ix2, short=True)[3], d["qshort"])
+    assert np.array_equal(decode_range(w, ix2, short=True, tick_ps=tick)[3], d["qshort"])
     lo, hi = int(ts[n // 3]), int(ts[2 * n // 3])
-    ts2, ch2, e2 = decode_range(w, ix2, lo, hi)
+    ts2, ch2, e2 = decode_range(w, ix2, lo, hi, tick_ps=tick)
     m = (d["ts_ps"] >= lo) & (d["ts_ps"] < hi)
     assert np.array_equal(ts2, d["ts_ps"][m]) and np.array_equal(e2, d["qlong"][m])
     print(f"{path.split('/')[-1]}: {n:,} hits identical; numpy index+decode {(t_ix + t_np) * 1e9 / n:.1f} ns/hit, "
@@ -464,7 +468,8 @@ def _check_file(path):
     fs = FileScan(path)
     words = w.size
     for cut in sorted(set(np.random.default_rng(1).integers(1, words, 20).tolist()) | {words}):
-        r = _scan_kernel(w[:cut], np.int64(fs.pos), np.int64(cut), np.int64(cut), True, np.int64(fs.bid), np.int64(fs.last_ctr))   # written up to cut
+        r = _scan_kernel(w[:cut], np.int64(fs.pos), np.int64(cut), np.int64(cut), True, np.int64(fs.bid), np.int64(fs.last_ctr),
+                         np.int64(fs.tick))   # written up to cut
         k = r[0].size
         for f, a in zip(FileScan.FIELDS, r[:6]):
             if fs.a[f].size < fs.n + k:

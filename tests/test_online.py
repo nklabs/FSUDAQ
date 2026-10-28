@@ -54,8 +54,9 @@ def ok(msg):
 class Board:
     """A board that writes couple aggregates of `per_agg` events when a couple's buffer is full."""
 
-    def __init__(self, folder, run, serial, n_ch, rates, per_agg=64, roll_bytes=None, opt=2, seed=0, first_index=0):
+    def __init__(self, folder, run, serial, n_ch, rates, per_agg=64, roll_bytes=None, opt=2, seed=0, first_index=0, tick=TICK):
         self.folder, self.run, self.serial, self.n_ch = folder, run, serial, n_ch
+        self.tick = tick                      # ps per time-tag tick: 2000 on x730, 4000 on x725
         self.rates = rates                    # Hz per channel
         self.per_agg, self.roll_bytes, self.opt = per_agg, roll_bytes, opt
         self.rng = np.random.default_rng(seed)
@@ -68,7 +69,7 @@ class Board:
         self.open_next()
 
     def path(self, index):
-        return os.path.join(self.folder, f"run_{self.run:03d}_{self.serial}_PSD_2_{index:03d}.fsu")
+        return os.path.join(self.folder, f"run_{self.run:03d}_{self.serial}_PSD_{self.tick // 1000}_{index:03d}.fsu")
 
     def open_next(self):
         if self.f:
@@ -84,9 +85,9 @@ class Board:
                 continue
             ts = np.sort(self.rng.integers(t0, t1, n))
             for t in ts:
-                tick, rem = divmod(int(t), TICK)
-                fine = rem * 1024 // TICK
-                t = tick * TICK + fine * TICK // 1024         # what the decoder makes of it
+                tick, rem = divmod(int(t), self.tick)
+                fine = rem * 1024 // self.tick
+                t = tick * self.tick + fine * self.tick // 1024   # what the decoder makes of it
                 ql = int(self.rng.integers(1, 65535)); qs = int(self.rng.integers(0, ql + 1)) & 0x7FFF
                 self.buf[ch // 2].append((t, ch, tick, fine, ql, qs))
         for c in self.buf:
@@ -750,13 +751,39 @@ def scenario_boundaries(tmp):
         ok("a hit at the boundary is the later slice's, not late; one tick before it is late; offsets removed first")
 
 
+def scenario_x725(tmp):
+    print("== an x725 board (4 ns time tags, like 1399) with x730 boards: its hits at their true times")
+    folder = os.path.join(tmp, "x725"); os.makedirs(folder)
+    serials, eight = [15880, 1399], [1399]
+    clock = Clock()
+    boards = [Board(folder, 1, 15880, 16, [3000.0] * 16, seed=1),
+              Board(folder, 1, 1399, 8, [2000.0] * 8, seed=2, tick=4000)]
+    online = make_online(folder, serials, eight, clock)
+    drive(online, clock, boards, 0, 20)
+    finish(online, clock, boards)
+    good = check_daq(online, boards, serials, "x725")
+    fin, late, tot = check_partition(online, boards, "x725")
+    good &= check(late == 0, f"x725: {late} hits late")
+    diff = same_finder(online.acc, offline(online, boards, serials))
+    good &= check(not diff, f"x725: finder histograms differ from all hits at their true times: {diff}")
+    newest = {b["serial"]: b["newest_s"] for b in online.state()["boards"]}
+    t_first = min(t for b in boards for t, c, ql, qs in b.truth)   # newest_s counts from the run's first hit
+    truth_newest = (max(t for t, c, ql, qs in boards[1].truth) - t_first) / PS
+    good &= check(newest.get(1399) is not None and abs(newest[1399] - truth_newest) < 1e-6,
+                  f"x725: newest hit of 1399 at {newest.get(1399)} s, written at {truth_newest} s")
+    fs = od.fsu_fast.FileScan(boards[1].path(0)); fs.update()
+    good &= check(fs.tick == 4000 and od.fsu_fast.FileScan(boards[0].path(0)).tick == 2000, "x725: tick not taken from the file name")
+    if good:
+        ok(f"{tot:,} hits: DAQ exact, all in the finder, finder identical to all hits at their true times; 1399's newest hit at {newest[1399]:.3f} s")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="fsudaq_test_online_")
     try:
         for sc in (scenario_steady, scenario_slow, scenario_pause, scenario_damage_rollover, scenario_run_switch,
                    scenario_live_start, scenario_offsets, scenario_replay, scenario_short_hold, scenario_worker_killed,
                    scenario_idle_worker_killed, scenario_falling_behind, scenario_counters, scenario_finished_at_start,
-                   scenario_long_pause, scenario_offsets_dense, scenario_missing_board, scenario_boundaries):
+                   scenario_long_pause, scenario_offsets_dense, scenario_missing_board, scenario_boundaries, scenario_x725):
             sc(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
