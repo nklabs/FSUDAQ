@@ -608,6 +608,7 @@ void FSUDAQ::LoadProgramSettings(){
         if( eq > 0 && key == "repeatPauseSec" ) sbRepeatPauseSec->setValue(value.toInt());
         if( eq > 0 && key == "autoDashboard" ) { QSignalBlocker blocker(chkAutoDashboard); chkAutoDashboard->setChecked(value.toInt() != 0); }
         if( eq > 0 && key == "settingsPath" ) settingsPath = value;
+        if( eq > 0 && key == "boardOrder" ) boardOrder = value.split(",", Qt::SkipEmptyParts);
       }
 
       count ++;
@@ -674,6 +675,7 @@ void FSUDAQ::SaveProgramSettings(){
   file.write(("repeatPauseSec=" + QString::number((int) sbRepeatPauseSec->value()) + "\n").toStdString().c_str());
   file.write(("settingsPath=" + settingsPath + "\n").toStdString().c_str());
   file.write(("autoDashboard=" + QString::number(chkAutoDashboard->isChecked() ? 1 : 0) + "\n").toStdString().c_str());
+  file.write(("boardOrder=" + boardOrder.join(",") + "\n").toStdString().c_str());
   file.write("//------------end of file.\n");
   
   file.close();
@@ -1382,6 +1384,11 @@ void FSUDAQ::SetupScalar(){
     }
   }
 
+  // the boards in rack order (boardOrder), as on the dashboard
+  std::vector<QWidget *> byPort = scalarBoards;
+  scalarBoards.clear();
+  for( unsigned int i : RackOrder() ) scalarBoards.push_back(byPort[i]);
+
   // as many boards side by side as the screen takes, at most all of them; narrower or wider
   // windows re-flow the boards (no sideways scrolling unless one board does not fit)
   int blockW = 0;
@@ -1399,6 +1406,17 @@ void FSUDAQ::SetupScalar(){
   ReflowScalar();
   scalarScroll->viewport()->installEventFilter(new ResizeWatcher(scalar, [this](){ ReflowScalar(); }));
 
+}
+
+std::vector<unsigned int> FSUDAQ::RackOrder() const{
+  std::vector<unsigned int> order;
+  for( unsigned int i = 0; i < nDigi; i++ ) order.push_back(i);
+  auto rank = [&](unsigned int i){
+    int k = boardOrder.indexOf(QString::number(digi[i]->GetSerialNumber()));
+    return k < 0 ? boardOrder.size() : k;
+  };
+  std::stable_sort(order.begin(), order.end(), [&](unsigned int a, unsigned int b){ return rank(a) < rank(b); });
+  return order;
 }
 
 /// lay the board blocks out in rows, as many per row as the visible width takes
@@ -2745,11 +2763,11 @@ bool FSUDAQ::StartDashboardProcess(){
   // the run being recorded; a run that starts later is sent with GET /run (and a finished run is
   // not given: the dashboard would work through all of it before the next run's data)
   if( inDataRun && chkSaveData->isChecked() ) args << "--follow" << RunFolder();
-  // The dashboard reads only the boards it is given; its default list is odin's six. Pass the
-  // open digitizers (in port order, the detector-map board order) so another setup is seen.
+  // The dashboard reads only the boards it is given. Pass the open digitizers in rack order
+  // (boardOrder; the detector-map board order) so another setup is seen.
   if( digi && nDigi > 0 ){
     QStringList serials, eightCh;
-    for( unsigned int i = 0; i < nDigi; i++ ){
+    for( unsigned int i : RackOrder() ){
       serials << QString::number(digi[i]->GetSerialNumber());
       if( digi[i]->GetNumInputCh() == 8 ) eightCh << QString::number(digi[i]->GetSerialNumber());
     }

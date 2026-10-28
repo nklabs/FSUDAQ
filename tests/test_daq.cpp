@@ -11,6 +11,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QLabel>
 #include <QFileInfo>
 #include <QMessageBox>
 #include <QPushButton>
@@ -322,6 +323,26 @@ public:
     }
     if( nFail == 0 ) OK("%s", qPrintable(seen.join(", ")));
     w->scalar->hide();
+    w->CloseDigitizers();
+  }
+
+  // boardOrder (programSettings.txt) puts the boards in rack order: the Run Monitor's blocks and the
+  // dashboard's board list follow it; boards not in it come after, in port order
+  void RackOrder(){
+    printf("== boards in rack order (boardOrder)\n");
+    NewWorkDir(); AddBoards(); NewFSUDAQ();
+    w->boardOrder = QStringList() << "1443" << "30508" << "99999" << "58918";
+    Open();
+    QStringList order;
+    for( unsigned int i : w->RackOrder() ) order << QString::number(w->digi[i]->GetSerialNumber());
+    const QString want = "1443,30508,58918,15880,15879,62839";
+    CHECK(order.join(",") == want, "RackOrder %s, expected %s", qPrintable(order.join(",")), qPrintable(want));
+    QStringList blocks;
+    for( QWidget * b : w->scalarBoards ){
+      for( QLabel * l : b->findChildren<QLabel *>() ) if( l->text().contains("Digi-") ){ blocks << QString(l->text()).remove("<b>").remove("</b>").remove("Digi-"); break; }
+    }
+    CHECK(blocks.join(",") == want, "Run Monitor blocks %s, expected %s", qPrintable(blocks.join(",")), qPrintable(want));
+    if( nFail == 0 ) OK("RackOrder and the Run Monitor: %s (99999 not open, ignored)", qPrintable(want));
     w->CloseDigitizers();
   }
 
@@ -825,6 +846,7 @@ int main(int argc, char ** argv){
   t.BoardThatCannotStart();
   t.ADCCalibrationAtStart();
   t.RunMonitorWraps();
+  t.RackOrder();
   t.ReadFailureStopsRun();
   t.WriteFailureStopsRun();
   t.RepeatedRuns();

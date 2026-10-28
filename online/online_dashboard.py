@@ -75,8 +75,8 @@ def say(msg):
 
 
 FAST = fsu_fast.HAVE_NUMBA
-DEFAULT_BOARDS = "15880,15879,58918,62839,1443,30508"
-EIGHT_CHANNEL_BOARDS = "1443,30508"           # the DT5730s
+DEFAULT_BOARDS = "15880,15879,58918,62839,65316,30508,1443,1399,30505"   # odin's rack order (FSUDAQ passes its boardOrder)
+EIGHT_CHANNEL_BOARDS = "30508,1443,1399,30505"   # the desktop boards
 CONFIG = os.path.join(HERE, "experiment.json")
 HISTORY_S = 600                               # seconds of rate history kept
 PS = 1_000_000_000_000                        # ps per second

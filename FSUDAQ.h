@@ -128,6 +128,8 @@ private:
   QString programSettingsFilePath;
   QString rawDataPath;
   QString settingsPath;         // digitizer settings files; empty in programSettings.txt = the data path
+  QStringList boardOrder;       // serials in rack order (programSettings.txt boardOrder=): the Run Monitor and the dashboard show the boards so
+  std::vector<unsigned int> RackOrder() const; // the open boards (digi indices) in boardOrder, those not in it after, in port order
   QString prefix;
   unsigned int runID;
   int elogID;

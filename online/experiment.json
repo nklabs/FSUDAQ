@@ -1,0 +1,4 @@
+{
+  "_comment": "The rack at PSI (Oct 2026): boards in FSUDAQ's boardOrder, tracker channels in sequence over them, Cherenkov on Digi-1443 ch6-7. Read by online_dashboard.py at every new run; see experiment.example.json.",
+  "cabling": "cabling.csv"
+}
