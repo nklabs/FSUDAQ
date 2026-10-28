@@ -101,6 +101,8 @@ class Digitizer{
     void Reset();
     bool WaitClockSettled(); /// after a change of the PLL reference: wait until the PLL is locked and the board is ready
     bool WaitSPIFree(int ch); /// before a DC offset write: wait until the channel's (ch < 0: every channel's) SPI bus is free
+    bool NeedsADCCalibration() const; /// a x725/x730 that is not an "S" version (DT5730B, DT5725B): its ADCs want a calibration
+    int  CalibrateADC(std::string & why); /// calibrate every channel's ADC, as CoMPASS at each start: ms taken, or -1 (why says why)
     bool IsDummy()         {return isDummy;}
     bool IsConnected()     {return isConnected;}
     
@@ -172,6 +174,7 @@ class Digitizer{
     int            ProgramSettingsToBoard    ();
     static int     clockSettleTimeoutMs;     /// how long WaitClockSettled waits (5 s)
     static int     spiWaitTimeoutMs;         /// how long WaitSPIFree waits (1 s)
+    static int     adcCalibrationTimeoutMs;  /// how long CalibrateADC waits for every channel to report its calibration done (2 s)
     static int     programPauseMs;           /// pause after each channel register written by ProgramSettingsToBoard (0: none, as CoMPASS)
     /// load a settings file, write it to the board and read the board back. Returns -1 if the file
     /// was not loaded (why in problems), else the number of problems: failed writes or reads, and

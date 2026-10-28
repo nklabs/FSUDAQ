@@ -29,10 +29,12 @@ typedef struct {
   int running;
   long startSeq;       // order of the last SWStart / SWStop over all boards (1, 2, ...; 0 = never)
   long stopSeq;
+  int calibrations;    // CAEN_DGTZ_Calibrate calls
 } fake_caen_stats;
 
 // Add a board. link: 0 = USB (num = USB link), 1 = optical (num = port, node = daisy-chain index).
-// model: "V1730" (16 ch) or "DT5730" (8 ch). image: an 8192-byte FSUDAQ settings file of the real
+// model: the model name, "DT..." an 8-channel desktop, else 16 channels (e.g. "VX1730SB", "DT5730S", "DT5730B",
+// "DT5725B": a name with "725" is a x725). image: an 8192-byte FSUDAQ settings file of the real
 // board to take the identity registers from (may be NULL). Returns 0 on success.
 int  fake_caen_add_board(int link, int num, int node, int serial, const char * model, const char * image);
 // The board also answers on this USB link (a desktop board with its USB cable plugged in too).
@@ -71,6 +73,11 @@ void fake_caen_set_clock_settle_ms(int ms);
 // to a busy channel is lost, as a DAC write on a busy bus would be. Default 2 ms.
 void fake_caen_set_spi_busy_ms(int ms);
 int  fake_caen_dropped_dc_writes(int serial);
+// CAEN_DGTZ_Calibrate keeps every channel's "calibration done" (0x1n88 bit 3) at 0 for this long. Default 20 ms.
+// fake_caen_fail(serial, "calibrate"): a calibration never finishes. A calibration started while an SPI bus
+// is busy is lost (counted by fake_caen_lost_calibrations).
+void fake_caen_set_calibrate_ms(int ms);
+int  fake_caen_lost_calibrations(int serial);
 int  fake_caen_is_hung(int serial);
 // At a stop the board holds nHeld aggregates still being filled (default 1, generated data only);
 // they are read only after a forced data flush, which makes them readable one every latencyMs

@@ -4,6 +4,7 @@
 
 int Digitizer::clockSettleTimeoutMs = 5000;
 int Digitizer::spiWaitTimeoutMs = 1000;
+int Digitizer::adcCalibrationTimeoutMs = 2000;
 int Digitizer::programPauseMs = 0;   /// CoMPASS waits only for the SPI bus before a DC offset (WaitSPIFree)
 
 Digitizer::Digitizer(){
@@ -124,6 +125,54 @@ bool Digitizer::WaitSPIFree(int ch){
     }
   }
   return true;
+}
+
+/// The x725/x730 ADCs calibrate at power-on, but CAEN recommends a new calibration once they have
+/// warmed up and after any clock change (internal <-> external), "except for the 725S/730S versions"
+/// (UM3148 rev. 8, Channel Calibration). Uncalibrated, single samples drop by a fixed step. CoMPASS
+/// calibrates these boards at every start (ADCCALIB_ONSTART_ENABLE, X7x0_*_DPPCode136.xml); its files
+/// for the S versions (DPPCode136-128) have no calibration.
+bool Digitizer::NeedsADCCalibration() const{
+  if( BoardInfo.FamilyCode != CAEN_DGTZ_XX730_FAMILY_CODE && BoardInfo.FamilyCode != CAEN_DGTZ_XX725_FAMILY_CODE ) return false;
+  const char * p = BoardInfo.ModelName;   // "DT5730B", "DT5725B", "DT5730S", "VX1730SB": the version letters follow the digits
+  while( *p && !isdigit((unsigned char) *p) ) p++;
+  while( *p && isdigit((unsigned char) *p) ) p++;
+  return *p != 'S';
+}
+
+int Digitizer::CalibrateADC(std::string & why){
+  DebugPrint("%s", "Digitizer");
+  why.clear();
+  if( !isConnected || isDummy ){ why = "not open"; return -1; }
+  if( AcqRun ){ why = "taking data"; return -1; }
+  auto t0 = std::chrono::steady_clock::now();
+  auto ms = [&](){ return (int) std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count(); };
+
+  /// every channel's status (0x1n88) must show bit `bit` = `want`, within the time left
+  auto WaitAll = [&](int bit, uint32_t want, int timeoutMs, const char * what) -> bool {
+    for( int c = 0; c < NumInputCh; c++ ){
+      uint32_t status = 0;
+      while( true ){
+        int r = CAEN_DGTZ_ReadRegister(handle, DPP::ChannelStatus_R.GetAddress() + (c << 8), &status);
+        if( r == 0 && ((status >> bit) & 0x1) == want ) break;
+        if( ms() >= timeoutMs ){
+          char msg[128];
+          snprintf(msg, sizeof msg, "ch%d %s after %d ms (status 0x%X%s)", c, what, ms(), status, r == 0 ? "" : ", read failed");
+          why = msg;
+          return false;
+        }
+        usleep(1000);
+      }
+    }
+    return true;
+  };
+
+  /// the calibration must not start while a channel's SPI bus is busy (UM4380, 0x809C)
+  if( !WaitAll(2, 0, spiWaitTimeoutMs, "SPI bus still busy") ) return -1;
+  ret = CAEN_DGTZ_Calibrate(handle);
+  if( ret != 0 ){ why = "CAEN_DGTZ_Calibrate returned " + std::to_string(ret); return -1; }
+  if( !WaitAll(3, 1, adcCalibrationTimeoutMs, "calibration not done") ) return -1;
+  return ms();
 }
 
 void Digitizer::PrintBoard (){

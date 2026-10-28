@@ -1776,8 +1776,17 @@ void FSUDAQ::StartACQ(){
     }
   }
 
-  //---- 1. every board: its settings as they are on the board now, and its data file; none starts yet
+  //---- 0. the ADCs of the boards that are not "S" versions: calibrated at every start, as CoMPASS does
   QStringList problems;
+  for( unsigned int i = 0; i < nDigi; i++){
+    if( digi[i]->IsBoardDisabled() || !digi[i]->NeedsADCCalibration() ) continue;
+    std::string why;
+    int ms = digi[i]->CalibrateADC(why);
+    if( ms < 0 ) problems << "Digi-" + QString::number(digi[i]->GetSerialNumber()) + ": ADC calibration failed, " + QString::fromStdString(why) + ".";
+    else LogMsg("Digi-" + QString::number(digi[i]->GetSerialNumber()) + " (" + QString::fromStdString(digi[i]->GetModelName()) + "): ADCs calibrated in " + QString::number(ms) + " ms.");
+  }
+
+  //---- 1. every board: its settings as they are on the board now, and its data file; none starts yet
   QStringList createdFiles;
   for( unsigned int i = 0; i < nDigi; i++){
     if( digi[i]->IsBoardDisabled() || !save ) continue;

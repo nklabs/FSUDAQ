@@ -57,9 +57,9 @@ public:
   void AddBoards(int eventsPerCouple = 100, double aggPerMs = 2){
     fake_caen_reset_all();
     for( int i = 0; i < 6; i++ ){
-      bool dt = (Serials[i] == 1443 || Serials[i] == 30508);
+      const char * model = Serials[i] == 1443 ? "DT5730B" : Serials[i] == 30508 ? "DT5730S" : "VX1730SB";   // as on odin
       QString image = fixtures + "/Digi-" + QString::number(Serials[i]) + "_PSD.bin";
-      fake_caen_add_board(1, i, 0, Serials[i], dt ? "DT5730" : "V1730", image.toStdString().c_str());
+      fake_caen_add_board(1, i, 0, Serials[i], model, image.toStdString().c_str());
       fake_caen_set_synthetic(Serials[i], eventsPerCouple, aggPerMs);
     }
   }
@@ -247,6 +247,45 @@ public:
     w->StopPressed();
     CheckAllSaved(QStringList() << runDir, "run after refused start");
     if( nFail == 0 ) OK("refused, nothing left running or written; the next start is run 1");
+    w->CloseDigitizers();
+  }
+
+  // the DT5730B (not an "S" version) is calibrated at every start, as CoMPASS does; the S boards never
+  void ADCCalibrationAtStart(){
+    printf("== ADC calibration of the boards that are not S versions at each start\n");
+    NewWorkDir(); AddBoards(); NewFSUDAQ();
+    Open();
+    w->chkSaveData->setChecked(true);
+    dialogs.clear();
+    for( int run = 1; run <= 2; run++ ){
+      w->AutoRun();
+      CHECK(w->inDataRun, "run %d did not start (%s)", run, qPrintable(dialogs.join(" | ")));
+      Pump(100);
+      w->StopPressed();
+      for( int s : Serials ){
+        fake_caen_stats st; fake_caen_get_stats(s, &st);
+        int want = s == 1443 ? run : 0;
+        CHECK(st.calibrations == want, "after run %d Digi-%d was calibrated %d time(s), expected %d", run, s, st.calibrations, want);
+      }
+    }
+    CHECK(fake_caen_lost_calibrations(1443) == 0, "a calibration of Digi-1443 started while its SPI bus was busy");
+
+    //---- one that never finishes: no run
+    int keep = Digitizer::adcCalibrationTimeoutMs;
+    Digitizer::adcCalibrationTimeoutMs = 100;
+    fake_caen_fail(1443, "calibrate");
+    unsigned int runBefore = w->runID;
+    int foldersBefore = QDir(dataPath).entryList(QStringList() << "temp_*", QDir::Dirs).size();
+    dialogs.clear();
+    w->AutoRun();
+    CHECK(!w->inDataRun, "a run started although Digi-1443 did not finish its calibration");
+    CHECK(Dialogs("Run not started") == 1 && dialogs.join(" ").contains("ADC calibration failed"), "no refusal naming the calibration (%s)", qPrintable(dialogs.join(" | ")));
+    for( int s : Serials ){ fake_caen_stats st; fake_caen_get_stats(s, &st); CHECK(!st.running, "Digi-%d is running", s); }
+    CHECK(w->runID == runBefore, "run number moved from %u to %u", runBefore, w->runID);
+    CHECK(QDir(dataPath).entryList(QStringList() << "temp_*", QDir::Dirs).size() == foldersBefore, "the refused run left a folder");
+    fake_caen_fail(1443, "");
+    Digitizer::adcCalibrationTimeoutMs = keep;
+    if( nFail == 0 ) OK("Digi-1443 calibrated at each start, the S boards never; a calibration that does not finish stops the start");
     w->CloseDigitizers();
   }
 
@@ -748,6 +787,7 @@ int main(int argc, char ** argv){
   t.MissingSettingsFile();
   t.SavedRunIsComplete();
   t.BoardThatCannotStart();
+  t.ADCCalibrationAtStart();
   t.ReadFailureStopsRun();
   t.WriteFailureStopsRun();
   t.RepeatedRuns();

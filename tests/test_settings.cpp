@@ -264,6 +264,50 @@ static void CheckPerChannelCouple(const std::string & dir) {
   fake_caen_drop_write(serial, 0);
 }
 
+// The ADCs of the x725/x730 boards that are not "S" versions are calibrated at each start, as CoMPASS does
+// (UM3148: "the DT725S/DT730S digitizer versions do not need calibration").
+static void CheckADCCalibration(const std::string & dir) {
+  printf("== ADC calibration\n");
+  const int serial = 30596, port = 5, node = 1;
+  struct { const char * model; bool needs; } models[] = {{"DT5730B", true}, {"DT5725B", true}, {"DT5730S", false}, {"VX1730SB", false}};
+  bool namesOk = true;
+  for( auto & m : models ){
+    fake_caen_reset_all();
+    fake_caen_add_board(1, port, node, serial, m.model, (dir + "/Digi-30508_PSD.bin").c_str());
+    Digitizer digi(node, port);
+    if( digi.NeedsADCCalibration() != m.needs ){ namesOk = false; CHECK(false, "%s: NeedsADCCalibration() = %d", m.model, !m.needs); }
+  }
+  if( namesOk ) printf("   ok    DT5730B, DT5725B calibrated; DT5730S, VX1730SB not\n");
+
+  //---- right after a DC offset write: the calibration waits for the SPI bus, then for every channel
+  fake_caen_reset_all();
+  fake_caen_add_board(1, port, node, serial, "DT5730B", (dir + "/Digi-30508_PSD.bin").c_str());
+  fake_caen_set_spi_busy_ms(5);
+  fake_caen_set_calibrate_ms(30);
+  Digitizer digi(node, port);
+  CHECK(digi.IsConnected(), "Digi-%d did not open", serial);
+  if( !digi.IsConnected() ) return;
+  digi.WriteRegister(DPP::ChannelDCOffset, 0x8000, -1);
+  std::string why;
+  int ms = digi.CalibrateADC(why);
+  fake_caen_stats st; fake_caen_get_stats(serial, &st);
+  bool ok = ms >= 30 && st.calibrations == 1 && fake_caen_lost_calibrations(serial) == 0;
+  CHECK(ok, "calibration after a DC offset write: %d ms (%s), %d calibration(s), %d lost", ms, why.c_str(), st.calibrations, fake_caen_lost_calibrations(serial));
+  if( ok ) printf("   ok    after a DC offset write: waited for the SPI bus, done in %d ms on every channel\n", ms);
+
+  //---- one that never finishes is reported, within the time-out
+  int keep = Digitizer::adcCalibrationTimeoutMs;
+  Digitizer::adcCalibrationTimeoutMs = 100;
+  fake_caen_fail(serial, "calibrate");
+  ms = digi.CalibrateADC(why);
+  CHECK(ms < 0 && why.find("calibration not done") != std::string::npos, "a calibration that never finishes: %d ms, \"%s\"", ms, why.c_str());
+  if( ms < 0 ) printf("   ok    one that never finishes is reported: %s\n", why.c_str());
+  fake_caen_fail(serial, "");
+  Digitizer::adcCalibrationTimeoutMs = keep;
+  fake_caen_set_calibrate_ms(20);
+  fake_caen_set_spi_busy_ms(2);
+}
+
 int main(int argc, char ** argv) {
   Digitizer::programPauseMs = 0; // the fake boards need no pause between register writes
   std::string dir = argc > 1 ? argv[1] : "tests/data/odin-runB";
@@ -284,6 +328,7 @@ int main(int argc, char ** argv) {
   CheckClockChange(dir);
   CheckSPIWait(dir);
   CheckPerChannelCouple(dir);
+  CheckADCCalibration(dir);
 
   printf("\n%s: %d problem(s) in %zu board(s)\n", nFail ? "FAILED" : "PASSED", nFail, files.size());
   return nFail ? 1 : 0;

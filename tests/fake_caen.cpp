@@ -53,7 +53,11 @@ struct Board {
   bool hung = false;                     // touched while settling: answers nothing any more
   std::chrono::steady_clock::time_point spiBusyUntil[16]{};  // each channel's DAC is being written until then
   int droppedDC = 0;                     // DC offsets written while their SPI bus was busy (lost)
+  std::chrono::steady_clock::time_point calibratingUntil{};  // the ADCs are calibrating until then (0x1n88 bit 3 = 0)
+  int lostCalibrations = 0;              // calibrations started while an SPI bus was busy (do not run properly)
 };
+
+bool IsDesktop(const Board & b) { return b.model.rfind("DT", 0) == 0; }
 
 std::vector<Board> boards;
 std::atomic<long> sequence{0};           // SWStart / SWStop calls over all boards (readout threads call SWStop)
@@ -63,6 +67,7 @@ uint32_t Sentinel(uint32_t address) { return (0xDEAD0000u | ((address >> 2) & 0x
 
 int clockSettleMs = 30;
 int spiBusyMs = 2;
+int calibrateMs = 20;
 bool Settling(const Board & b) { return std::chrono::steady_clock::now() < b.settleUntil; }
 
 unsigned short ImageIndex(uint32_t a) { // FSUDAQ's Reg::Index for an actual address
@@ -144,11 +149,13 @@ uint32_t Read(Board & b, uint32_t a) {
     return (Settling(b) ? 0 : (1u << 8)) | (1u << 7) | (extClock << 5)
            | (b.st.running ? (1u << 2) : 0) | (b.st.aggAcquired > b.st.aggRead ? (1u << 3) : 0);
   }
-  if( a >= 0x1000 && a < 0x2000 && (a & 0xFF) == 0x88 ){   // channel status: bit 2 = SPI bus busy
+  if( a >= 0x1000 && a < 0x2000 && (a & 0xFF) == 0x88 ){   // channel status: bit 2 = SPI bus busy, bit 3 = ADC calibration done
     unsigned short i = ImageIndex(a);
     uint32_t v = i < b.image.size() ? b.image[i] : 0;
-    bool busy = std::chrono::steady_clock::now() < b.spiBusyUntil[(a >> 8) & 0xF];
-    return (v & ~0x4u) | (busy ? 0x4u : 0);
+    auto now = std::chrono::steady_clock::now();
+    bool busy = now < b.spiBusyUntil[(a >> 8) & 0xF];
+    bool calibrated = now >= b.calibratingUntil && !(b.fail == "calibrate" && b.st.calibrations > 0);
+    return (v & ~0xCu) | (busy ? 0x4u : 0) | (calibrated ? 0x8u : 0);
   }
   if( IsReadOnly(a) ){
     unsigned short i = ImageIndex(a);
@@ -161,7 +168,7 @@ uint32_t Read(Board & b, uint32_t a) {
 void Write(Board & b, uint32_t a, uint32_t v) {
   b.st.writes++;
   if( IsReadOnly(a) ) return;
-  if( b.model == "DT5730" && (a == 0x8100 || a == 0xEF24 || a == 0xEF34) ){
+  if( IsDesktop(b) && (a == 0x8100 || a == 0xEF24 || a == 0xEF34) ){
     uint32_t refNow = (Read(b, 0x8100) >> 6) & 1;
     uint32_t refNew = a == 0x8100 ? (v >> 6) & 1 : 0;   // a reset: back to the internal clock
     if( refNew != refNow ) b.settleUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(clockSettleMs);
@@ -229,7 +236,7 @@ uint32_t BufferSize(Board & b) { // what FSUDAQ's CalByteForBuffer computes from
 extern "C" int fake_caen_add_board(int link, int num, int node, int serial, const char * model, const char * image) {
   Board b;
   b.link = link; b.num = num; b.node = node; b.serial = serial; b.model = model;
-  b.nCh = (b.model == "DT5730") ? 8 : 16;
+  b.nCh = IsDesktop(b) ? 8 : 16;
   if( image ){
     FILE * f = fopen(image, "rb");
     if( !f ) return -1;
@@ -339,6 +346,8 @@ extern "C" void fake_caen_fail(int serial, const char * what) {
 
 extern "C" void fake_caen_set_clock_settle_ms(int ms) { clockSettleMs = ms; }
 extern "C" void fake_caen_set_spi_busy_ms(int ms) { spiBusyMs = ms; }
+extern "C" void fake_caen_set_calibrate_ms(int ms) { calibrateMs = ms; }
+extern "C" int fake_caen_lost_calibrations(int serial) { Board * b = FromSerial(serial); return b ? b->lostCalibrations : -1; }
 
 extern "C" int fake_caen_dropped_dc_writes(int serial) {
   Board * b = FromSerial(serial);
@@ -388,9 +397,10 @@ CAEN_DGTZ_ErrorCode CAEN_DGTZ_GetInfo(int handle, CAEN_DGTZ_BoardInfo_t * info) 
   BOARD_OR_FAIL;
   memset(info, 0, sizeof(*info));
   snprintf(info->ModelName, sizeof(info->ModelName), "%s", b->model.c_str());
-  info->Model = (b->model == "DT5730") ? CAEN_DGTZ_DT5730 : CAEN_DGTZ_V1730;
+  bool x725 = b->model.find("725") != std::string::npos;
+  info->Model = IsDesktop(*b) ? (x725 ? CAEN_DGTZ_DT5725 : CAEN_DGTZ_DT5730) : CAEN_DGTZ_V1730;
   info->Channels = b->nCh;
-  info->FamilyCode = CAEN_DGTZ_XX730_FAMILY_CODE;
+  info->FamilyCode = x725 ? CAEN_DGTZ_XX725_FAMILY_CODE : CAEN_DGTZ_XX730_FAMILY_CODE;
   uint32_t amc = Read(*b, 0x108C);
   snprintf(info->ROC_FirmwareRel, sizeof(info->ROC_FirmwareRel), "4.29 - build fake");
   snprintf(info->AMC_FirmwareRel, sizeof(info->AMC_FirmwareRel), "%u.%u - build fake", (amc >> 8) & 0xFF, amc & 0xFF);
@@ -412,6 +422,16 @@ CAEN_DGTZ_ErrorCode CAEN_DGTZ_ReadRegister(int handle, uint32_t Address, uint32_
   BOARD_OR_FAIL;
   if( Unreachable(b, Address) ) return CAEN_DGTZ_CommError;
   *Data = Read(*b, Address);
+  return CAEN_DGTZ_Success;
+}
+
+// starts the ADC calibration of every channel (0x809C); with an SPI bus busy it does not run properly (UM4380)
+CAEN_DGTZ_ErrorCode CAEN_DGTZ_Calibrate(int handle) {
+  BOARD_OR_FAIL;
+  auto now = std::chrono::steady_clock::now();
+  b->st.calibrations++;
+  for( int c = 0; c < b->nCh; c++ ) if( now < b->spiBusyUntil[c] ){ b->lostCalibrations++; return CAEN_DGTZ_Success; }
+  b->calibratingUntil = now + std::chrono::milliseconds(calibrateMs);
   return CAEN_DGTZ_Success;
 }
 
