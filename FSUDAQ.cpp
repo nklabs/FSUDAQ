@@ -103,8 +103,12 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
     // link type and settings handling are chosen first; the button does the opening
     cbOpenDigitizers = new RComboBox(this);
     cbOpenDigitizers->addItem("via Optical link / USB", 1);
+    cbOpenDigitizers->addItem("via Optical link / USB (full scan)", 2);
     cbOpenDigitizers->addItem("via A4818(s) (a4818_list.txt)", 4);
-    cbOpenDigitizers->setToolTip("How the boards are connected. A4818 needs the PIDs in a4818_list.txt next to the program.");
+    cbOpenDigitizers->setToolTip("How the boards are connected. A4818 needs the PIDs in a4818_list.txt next to the program.\n"
+                                 "Optical link / USB opens the boards found by the last full scan where they were (knownDigitizers.txt\n"
+                                 "next to the program) and scans every port only if one of them does not answer there.\n"
+                                 "Full scan: after adding, moving or removing a board; it rewrites knownDigitizers.txt.");
     layout->addWidget(cbOpenDigitizers, 1, 0);
     
     cbOpenMethod = new RComboBox(this);
@@ -720,6 +724,37 @@ void FSUDAQ::SaveLastRunFile(){
 
 //***************************************************************
 //***************************************************************
+// The boards found by the last full scan, one a line: "optical PORT BOARD SERIAL" or "usb 0 LINK SERIAL"
+// (BOARD: the daisy-chain index). Opening them where they were skips the empty daisy-chain positions
+// of a scan, each ~0.6 s of link time-outs (23 of them on odin, ~14 s).
+struct KnownDigitizer { int link, port, board, serial; };
+
+static std::vector<KnownDigitizer> ReadKnownDigitizers(const QString & path){
+  std::vector<KnownDigitizer> list;
+  QFile file(path);
+  if( !file.open(QIODevice::Text | QIODevice::ReadOnly) ) return list;
+  QTextStream in(&file);
+  while( !in.atEnd() ){
+    QStringList w = in.readLine().simplified().split(' ', Qt::SkipEmptyParts);
+    if( w.isEmpty() || w[0].startsWith('#') ) continue;
+    bool ok1 = false, ok2 = false, ok3 = false;
+    KnownDigitizer k = { w[0] == "usb" ? (int) CAEN_DGTZ_USB : (int) CAEN_DGTZ_OpticalLink,
+                         w.value(1).toInt(&ok1), w.value(2).toInt(&ok2), w.value(3).toInt(&ok3) };
+    if( w.size() != 4 || (w[0] != "optical" && w[0] != "usb") || !ok1 || !ok2 || !ok3 ) return {};   // not a list: scan
+    list.push_back(k);
+  }
+  return list;
+}
+
+static bool WriteKnownDigitizers(const QString & path, const std::vector<KnownDigitizer> & list){
+  QFile file(path);
+  if( !file.open(QIODevice::Text | QIODevice::WriteOnly | QIODevice::Truncate) ) return false;
+  QTextStream out(&file);
+  out << "# boards found by FSUDAQ's last full scan: link, port, daisy-chain index (USB: 0, link), serial\n";
+  for( auto & k : list ) out << (k.link == (int) CAEN_DGTZ_USB ? "usb" : "optical") << " " << k.port << " " << k.board << " " << k.serial << "\n";
+  return true;
+}
+
 void FSUDAQ::OpenDigitizers(){
   DebugPrint("%s", "FSUDAQ");
   if( digi != nullptr ) return; // already open
@@ -771,7 +806,7 @@ void FSUDAQ::OpenDigitizers(){
 
   logMsgHTMLMode = false;
   nDigi = 0;
-  struct Found { int board, port, link; };   // link: CAEN_DGTZ_OpticalLink, CAEN_DGTZ_USB, or -1 for A4818
+  struct Found { int board, port, link, serial; };   // link: CAEN_DGTZ_OpticalLink, CAEN_DGTZ_USB, or -1 for A4818
   std::vector<Found> portList;
 
   if( cbOpenDigitizers->currentData().toInt() == 4 ) { //for A4818
@@ -784,7 +819,7 @@ void FSUDAQ::OpenDigitizers(){
         dig.OpenDigitizer(board, port);
         if( dig.IsConnected() ){
           nDigi++;
-          portList.push_back({board, port, -1});
+          portList.push_back({board, port, -1, (int) dig.GetSerialNumber()});
           LogMsg(QString("... Found at port: %1, board: %2. SN: %3 %4").arg(port).arg(board).arg(dig.GetSerialNumber(), 3, 10, QChar(' ')).arg(dig.GetDPPString().c_str()));
         }
         dig.CloseDigitizer();
@@ -798,36 +833,93 @@ void FSUDAQ::OpenDigitizers(){
     // index), then the USB links. A board that answers on both is read over the optical link.
     // (OpenDigitizer without a link type tries USB first with the board number as the USB link,
     // so a board on USB answered at every port and hid the optical boards at index 0.)
-    std::vector<int> foundSN;
-    for(int port = 0; port < MaxNPorts; port++){
-      for( int board = 0; board < MaxNBoards; board ++){ /// max number of diasy chain
+    // The boards found by the last full scan are opened where they were, as CoMPASS opens the boards of
+    // its project. If one of them does not answer there (or another board does), every port is scanned;
+    // that scan rewrites the list only if it found every known board, so a board that is off or hung
+    // stays on it. "full scan" always scans and rewrites the list.
+    const QString knownPath = QDir::current().absolutePath() + "/knownDigitizers.txt";
+    std::vector<KnownDigitizer> known = ReadKnownDigitizers(knownPath);
+    const bool fullScanChosen = cbOpenDigitizers->currentData().toInt() == 2;
+    bool fullScan = fullScanChosen || known.empty();
+    if( !fullScan ){
+      LogMsg(QString("Opening the %1 board(s) found by the last full scan (%2)").arg(known.size()).arg(knownPath));
+      QStringList missing;
+      for( auto & k : known ){
         Digitizer dig;
-        dig.OpenDigitizer(board, port, false, false, CAEN_DGTZ_OpticalLink);
-        if( dig.IsConnected() ){
-          foundSN.push_back(dig.GetSerialNumber());
+        dig.OpenDigitizer(k.board, k.port, false, false, k.link);
+        if( dig.IsConnected() && (int) dig.GetSerialNumber() == k.serial ){
           nDigi++;
-          portList.push_back({board, port, CAEN_DGTZ_OpticalLink});
-          LogMsg(QString("... Found at port: %1, board: %2. SN: %3 %4").arg(port).arg(board).arg(dig.GetSerialNumber(), 3, 10, QChar(' ')).arg(dig.GetDPPString().c_str()));
+          portList.push_back({k.board, k.port, k.link, k.serial});
+          if( k.link == (int) CAEN_DGTZ_USB ){
+            LogMsg(QString("... Found on USB link: %1. SN: %2 %3").arg(k.board).arg(dig.GetSerialNumber(), 3, 10, QChar(' ')).arg(dig.GetDPPString().c_str()));
+          }else{
+            LogMsg(QString("... Found at port: %1, board: %2. SN: %3 %4").arg(k.port).arg(k.board).arg(dig.GetSerialNumber(), 3, 10, QChar(' ')).arg(dig.GetDPPString().c_str()));
+          }
+        }else{
+          missing << QString("Digi-%1 (%2 %3, board %4%5)").arg(k.serial).arg(k.link == (int) CAEN_DGTZ_USB ? "USB link" : "port")
+                                                           .arg(k.link == (int) CAEN_DGTZ_USB ? k.board : k.port).arg(k.link == (int) CAEN_DGTZ_USB ? 0 : k.board)
+                                                           .arg(dig.IsConnected() ? QString(": SN %1 answers there").arg(dig.GetSerialNumber()) : QString(""));
         }
         dig.CloseDigitizer();
-        QCoreApplication::processEvents(); //to prevent Qt said application not responding.
+        QCoreApplication::processEvents();
+      }
+      if( !missing.isEmpty() ){
+        LogMsg("Not where the last full scan found it: " + missing.join(", ") + ". Scanning every port.");
+        nDigi = 0;
+        portList.clear();
+        fullScan = true;
       }
     }
-    for( int usbLink = 0; usbLink < MaxNBoards; usbLink ++){
-      Digitizer dig;
-      dig.OpenDigitizer(usbLink, 0, false, false, CAEN_DGTZ_USB);
-      if( dig.IsConnected() ){
-        if( std::find(foundSN.begin(), foundSN.end(), (int) dig.GetSerialNumber()) != foundSN.end() ){
-          LogMsg(QString("... SN: %1 also answers on USB link %2; it is read over its optical link.").arg(dig.GetSerialNumber()).arg(usbLink));
-        }else{
-          foundSN.push_back(dig.GetSerialNumber());
-          nDigi++;
-          portList.push_back({usbLink, 0, CAEN_DGTZ_USB});
-          LogMsg(QString("... Found on USB link: %1. SN: %2 %3").arg(usbLink).arg(dig.GetSerialNumber(), 3, 10, QChar(' ')).arg(dig.GetDPPString().c_str()));
+
+    if( fullScan ){
+      std::vector<int> foundSN;
+      for(int port = 0; port < MaxNPorts; port++){
+        for( int board = 0; board < MaxNBoards; board ++){ /// max number of diasy chain
+          Digitizer dig;
+          dig.OpenDigitizer(board, port, false, false, CAEN_DGTZ_OpticalLink);
+          if( dig.IsConnected() ){
+            foundSN.push_back(dig.GetSerialNumber());
+            nDigi++;
+            portList.push_back({board, port, CAEN_DGTZ_OpticalLink, (int) dig.GetSerialNumber()});
+            LogMsg(QString("... Found at port: %1, board: %2. SN: %3 %4").arg(port).arg(board).arg(dig.GetSerialNumber(), 3, 10, QChar(' ')).arg(dig.GetDPPString().c_str()));
+          }
+          dig.CloseDigitizer();
+          QCoreApplication::processEvents(); //to prevent Qt said application not responding.
         }
       }
-      dig.CloseDigitizer();
-      QCoreApplication::processEvents();
+      for( int usbLink = 0; usbLink < MaxNBoards; usbLink ++){
+        Digitizer dig;
+        dig.OpenDigitizer(usbLink, 0, false, false, CAEN_DGTZ_USB);
+        if( dig.IsConnected() ){
+          if( std::find(foundSN.begin(), foundSN.end(), (int) dig.GetSerialNumber()) != foundSN.end() ){
+            LogMsg(QString("... SN: %1 also answers on USB link %2; it is read over its optical link.").arg(dig.GetSerialNumber()).arg(usbLink));
+          }else{
+            foundSN.push_back(dig.GetSerialNumber());
+            nDigi++;
+            portList.push_back({usbLink, 0, CAEN_DGTZ_USB, (int) dig.GetSerialNumber()});
+            LogMsg(QString("... Found on USB link: %1. SN: %2 %3").arg(usbLink).arg(dig.GetSerialNumber(), 3, 10, QChar(' ')).arg(dig.GetDPPString().c_str()));
+          }
+        }
+        dig.CloseDigitizer();
+        QCoreApplication::processEvents();
+      }
+
+      // remember what this scan found
+      std::vector<KnownDigitizer> found;
+      for( auto & f : portList ) found.push_back({f.link, f.port, f.board, f.serial});
+      QStringList notFound;
+      for( auto & k : known ){
+        if( std::none_of(found.begin(), found.end(), [&](const KnownDigitizer & x){ return x.serial == k.serial; }) ) notFound << "Digi-" + QString::number(k.serial);
+      }
+      if( found.empty() ){
+        // nothing to remember
+      }else if( !fullScanChosen && !notFound.isEmpty() ){
+        LogMsg("knownDigitizers.txt kept: " + notFound.join(", ") + " not found. Choose \"full scan\" to replace the list.");
+      }else if( WriteKnownDigitizers(knownPath, found) ){
+        LogMsg(QString("Saved the %1 board(s) found in %2").arg(found.size()).arg(knownPath));
+      }else{
+        LogMsg("Could not write " + knownPath + ": the next open scans every port again.");
+      }
     }
   }
   logMsgHTMLMode = true;

@@ -505,6 +505,52 @@ public:
     w->CloseDigitizers();
   }
 
+  void KnownBoards(){
+    printf("== the boards of the last full scan are opened where they were; a missing one brings the full scan\n");
+    NewWorkDir(); AddBoards(); NewFSUDAQ();
+    const QString list = work + "/knownDigitizers.txt";
+    auto Lines = [&](){ QFile f(list); if( !f.open(QIODevice::ReadOnly | QIODevice::Text) ) return -1;
+                        int n = 0; for( auto & l : QString(f.readAll()).split("\n", Qt::SkipEmptyParts) ) if( !l.startsWith('#') ) n++; return n; };
+
+    Open();   // no list yet: a full scan, which writes it
+    CHECK(w->nDigi == 6, "first open: %u boards", w->nDigi);
+    CHECK(Lines() == 6, "first open: knownDigitizers.txt has %d board(s), expected 6", Lines());
+    int scanEmpty = fake_caen_empty_opens();
+    CHECK(scanEmpty > 0, "the full scan probed no empty position (the fake does not count them)");
+    w->CloseDigitizers();
+
+    int before = fake_caen_empty_opens();
+    Open();   // the known boards only
+    CHECK(w->nDigi == 6, "second open: %u boards", w->nDigi);
+    CHECK(fake_caen_empty_opens() == before, "second open probed %d empty position(s)", fake_caen_empty_opens() - before);
+    bool order = w->nDigi == 6;
+    for( unsigned int i = 0; i < w->nDigi && i < 6; i++ ) if( w->digi[i]->GetSerialNumber() != Serials[i] ) order = false;
+    CHECK(order, "second open: boards not in port order");
+    CHECK(w->BoardsNotProgrammed().isEmpty(), "second open: not programmed: %s", qPrintable(w->BoardsNotProgrammed().join(",")));
+    if( nFail == 0 ) OK("second open: six boards where they were, no empty position probed (the scan probed %d)", scanEmpty);
+    w->CloseDigitizers();
+
+    int failBefore = nFail;
+    fake_caen_fail(30508, "reopen");   // answers no more: off, or hung
+    before = fake_caen_empty_opens();
+    Open();
+    CHECK(w->nDigi == 5, "a known board missing: %u boards", w->nDigi);
+    CHECK(fake_caen_empty_opens() > before, "a known board missing: no full scan");
+    CHECK(w->logInfo->toPlainText().contains("Not where the last full scan found it: Digi-30508"), "the missing board is not named");
+    CHECK(Lines() == 6 && w->logInfo->toPlainText().contains("knownDigitizers.txt kept"), "the list lost the missing board (%d lines)", Lines());
+    if( nFail == failBefore ) OK("a known board missing: named, every port scanned, five open, the list kept with all six");
+    w->CloseDigitizers();
+
+    failBefore = nFail;
+    w->cbOpenDigitizers->setCurrentIndex(w->cbOpenDigitizers->findData(2));   // full scan
+    Open();
+    CHECK(w->nDigi == 5 && Lines() == 5, "full scan: %u boards, list of %d", w->nDigi, Lines());
+    if( nFail == failBefore ) OK("full scan chosen: the list rewritten with the five boards found");
+    w->cbOpenDigitizers->setCurrentIndex(w->cbOpenDigitizers->findData(1));
+    w->CloseDigitizers();
+    fake_caen_fail(30508, "");
+  }
+
   void BoardThatDoesNotReopen(){
     printf("== a board that answers the search but does not open again: left out, no crash\n");
     NewWorkDir(); AddBoards(); NewFSUDAQ();
@@ -713,6 +759,7 @@ int main(int argc, char ** argv){
   t.StuckBoardBlocksRuns();
   t.OverwriteUndoneIfStartFails();
   t.BoardThatDoesNotReopen();
+  t.KnownBoards();
   t.ScopeKeepsSaveData();
   t.StartStopOrder();
   t.DrainWaitsForFlushedData();

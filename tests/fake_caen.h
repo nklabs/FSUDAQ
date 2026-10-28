@@ -40,6 +40,9 @@ void fake_caen_add_usb_alias(int serial, int usbLink);
 // Serve the board aggregates of an .fsu file from ReadData; aggPerMs: how fast the board "takes" them.
 int  fake_caen_set_data(int serial, const char * fsuFile, double aggPerMs);
 void fake_caen_reset_all(void);
+// OpenDigitizer calls that found no board at the link and daisy-chain index asked (an empty position,
+// which costs a real board link ~0.6 s of time-outs), since the last fake_caen_reset_all.
+int  fake_caen_empty_opens(void);
 uint32_t fake_caen_reg(int serial, uint32_t address);          // the register as the board holds it
 void fake_caen_set_reg(int serial, uint32_t address, uint32_t value);
 int  fake_caen_get_stats(int serial, fake_caen_stats * stats);

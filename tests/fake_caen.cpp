@@ -299,7 +299,9 @@ extern "C" void fake_caen_forget(int serial) {
   b->st.overflows = 0;
 }
 
-extern "C" void fake_caen_reset_all(void) { boards.clear(); sequence = 0; }
+int emptyOpens = 0;
+extern "C" void fake_caen_reset_all(void) { boards.clear(); sequence = 0; emptyOpens = 0; }
+extern "C" int fake_caen_empty_opens(void) { return emptyOpens; }
 
 extern "C" uint32_t fake_caen_reg(int serial, uint32_t address) {
   Board * b = FromSerial(serial);
@@ -372,6 +374,7 @@ CAEN_DGTZ_ErrorCode CAEN_DGTZ_OpenDigitizer(CAEN_DGTZ_ConnectionType LinkType, i
     *handle = (int) i;
     return CAEN_DGTZ_Success;
   }
+  emptyOpens++;
   return CAEN_DGTZ_CommError;
 }
 
