@@ -77,7 +77,7 @@ static void CheckBoard(const std::string & path, int serial, int port) {
   for( int ch = 0; ch < digi.GetNumInputCh(); ch++ ){
     for( const Reg & r : RegisterChannelList_PSD ){
       if( r.GetRWType() != RW::ReadWrite ) continue;
-      if( r.IsCoupled() && ch % 2 ) continue;
+      if( r.IsCoupled() && !r.IsPerChannel() && ch % 2 ) continue;
       char kind[16]; snprintf(kind, sizeof kind, "ch %2d  ", ch);
       Compare(r, ch, kind);
     }
@@ -220,6 +220,50 @@ static void CheckSPIWait(const std::string & dir) {
   Digitizer::spiWaitTimeoutMs = keep;
 }
 
+// DPP-PSD 0x1n84 is per channel, only bits [7:0] are common to the couple (firmware > 136.9). FSUDAQ
+// used to write and read it on the even channel only, so after a power cycle the odd channels kept
+// extras option 0 (baseline) while FSUDAQ showed option 2: Digi-1399 and 30505 at PSI, 28 Oct 2026.
+static void CheckPerChannelCouple(const std::string & dir) {
+  printf("== DPP Algorithm Control 2 (0x1n84) on odd channels\n");
+  const int serial = 30597, port = 7, node = 1;   // daisy-chained behind the refused-files board, like 1399
+  fake_caen_add_board(1, port, node, serial, "DT5730", (dir + "/Digi-30508_PSD.bin").c_str());
+  for( int ch = 1; ch < 8; ch += 2 ) fake_caen_set_reg(serial, 0x1084 + (ch << 8), 0);   // as after a power cycle
+  Digitizer digi(node, port);
+  CHECK(digi.IsConnected(), "Digi-%d did not open", serial);
+  if( !digi.IsConnected() ) return;
+  digi.SetTrace(false);
+
+  std::vector<std::string> problems;
+  int n = digi.LoadAndProgramSettings(dir + "/Digi-30508_PSD.bin", problems);
+  CHECK(n == 0, "loading the settings reported %d problem(s)", n);
+  bool ok = true;
+  for( int ch = 0; ch < 8; ch++ ){
+    uint32_t onBoard = fake_caen_reg(serial, 0x1084 + (ch << 8));
+    if( onBoard != 0x200 ){ ok = false; CHECK(false, "ch%d 0x1%d84 = 0x%08X on the board, not 0x200 (extras option 2)", ch, ch, onBoard); }
+  }
+  if( ok ) printf("   ok    odd channels left at extras option 0 are programmed to option 2 like the even ones\n");
+
+  //---- one channel's own bits stay its own; the couple bits follow in both, on the board and in memory
+  digi.SetBits(DPP::PSD::DPPAlgorithmControl2_G, DPP::PSD::Bit_DPPAlgorithmControl2::ExtraWordOption, 0, 2);
+  digi.SetBits(DPP::PSD::DPPAlgorithmControl2_G, {3, 0}, 5, 3);
+  uint32_t b2 = fake_caen_reg(serial, 0x1284), b3 = fake_caen_reg(serial, 0x1384);
+  uint32_t m2 = digi.GetSettingFromMemory(DPP::PSD::DPPAlgorithmControl2_G, 2), m3 = digi.GetSettingFromMemory(DPP::PSD::DPPAlgorithmControl2_G, 3);
+  ok = b2 == 0x005 && b3 == 0x205 && m2 == b2 && m3 == b3;
+  CHECK(ok, "ch2 extras 0 then ch3 couple bits 5: board ch2 0x%X ch3 0x%X, memory ch2 0x%X ch3 0x%X (want 0x5, 0x205)", b2, b3, m2, m3);
+  if( ok ) printf("   ok    ch2's extras option is ch2's alone; ch3's couple trigger bits reach ch2 too\n");
+
+  //---- a write to an odd channel that does not arrive is reported
+  fake_caen_drop_write(serial, 0x1384);
+  fake_caen_set_reg(serial, 0x1384, 0);
+  problems.clear();
+  n = digi.LoadAndProgramSettings(dir + "/Digi-30508_PSD.bin", problems);
+  std::string named;
+  for( auto & p : problems ) if( p.find("0x1384") != std::string::npos ) named = p;
+  CHECK(n > 0 && !named.empty(), "a lost write to ch3 0x1384 was not reported (%d problem(s))", n);
+  if( !named.empty() ) printf("   ok    a lost write to ch3 is reported: %s\n", named.c_str());
+  fake_caen_drop_write(serial, 0);
+}
+
 int main(int argc, char ** argv) {
   Digitizer::programPauseMs = 0; // the fake boards need no pause between register writes
   std::string dir = argc > 1 ? argv[1] : "tests/data/odin-runB";
@@ -239,6 +283,7 @@ int main(int argc, char ** argv) {
   CheckRefused(dir);
   CheckClockChange(dir);
   CheckSPIWait(dir);
+  CheckPerChannelCouple(dir);
 
   printf("\n%s: %d problem(s) in %zu board(s)\n", nFail ? "FAILED" : "PASSED", nFail, files.size());
   return nFail ? 1 : 0;

@@ -62,6 +62,11 @@ class Reg{
     uint32_t     GetAddress()      const {return address; }
     RW           GetRWType()       const {return rwType;}
     bool         IsCoupled()       const {return group;}
+    /// a coupled register whose channels each have their own copy, sharing only some bits with the
+    /// other channel of the couple (DPP-PSD 0x1n84: bits [7:0]); a write to either channel sets them in both
+    bool         IsPerChannel()    const {return group && coupleBits != 0xFFFFFFFF;}
+    uint32_t     GetCoupleBits()   const {return group ? coupleBits : 0;}
+    Reg          WithCoupleBits(uint32_t bits) const {Reg r = *this; r.coupleBits = bits; return r;}
     unsigned int GetMaxBit()       const {return maxBit;} 
     int          GetPartialStep()  const {return partialStep;} /// step = partialStep * tick2ns, -1 : step = 1
     void         Print()           const ;
@@ -71,7 +76,7 @@ class Reg{
     uint32_t  ActualAddress(int ch = -1){ //for QDC, ch is groupID
       if( address == 0x8180 ) return  (ch < 0 ? address : (address + 4*(ch/2))); // DPP::TriggerValidationMask_G
       if( address <  0x8000 ){
-        if( group ) {
+        if( group && !IsPerChannel() ) {
           if( ch < 0 ) return address + 0x7000;
           return address + ((ch % 2 == 0 ? ch : ch - 1) << 8) ;
         }
@@ -92,6 +97,7 @@ class Reg{
     uint32_t address; /// This is the table of register, the actual address should call ActualAddress();
     RW rwType; /// read/write = 0; read = 1; write = 2
     bool group;
+    uint32_t coupleBits = 0xFFFFFFFF; /// for a coupled register: the bits common to the couple
     unsigned int maxBit ;
     int partialStep;
     std::vector<std::pair<std::string, unsigned int>> comboList;
@@ -696,7 +702,9 @@ namespace DPP {
     const Reg TriggerHoldOffWidth            ("TriggerHoldOffWidth"            , 0x1074, RW::ReadWrite, false, 0xFFFF,  4); /// R/W
     const Reg ThresholdForPSDCut             ("ThresholdForPSDCut"             , 0x1078, RW::ReadWrite, false,  0x3FF, -1); /// R/W
     const Reg PurGapThreshold                ("PurGapThreshold"                , 0x107C, RW::ReadWrite, false,  0xFFF, -1); /// R/W
-    const Reg DPPAlgorithmControl2_G         ("DPPAlgorithmControl2_G"         , 0x1084, RW::ReadWrite,  true, {}); /// R/W 
+    /// from firmware 136.9 only bits [7:0] (couple trigger and validation) are common to the couple;
+    /// the rest (extras option, smoothing, veto source, ...) is set per channel, as CoMPASS does
+    const Reg DPPAlgorithmControl2_G = Reg("DPPAlgorithmControl2_G", 0x1084, RW::ReadWrite, true, {}).WithCoupleBits(0xFF); /// R/W
     const Reg EarlyBaselineFreeze            ("EarlyBaselineFreeze"            , 0x10D8, RW::ReadWrite, false,  0x3FF,  4); /// R/W
 
     namespace Bit_CFDSetting {

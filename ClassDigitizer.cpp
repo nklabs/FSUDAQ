@@ -932,9 +932,12 @@ void Digitizer::WriteRegister (Reg registerAddress, uint32_t value, int ch, bool
     }else{
       SetSettingToMemory(registerAddress, value, ch);
       SaveSettingToFile(registerAddress, value, ch);
-      if( registerAddress.IsCoupled() ) {
-        SetSettingToMemory(registerAddress, value, ch%2 == 0 ? ch + 1 : ch -1);
-        SaveSettingToFile(registerAddress, value, ch%2 == 0 ? ch + 1 : ch -1);
+      if( registerAddress.IsCoupled() ) {   // the board sets the couple's common bits in both channels
+        int other = ch%2 == 0 ? ch + 1 : ch -1;
+        uint32_t common = registerAddress.GetCoupleBits();
+        uint32_t otherValue = (GetSettingFromMemory(registerAddress, other) & ~common) | (value & common);
+        SetSettingToMemory(registerAddress, otherValue, other);
+        SaveSettingToFile(registerAddress, otherValue, other);
       }
     }
   }
@@ -1088,12 +1091,13 @@ std::vector<std::pair<Reg, int>> Digitizer::ProgrammedRegisters(){
       list.push_back({r, -1});
     }
 
-    /// Channels Setting; a coupled register belongs to the even channel of the pair
+    /// Channels Setting; a coupled register belongs to the even channel of the pair, unless each
+    /// channel has its own copy (DPP-PSD 0x1n84): the odd channel keeps it otherwise from before
     const std::vector<Reg> & chRegs = (DPPType == V1730_DPP_PHA_CODE) ? RegisterChannelList_PHA : RegisterChannelList_PSD;
     for( int ch = 0; ch < NumInputCh; ch ++){
       for( const Reg & r : chRegs ){
         if( r.GetRWType() != RW::ReadWrite ) continue;
-        if( r.IsCoupled() && ch % 2 ) continue;
+        if( r.IsCoupled() && !r.IsPerChannel() && ch % 2 ) continue;
         list.push_back({r, ch});
       }
     }

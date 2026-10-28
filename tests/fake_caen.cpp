@@ -184,6 +184,10 @@ void Write(Board & b, uint32_t a, uint32_t v) {
     for( int ch = 0; ch < b.nCh; ch++ ) b.reg[(a - 0x7000) + (ch << 8)] = v;
     return;
   }
+  if( a >= 0x1000 && a < 0x2000 && (a & 0xFF) == 0x84 ){   // DPP-PSD 0x1n84: per channel, bits [7:0] common to the couple
+    uint32_t other = a ^ 0x100;
+    b.reg[other] = (Read(b, other) & ~0xFFu) | (v & 0xFFu);
+  }
   b.reg[a] = v;
 }
 
