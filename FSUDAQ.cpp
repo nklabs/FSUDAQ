@@ -1197,6 +1197,7 @@ void FSUDAQ::SetupScalar(){
   // uses rows rather than width, and its labels ignore their width so they cannot widen a column
   const int nCells = 4;                     // Counts/s, Input/s, Missed %, Lost %
   const int cellW = 64;
+  const int cellH = 20;                     // two rows of boards (16 and 8 channels) fit a 1080-pixel screen
   const int boardW = nCells * cellW + (nCells - 1) * 3;
   const int nSummary = 5;                   // board rows: Counts/s, Input/s, Missed, Lost, Read
   const int headRow = 3 + nSummary + 3;     // after the summary: written, agg/reads, problems; then column titles
@@ -1365,7 +1366,7 @@ void FSUDAQ::SetupScalar(){
       for( int k = 0; k < nCells; k++ ){
         QLineEdit * le = new QLineEdit(scalar);
         le->setReadOnly(true);
-        le->setFixedSize(cellW, 25);
+        le->setFixedSize(cellW, cellH);
         le->setAlignment(Qt::AlignRight);
         if( k == 1 ) le->setStyleSheet(InputCellStyle);
         *cells[k] = le;
@@ -1383,13 +1384,18 @@ void FSUDAQ::SetupScalar(){
 
   // as many boards side by side as the screen takes, at most all of them; narrower or wider
   // windows re-flow the boards (no sideways scrolling unless one board does not fit)
-  int blockW = 0, blockH = 0;
-  for( QWidget * b : scalarBoards ){ blockW = std::max(blockW, b->sizeHint().width()); blockH = std::max(blockH, b->sizeHint().height()); }
+  int blockW = 0;
+  for( QWidget * b : scalarBoards ) blockW = std::max(blockW, b->sizeHint().width());
   QRect screen = QGuiApplication::primaryScreen() ? QGuiApplication::primaryScreen()->availableGeometry() : QRect(0, 0, 1600, 1000);
   const int gap = scalarLayout->horizontalSpacing(), frame = 60;
   int perRow = std::max(1, std::min((int) nDigi, (screen.width() - frame + gap) / (blockW + gap)));
-  int rows = ((int) nDigi + perRow - 1) / perRow;
-  scalar->resize(perRow * (blockW + gap) - gap + frame, std::min(screen.height(), 80 + rows * (blockH + scalarLayout->verticalSpacing())));
+  int height = frame + topLayout->sizeHint().height();   // each row is as high as its highest board (16 or 8 channels)
+  for( size_t i = 0; i < scalarBoards.size(); i += perRow ){
+    int rowH = 0;
+    for( size_t j = i; j < std::min(scalarBoards.size(), i + perRow); j++ ) rowH = std::max(rowH, scalarBoards[j]->sizeHint().height());
+    height += rowH + scalarLayout->verticalSpacing();
+  }
+  scalar->resize(perRow * (blockW + gap) - gap + frame, std::min(screen.height(), height));
   ReflowScalar();
   scalarScroll->viewport()->installEventFilter(new ResizeWatcher(scalar, [this](){ ReflowScalar(); }));
 
