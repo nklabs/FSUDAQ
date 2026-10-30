@@ -909,11 +909,46 @@ public:
     CHECK(a1.swTriggers - a0.swTriggers >= 5 && b1.swTriggers == b0.swTriggers, "auto trigger: %d on the board shown, %d on another",
           a1.swTriggers - a0.swTriggers, b1.swTriggers - b0.swTriggers);
 
+    // Force: one software trigger; a flush after it only when the board's Automatic Data Flush (0x8000 bit 0) is off
+    Pump(100);
+    fake_caen_get_stats(58918, &a0);
+    s->bnForce->click();
+    Pump(200);
+    fake_caen_get_stats(58918, &a1);
+    CHECK(a1.swTriggers - a0.swTriggers == 1 && a1.flushes == a0.flushes, "Force, auto flush on: %d triggers, %d flushes (want 1, 0)",
+          a1.swTriggers - a0.swTriggers, a1.flushes - a0.flushes);
+
     s->StopScope();
     CHECK(fake_caen_reg(58918, 0x8000) == cfg && fake_caen_reg(58918, 0x8100) == d->GetSettingFromMemory(DPP::AcquisitionControl),
           "after the stop: 0x8000 0x%08X (saved 0x%08X), 0x8100 0x%X", fake_caen_reg(58918, 0x8000), cfg, fake_caen_reg(58918, 0x8100));
     s->close();
     if( nFail == 0 ) OK("traces, gates and threshold drawn; threshold written while running; auto trigger on the board shown; settings as saved after the stop");
+    w->CloseDigitizers();
+  }
+
+  void ScopeForceFlush(){
+    printf("== scope Force on a board without Automatic Data Flush: the trigger, then a flush of that channel\n");
+    int nFail0 = nFail;
+    NewWorkDir(); AddBoards(5, 0); NewFSUDAQ();   // no data: only the forced events
+    Open();
+    Digitizer * d = Digi(58918);
+    const uint32_t cfg = d->GetSettingFromMemory(DPP::BoardConfiguration);
+    CHECK(cfg & 1, "fixture without Automatic Data Flush (0x%08X)", cfg);
+    Scope * s = ScopeOn(58918, 3);
+    d->SetSettingToMemory(DPP::BoardConfiguration, cfg & ~1u);   // after opening the scope (it reads the board), before the start (refused while it runs)
+    s->StartScope();
+    fake_caen_stats a0, a1;
+    Pump(100);
+    fake_caen_get_stats(58918, &a0);
+    s->bnForce->click();
+    Pump(200);
+    fake_caen_get_stats(58918, &a1);
+    CHECK(a1.swTriggers - a0.swTriggers == 1 && a1.flushes - a0.flushes == 1, "Force, auto flush off: %d triggers, %d flushes (want 1, 1)",
+          a1.swTriggers - a0.swTriggers, a1.flushes - a0.flushes);
+    s->StopScope();
+    s->close();
+    d->SetSettingToMemory(DPP::BoardConfiguration, cfg);
+    if( nFail == nFail0 ) OK("one trigger, one flush");
     w->CloseDigitizers();
   }
 
@@ -1002,6 +1037,7 @@ int main(int argc, char ** argv){
   t.ScopeKeepsSaveData();
   t.ScopeTraceSelection();
   t.ScopeChangesWhileRunning();
+  t.ScopeForceFlush();
   t.ScopeOnlyThisChannel();
   t.StartStopOrder();
   t.DrainWaitsForFlushedData();

@@ -185,6 +185,9 @@ Scope::Scope(Digitizer ** digi, unsigned int nDigi, ReadDataThread ** readDataTh
   top->addWidget(chkAutoTrigger);
   connect(chkAutoTrigger, &QCheckBox::toggled, this, [=](){ UpdateAutoTrigger(); });
 
+  bnForce = toolButton("Force", QStyle::SP_ArrowDown, "One software trigger to the selected channel now (CoMPASS's Force Trigger).");
+  connect(bnForce, &QToolButton::clicked, this, [=](){ if( IsRunning(ID) ) readDataThread[ID]->ForceTrigger(cbScopeCh->currentIndex()); });
+
   top->addWidget(new QLabel("Persistence", this));
   cbPersist = new RComboBox(this);
   cbPersist->addItem("Off", 0);

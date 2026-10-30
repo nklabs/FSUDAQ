@@ -170,6 +170,7 @@ private:
   QToolButton * bnUnzoom;
   QToolButton * bnSnapshot;
   QToolButton * bnSaveTrace;
+  QToolButton * bnForce;
   QCheckBox * chkAutoTrigger;
   QCheckBox * chkAutoY;
   RComboBox * cbPersist;

@@ -47,6 +47,8 @@ public:
   /// the scope's auto trigger, as CoMPASS's (an oscilloscope's force trigger): a software trigger to channel ch
   /// every AutoTriggerMiliSec while the board is read, in OR with the self-triggers; -1 = off
   void SetAutoTrigger(int ch) {this->autoTriggerCh = ch;}
+  /// the scope's Force: one software trigger to channel ch at the next read
+  void ForceTrigger(int ch) {this->forceTriggerCh = ch;}
 
   void SetReadCountZero() {readCount = 0;}
   unsigned long GetReadCount() const {return readCount;}
@@ -86,6 +88,8 @@ public:
     }
 
     readCount = 0;
+    flushCh = -1;
+    forceTriggerCh = -1;
     if( isScope ){ QMutexLocker locker(&scopeMTX); for( auto & t : scopeTrace ) t = ScopeTrace(); }
     clock_gettime(CLOCK_REALTIME, &t0);
     // ta = t0;
@@ -112,13 +116,28 @@ public:
         drainStart = lastData = std::chrono::steady_clock::now();
       }
 
-      if( autoTriggerCh >= 0 && !boardStopped ){
-        const auto now = std::chrono::steady_clock::now();
-        if( now - lastAutoTrigger >= std::chrono::milliseconds(AutoTriggerMiliSec) ){
-          digiMTX[ID].lock();
-          digi->SendSoftwareTrigger(autoTriggerCh);
-          digiMTX[ID].unlock();
-          lastAutoTrigger = now;
+      {
+        const int forceCh = forceTriggerCh.exchange(-1);
+        if( !boardStopped ){
+          const auto now = std::chrono::steady_clock::now();
+          // a board without Automatic Data Flush (0x8000 bit 0) holds a lone triggered event until its aggregate
+          // fills: flush it once the event is recorded
+          if( flushCh >= 0 && now >= flushAt ){
+            digiMTX[ID].lock();
+            digi->ForceDataFlush(flushCh);
+            digiMTX[ID].unlock();
+            flushCh = -1;
+          }
+          int ch = forceCh;
+          if( ch < 0 && autoTriggerCh >= 0 && now - lastAutoTrigger >= std::chrono::milliseconds(AutoTriggerMiliSec) ) ch = autoTriggerCh;
+          if( ch >= 0 ){
+            digiMTX[ID].lock();
+            const bool sent = digi->SendSoftwareTrigger(ch);
+            const bool autoFlush = Digitizer::ExtractBits(digi->GetSettingFromMemory(DPP::BoardConfiguration), DPP::Bit_BoardConfig::EnableAutoDataFlush);
+            digiMTX[ID].unlock();
+            if( forceCh < 0 ) lastAutoTrigger = now;
+            if( sent && !autoFlush ){ flushCh = ch; flushAt = now + std::chrono::milliseconds(1); }
+          }
         }
       }
 
@@ -235,6 +254,9 @@ private:
   bool isScope;
   std::atomic<int> autoTriggerCh{-1};
   std::chrono::steady_clock::time_point lastAutoTrigger{};
+  std::atomic<int> forceTriggerCh{-1};
+  int flushCh = -1;                                   // channel to flush at flushAt, after a software trigger
+  std::chrono::steady_clock::time_point flushAt{};
   unsigned long readCount; 
 };
 

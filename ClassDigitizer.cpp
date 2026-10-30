@@ -150,6 +150,16 @@ bool Digitizer::SendSoftwareTrigger(int ch){
   return CAEN_DGTZ_WriteRegister(handle, address, 1) == CAEN_DGTZ_Success;
 }
 
+/// DPP-PSD Forced Data Flush (0x1n40, UM4380): the aggregate channel ch is filling can be read now. For a
+/// software trigger on a board without Automatic Data Flush, whose lone event waits for the aggregate to fill.
+/// PSD only, as in SWStopACQ(): on DPP-PHA 0x1n40 stops the channel.
+bool Digitizer::ForceDataFlush(int ch){
+  if( !isConnected || isDummy || softwareDisable ) return false;
+  if( DPPType != DPPTypeCode::DPP_PSD_CODE ) return false;
+  Reg flush = DPP::PSD::ForcedDataFlush_W;
+  return CAEN_DGTZ_WriteRegister(handle, flush.ActualAddress(ch), 1) == CAEN_DGTZ_Success;
+}
+
 int Digitizer::CalibrateADC(std::string & why){
   DebugPrint("%s", "Digitizer");
   why.clear();
