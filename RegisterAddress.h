@@ -255,6 +255,8 @@ namespace DPP {
     const std::pair<unsigned short, unsigned short> DigiProbel1_PSD = {3, 23} ; 
     const std::pair<unsigned short, unsigned short> DigiProbel2_PSD = {3, 26} ; 
     const std::pair<unsigned short, unsigned short> DisableDigiTrace_PSD = {1, 31} ; 
+    /// bits [13:11]: dual trace (bit 11) and analog probe (bits [13:12]) together; the list values are probe * 2 + dual trace (UM4380, 0x8000)
+    const std::pair<unsigned short, unsigned short> AnalogProbe_PSD = {3, 11} ; 
     const std::vector<std::pair<std::string, unsigned int>> ListAnaProbe_PSD = {{"Input + N/A", 0},
                                                                                 {"CFD + N/A", 2},
                                                                                 {"Input + Baseline",1},
@@ -728,6 +730,7 @@ namespace DPP {
       const std::pair<unsigned short, unsigned short> LocalTrigValidMode = {3, 4} ;
       const std::pair<unsigned short, unsigned short> ExtraWordOption = {3, 8} ;
       const std::pair<unsigned short, unsigned short> SmoothedChargeIntegration = {5, 11} ;
+      const std::pair<unsigned short, unsigned short> InputSmoothing = {4, 12} ; /// [15:12] alone: the input smoothing for the trigger (UM4380, 0x1n84)
       const std::pair<unsigned short, unsigned short> TriggerCounterFlag = {2, 16} ;
       const std::pair<unsigned short, unsigned short> VetoSource = {2, 18} ;
       const std::pair<unsigned short, unsigned short> ChannelProbe = {4, 20} ;
@@ -754,6 +757,12 @@ namespace DPP {
                                                                                   {"Lost Trig. Count  + Total Trig. Count", 4},
                                                                                   {"Positive 0-Xing + Negative 0-Xing", 5},
                                                                                   {"Fixed value 0x12345678", 7}};
+
+      const std::vector<std::pair<std::string, unsigned int>> ListInputSmoothing = {{"Disabled", 0},
+                                                                                   {"2 samples", 1},
+                                                                                   {"4 samples", 2},
+                                                                                   {"8 samples", 3},
+                                                                                   {"16 samples", 4}};
 
       const std::vector<std::pair<std::string, unsigned int>> ListSmoothedChargeIntegration = {{"Disabled", 0},
                                                                                               {"2 samples", 2},

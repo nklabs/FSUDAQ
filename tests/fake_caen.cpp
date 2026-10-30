@@ -167,6 +167,7 @@ uint32_t Read(Board & b, uint32_t a) {
 
 void Write(Board & b, uint32_t a, uint32_t v) {
   b.st.writes++;
+  if( a == 0x8108 || a == 0x80C0 || (a >= 0x1000 && a < 0x2000 && (a & 0xFF) == 0xC0) ) b.st.swTriggers++;
   if( IsReadOnly(a) ) return;
   if( IsDesktop(b) && (a == 0x8100 || a == 0xEF24 || a == 0xEF34) ){
     uint32_t refNow = (Read(b, 0x8100) >> 6) & 1;
@@ -198,20 +199,38 @@ void Write(Board & b, uint32_t a, uint32_t v) {
   b.reg[a] = v;
 }
 
-// Board aggregate k of a generated stream: every couple has synthEvents events, 10 us apart.
+// Board aggregate k of a generated stream: every couple has synthEvents events, 10 us apart. With the
+// waveform recording on (0x8000 bit 16), each event has a waveform of the couple's record length: a
+// baseline of 2000 with a pulse at sample 40, digital probe 1 high over samples 36-69, probe 2 over 36-45.
 void Generate(Board & b, long k, std::vector<uint32_t> & out) {
   int nCouple = b.nCh / 2, nEv = b.synthEvents;
+  const uint32_t cfg = Read(b, 0x8000);
+  const bool wave = (cfg >> 16) & 1, dual = (cfg >> 11) & 1;
+  uint32_t nSample[8] = {0};
+  uint32_t size = 4;
+  for( int c = 0; c < nCouple; c++ ){
+    nSample[c] = wave ? (Read(b, 0x1020 + (c << 9)) & 0x3FFF) * 8 : 0;
+    size += 2 + (3 + nSample[c] / 2) * nEv;
+  }
   out.clear();
-  out.push_back(0xA0000000u | (uint32_t)(4 + nCouple * (2 + 3 * nEv)));
+  out.push_back(0xA0000000u | size);
   out.push_back((8u << 27) | ((1u << nCouple) - 1));            // board ID 8 (DPP-PSD), couple mask
   out.push_back((uint32_t) k & 0x7FFFFF);                        // board aggregate counter
   out.push_back((uint32_t)(k * 1000));                           // board time tag
   for( int c = 0; c < nCouple; c++ ){
-    out.push_back(0x80000000u | (uint32_t)(2 + 3 * nEv));
-    out.push_back(0x72000000u);                                  // time tag, extras (option 2), charges; no waveform
+    out.push_back(0x80000000u | (uint32_t)(2 + (3 + nSample[c] / 2) * nEv));
+    // time tag, extras (option 2), charges; the waveform if recorded
+    out.push_back(0x72000000u | (dual ? 1u << 31 : 0) | (wave ? 1u << 27 : 0) | (nSample[c] / 8));
     for( int e = 0; e < nEv; e++ ){
       uint64_t ts = (uint64_t) k * nEv * 5000 + (uint64_t) e * 5000 + c; // 2 ns ticks
       out.push_back(((uint32_t)(e & 1) << 31) | (uint32_t)(ts & 0x7FFFFFFF));
+      for( uint32_t i = 0; i < nSample[c]; i += 2 ){
+        auto sample = [](uint32_t j){
+          uint32_t v = 2000 + (j >= 40 && j < 56 ? 1500 : 0);
+          return v | (j >= 36 && j < 70 ? 1u << 14 : 0) | (j >= 36 && j < 46 ? 1u << 15 : 0);
+        };
+        out.push_back(sample(i) | (sample(i + 1) << 16));
+      }
       out.push_back((uint32_t)((ts >> 31) & 0xFFFF) << 16 | (uint32_t)(e & 0x3FF));
       out.push_back(((uint32_t)(1000 + c * 100 + e) << 16) | (uint32_t)(500 + e));
     }

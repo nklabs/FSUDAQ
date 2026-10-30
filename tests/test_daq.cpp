@@ -808,6 +808,146 @@ public:
     if( nFail == 0 ) OK("Save Data kept, Start back after the scope");
     w->CloseDigitizers();
   }
+
+  //---- the scope (Scope.cpp)
+  Scope * ScopeOn(int serial, int ch){
+    w->OpenScope();
+    Scope * s = w->scope;
+    s->cbScopeDigi->setCurrentIndex(s->cbScopeDigi->findText("Digi-" + QString::number(serial)));
+    s->cbScopeCh->setCurrentIndex(ch);
+    return s;
+  }
+  Digitizer * Digi(int serial){
+    for( unsigned int i = 0; i < w->nDigi; i++ ) if( w->digi[i]->GetSerialNumber() == serial ) return w->digi[i];
+    return nullptr;
+  }
+  static void Choose(RComboBox * cb, int data){ cb->setCurrentIndex(cb->findData(data)); }
+  // the setting word saved in the board's settings file
+  static uint32_t InFile(Digitizer * d, Reg reg, int ch = 0){
+    QFile f(QString::fromStdString(d->GetSettingFileName()));
+    if( !f.open(QIODevice::ReadOnly) ) return 0xDEADBEEF;
+    QByteArray all = f.readAll();
+    const int index = reg.Index(ch);
+    if( index < 0 || index * 4 + 4 > all.size() ) return 0xDEADBEEF;
+    uint32_t v; memcpy(&v, all.constData() + index * 4, 4);
+    return v;
+  }
+
+  void ScopeTraceSelection(){
+    printf("== scope: the trace selectors set the DPP-PSD probes (0x8000 [13:11], [25:23], [28:26])\n");
+    NewWorkDir(); AddBoards(); NewFSUDAQ();
+    Open();
+    Scope * s = ScopeOn(1443, 0);
+    Digitizer * d = Digi(1443);
+    d->SetSettingFileUpdate(true);   // "Live Setting Update": every saved change goes to the file at once
+    // analog trace 1 (0 Input, 1 CFD), analog trace 2 (0 None, 1 Baseline, 2 CFD) -> probe * 2 + dual trace (UM4380)
+    struct { int a1, a2, field; } cases[] = {{0, 1, 1}, {0, 2, 5}, {1, 0, 2}, {1, 1, 3}, {0, 0, 0}};
+    for( auto & c : cases ){
+      Choose(s->cbAnaTrace2, c.a2);
+      Choose(s->cbAnaTrace1, c.a1);
+      const uint32_t board = fake_caen_reg(1443, 0x8000);
+      CHECK(((board >> 11) & 7) == (uint32_t) c.field, "%s + %s: bits [13:11] = %u, want %d", qPrintable(s->cbAnaTrace1->currentText()),
+            qPrintable(s->cbAnaTrace2->currentText()), (board >> 11) & 7, c.field);
+      CHECK(board == d->GetSettingFromMemory(DPP::BoardConfiguration), "board 0x%08X, memory 0x%08X", board, d->GetSettingFromMemory(DPP::BoardConfiguration));
+    }
+    Choose(s->cbAnaTrace2, 2);   // Input + CFD
+    Choose(s->cbAnaTrace1, 1);   // CFD: no "CFD + CFD", trace 2 gives way
+    CHECK(s->cbAnaTrace2->currentData().toInt() == 0 && ((fake_caen_reg(1443, 0x8000) >> 11) & 7) == 2, "CFD + CFD: trace 2 %s, bits %u",
+          qPrintable(s->cbAnaTrace2->currentText()), (fake_caen_reg(1443, 0x8000) >> 11) & 7);
+    Choose(s->cbDigiTrace1, 7);
+    Choose(s->cbDigiTrace2, 3);
+    CHECK(((fake_caen_reg(1443, 0x8000) >> 23) & 7) == 7 && ((fake_caen_reg(1443, 0x8000) >> 26) & 7) == 3,
+          "digital probes: 0x%08X", fake_caen_reg(1443, 0x8000));
+    CHECK(InFile(d, DPP::BoardConfiguration) == fake_caen_reg(1443, 0x8000), "settings file 0x%08X, board 0x%08X", InFile(d, DPP::BoardConfiguration), fake_caen_reg(1443, 0x8000));
+    s->close();
+    if( nFail == 0 ) OK("five analog choices, CFD + CFD avoided, both digital probes; memory and file follow");
+    w->CloseDigitizers();
+  }
+
+  void ScopeChangesWhileRunning(){
+    printf("== scope: waveforms drawn; a threshold changed while it runs reaches the board; auto trigger; its own settings never reach the settings\n");
+    NewWorkDir(); AddBoards(5, 2); NewFSUDAQ();
+    Open();
+    Digitizer * d = Digi(58918);
+    d->SetSettingFileUpdate(true);   // "Live Setting Update": every saved change goes to the file at once
+    d->WriteRegister(DPP::AcquisitionControl, 1, -1);   // started by S-IN, as a slave
+    const uint32_t cfg = d->GetSettingFromMemory(DPP::BoardConfiguration);
+    Scope * s = ScopeOn(58918, 3);
+    s->StartScope();
+    CHECK(s->isACQStarted, "scope not started");
+    CHECK((fake_caen_reg(58918, 0x8000) >> 16) & 1, "traces not recorded on the board");
+    CHECK(d->GetSettingFromMemory(DPP::BoardConfiguration) == cfg && InFile(d, DPP::BoardConfiguration) == cfg, "the scope's trace bit reached the settings");
+    CHECK(WaitFor([&](){ return s->dataTrace[0]->count() > 0; }, 5000), "no waveform drawn");
+    CHECK(s->dataTrace[2]->count() > 0 && s->dataTrace[3]->count() > 0, "digital traces not drawn");
+    CHECK(s->gateUpper[0]->count() == 2 && s->gateUpper[1]->count() == 2, "gates not shaded (%d, %d points)", (int) s->gateUpper[0]->count(), (int) s->gateUpper[1]->count());
+    CHECK(s->thresholdLine->count() == 2, "no threshold line");
+
+    Scope::Param * thr = nullptr;
+    for( auto & p : s->params ) if( p.sb && p.reg.GetAddress() == DPP::PSD::TriggerThreshold.GetAddress() ) thr = &p;
+    CHECK(thr, "no threshold control");
+    if( thr ){
+      thr->sb->setValue(321);
+      emit thr->sb->returnPressed();
+      CHECK(fake_caen_reg(58918, 0x1360) == 321 && d->GetSettingFromMemory(DPP::PSD::TriggerThreshold, 3) == 321 && InFile(d, DPP::PSD::TriggerThreshold, 3) == 321,
+            "threshold: board %u, memory %u, file %u", fake_caen_reg(58918, 0x1360), d->GetSettingFromMemory(DPP::PSD::TriggerThreshold, 3), InFile(d, DPP::PSD::TriggerThreshold, 3));
+      fake_caen_stats st;
+      fake_caen_get_stats(58918, &st);
+      CHECK(st.running && s->IsRunning(s->ID), "not running again after the change");
+      CHECK((fake_caen_reg(58918, 0x8100) & 3) == 0 && (d->GetSettingFromMemory(DPP::AcquisitionControl) & 3) == 1,
+            "restarted alone: board start mode %u (want software), memory %u", fake_caen_reg(58918, 0x8100) & 3, d->GetSettingFromMemory(DPP::AcquisitionControl) & 3);
+      s->lastTrace.absIndex = -1;
+      s->dataTrace[0]->clear();
+      CHECK(WaitFor([&](){ return s->dataTrace[0]->count() > 0; }, 5000), "no waveform after the restart");
+    }
+
+    fake_caen_stats a0, b0, a1, b1;
+    fake_caen_get_stats(58918, &a0); fake_caen_get_stats(15880, &b0);
+    s->chkAutoTrigger->setChecked(true);
+    Pump(400);
+    s->chkAutoTrigger->setChecked(false);
+    fake_caen_get_stats(58918, &a1); fake_caen_get_stats(15880, &b1);
+    CHECK(a1.swTriggers - a0.swTriggers >= 5 && b1.swTriggers == b0.swTriggers, "auto trigger: %d on the board shown, %d on another",
+          a1.swTriggers - a0.swTriggers, b1.swTriggers - b0.swTriggers);
+
+    s->StopScope();
+    CHECK(fake_caen_reg(58918, 0x8000) == cfg && fake_caen_reg(58918, 0x8100) == d->GetSettingFromMemory(DPP::AcquisitionControl),
+          "after the stop: 0x8000 0x%08X (saved 0x%08X), 0x8100 0x%X", fake_caen_reg(58918, 0x8000), cfg, fake_caen_reg(58918, 0x8100));
+    s->close();
+    if( nFail == 0 ) OK("traces, gates and threshold drawn; threshold written while running; auto trigger on the board shown; settings as saved after the stop");
+    w->CloseDigitizers();
+  }
+
+  void ScopeOnlyThisChannel(){
+    printf("== scope: \"Only this channel\" runs one board and channel, and gives the board its settings back\n");
+    NewWorkDir(); AddBoards(5, 2); NewFSUDAQ();
+    Open();
+    Digitizer * d = Digi(62839);
+    d->SetSettingFileUpdate(true);   // "Live Setting Update": every saved change goes to the file at once
+    d->WriteRegister(DPP::AcquisitionControl, 1, -1);
+    Scope * s = ScopeOn(62839, 5);
+    s->chkSoleRun->setChecked(true);
+    s->StartScope();
+    fake_caen_stats st, other;
+    fake_caen_get_stats(62839, &st); fake_caen_get_stats(15880, &other);
+    CHECK(st.running && !other.running, "running: this board %d, another %d", st.running, other.running);
+    CHECK(fake_caen_reg(62839, 0x8120) == (1u << 5) && d->GetSettingFromMemory(DPP::RegChannelEnableMask) == 0xFFFF,
+          "enable mask: board 0x%X, memory 0x%X", fake_caen_reg(62839, 0x8120), d->GetSettingFromMemory(DPP::RegChannelEnableMask));
+    CHECK((fake_caen_reg(62839, 0x8100) & 3) == 0, "not started by software");
+    s->cbScopeCh->setCurrentIndex(6);
+    CHECK(s->isACQStarted && fake_caen_reg(62839, 0x8120) == (1u << 6), "channel 6: started %d, mask 0x%X", s->isACQStarted, fake_caen_reg(62839, 0x8120));
+    s->StopScope();
+    struct { uint32_t address; Reg reg; int ch; } regs[] = {{0x8000, DPP::BoardConfiguration, 0}, {0x8100, DPP::AcquisitionControl, 0},
+      {0x8120, DPP::RegChannelEnableMask, 0}, {0x1680, DPP::DPPAlgorithmControl, 6}, {0x1684, DPP::PSD::DPPAlgorithmControl2_G, 6},
+      {0x1580, DPP::DPPAlgorithmControl, 5}, {0x1584, DPP::PSD::DPPAlgorithmControl2_G, 5}};
+    for( auto & r : regs ){
+      const uint32_t mem = d->GetSettingFromMemory(r.reg, r.ch);
+      CHECK(fake_caen_reg(62839, r.address) == mem && InFile(d, r.reg, r.ch) == mem, "0x%04X after the stop: board 0x%X, memory 0x%X, file 0x%X",
+            r.address, fake_caen_reg(62839, r.address), mem, InFile(d, r.reg, r.ch));
+    }
+    s->close();
+    if( nFail == 0 ) OK("one board, one channel, software start; switched channel; every register as saved after the stop");
+    w->CloseDigitizers();
+  }
 };
 
 int main(int argc, char ** argv){
@@ -860,6 +1000,9 @@ int main(int argc, char ** argv){
   t.BoardThatDoesNotReopen();
   t.KnownBoards();
   t.ScopeKeepsSaveData();
+  t.ScopeTraceSelection();
+  t.ScopeChangesWhileRunning();
+  t.ScopeOnlyThisChannel();
   t.StartStopOrder();
   t.DrainWaitsForFlushedData();
   t.ProblemAtStopEndsSeries();

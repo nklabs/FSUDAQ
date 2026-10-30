@@ -1,48 +1,52 @@
 #include "Scope.h"
 
 #include <QApplication>
-#include <QValueAxis>
-#include <QRandomGenerator>
-#include <QGroupBox>
-#include <QStandardItemModel>
+#include <QBoxLayout>
+#include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QLabel>
+#include <QLegendMarker>
 #include <QScreen>
+#include <QStyle>
+#include <QTextStream>
+#include <cmath>
 
-QVector<QPointF> Scope::TrapezoidFilter(QVector<QPointF> data, int baseLineEndS, int riseTimeS, int flatTopS, float decayTime_ns){
-  DebugPrint("%s", "Scope");
-  QVector<QPointF>  trapezoid;
-  trapezoid.clear();
-  
-  ///find baseline;
-  double baseline = 0;
-  for( int i = 0; i < baseLineEndS; i++){
-    baseline += data[i].y();
+QString Scope::saveDir;
+
+namespace {
+  typedef std::pair<unsigned short, unsigned short> Bits;
+  uint32_t ClearField(uint32_t v, Bits b){ return v & ~(((1u << b.first) - 1) << b.second); }
+  uint32_t SetField(uint32_t v, Bits b, uint32_t x){ return ClearField(v, b) | ((x & ((1u << b.first) - 1)) << b.second); }
+
+  /// DPP-PSD: CoMPASS's Analog Trace 1 (0 Input, 1 CFD) and 2 (0 None, 1 Baseline, 2 CFD) <-> 0x8000 bits [13:11],
+  /// probe * 2 + dual trace (UM4380): Input | CFD (single trace), Input + Baseline, CFD + Baseline, Input + CFD
+  int PSDProbeField(int a1, int a2){
+    if( a2 == 0 ) return a1 == 0 ? 0 : 2;
+    if( a2 == 1 ) return a1 == 0 ? 1 : 3;
+    return 5;
   }
-  baseline = baseline*1./baseLineEndS;
-  
-  int length = data.size();
-  
-  double pn = 0.;
-  double sn = 0.;
-  for( int i = 0; i < length ; i++){
-  
-    double dlk = data[i].y() - baseline;
-    if( i - riseTimeS >= 0            ) dlk -= data[i - riseTimeS].y()             - baseline;
-    if( i - flatTopS - riseTimeS >= 0  ) dlk -= data[i - flatTopS - riseTimeS].y()   - baseline;
-    if( i - flatTopS - 2*riseTimeS >= 0) dlk += data[i - flatTopS - 2*riseTimeS].y() - baseline;
-    
-    if( i == 0 ){
-        pn = dlk;
-        sn = pn + dlk*decayTime_ns;
-    }else{
-        pn = pn + dlk;
-        sn = sn + pn + dlk*decayTime_ns;
-    }    
-    
-    trapezoid.append(QPointF(data[i].x(), sn / decayTime_ns / riseTimeS));
-  
-  }  
-  return trapezoid;
+  void PSDTraces(int field, int & a1, int & a2){
+    switch( field ){
+      case 1: a1 = 0; a2 = 1; break;
+      case 2: a1 = 1; a2 = 0; break;
+      case 3: a1 = 1; a2 = 1; break;
+      case 5: a1 = 0; a2 = 2; break;
+      default: a1 = 0; a2 = 0; break;
+    }
+  }
+  const int PHANoSecondTrace = 99; // PHA "Analog trace 2 = None": dual trace off
+
+  void SelectData(RComboBox * cb, int data){
+    for( int i = 0; i < cb->count(); i++ ) if( cb->itemData(i).toInt() == data ){ cb->setCurrentIndex(i); return; }
+    cb->setCurrentIndex(-1);
+  }
+  void Fill(RComboBox * cb, const std::vector<std::pair<std::string, unsigned int>> & list){
+    cb->clear();
+    for( auto & x : list ) cb->addItem(QString::fromStdString(x.first), x.second);
+  }
 }
 
 //^========================================================
@@ -56,150 +60,260 @@ Scope::Scope(Digitizer ** digi, unsigned int nDigi, ReadDataThread ** readDataTh
   setWindowTitle("Scope");
   setWindowFlags( this->windowFlags() & ~Qt::WindowCloseButtonHint );
 
-  //====== resize window if screen too small
-  QScreen * screen = QGuiApplication::primaryScreen();
-  QRect screenGeo = screen->geometry();
-  if( screenGeo.width() < 1000 || screenGeo.height() < 800) {
-    setGeometry(0, 0, screenGeo.width() - 100, screenGeo.height() - 100);
-  }else{
-    setGeometry(0, 0, 1000, 800);
-  }
+  QRect screenGeo = QGuiApplication::primaryScreen()->availableGeometry();
+  setGeometry(0, 0, std::min(1400, screenGeo.width() - 50), std::min(850, screenGeo.height() - 50));
 
   enableSignalSlot = false;
-
   isACQStarted = false;
-
-  plot = new RChart();
-  for( int i = 0; i < MaxNumberOfTrace; i++) {
-    dataTrace[i] = new QLineSeries();
-    dataTrace[i]->setName("Trace " + QString::number(i));
-    for(int j = 0; j < 100; j ++) dataTrace[i]->append(40*j, QRandomGenerator::global()->bounded(8000) - 4000);
-    plot->addSeries(dataTrace[i]);
-  }
-
-  dataTrace[0]->setPen(QPen(Qt::red, 2));
-  dataTrace[1]->setPen(QPen(Qt::blue, 2));
-  dataTrace[2]->setPen(QPen(Qt::darkYellow, 1));
-  dataTrace[3]->setPen(QPen(Qt::darkGreen, 1));
-  dataTrace[4]->setPen(QPen(Qt::darkMagenta, 1));
-
-  plot->setAnimationDuration(1); // msec
-  plot->setAnimationOptions(QChart::NoAnimation);
-  plot->createDefaultAxes(); /// this must be after addSeries();
-  /// this must be after createDefaultAxes();
-  QValueAxis * yaxis = qobject_cast<QValueAxis*> (plot->axes(Qt::Vertical).first());
-  QValueAxis * xaxis = qobject_cast<QValueAxis*> (plot->axes(Qt::Horizontal).first());
-  yaxis->setTickCount(7);
-  yaxis->setTickInterval((0x1FFF)/4);
-  yaxis->setRange(-(0x3FFF), 0x3FFF);
-  yaxis->setLabelFormat("%.0f");
-
-  xaxis->setRange(0, 4000);
-  xaxis->setTickCount(11);
-  xaxis->setLabelFormat("%.0f");
-  xaxis->setTitleText("Time [ns]");
-
-  NullThePointers();
-
-  //*================================== UI
-  int rowID = -1;
-
-  QWidget * layoutWidget = new QWidget(this);
-  setCentralWidget(layoutWidget);
-  QGridLayout * layout = new QGridLayout(layoutWidget);
-  layoutWidget->setLayout(layout);
-
-  //================ Board & Ch selection
-  rowID ++;
-  cbScopeDigi = new RComboBox(this);
-  cbScopeCh = new RComboBox(this);
-  layout->addWidget(cbScopeDigi, rowID, 0);
-  layout->addWidget(cbScopeCh, rowID, 1);
-
-  for(unsigned int i = 0; i < nDigi; i++){
-    cbScopeDigi->addItem("Digi-" +  QString::number(digi[i]->GetSerialNumber()), i);
-  }
+  soleRun = false;
+  soleDigi = 0;
+  soleCh = 0;
+  for( int i = 0; i < MaxNDigitizer; i++ ){ boardRuns[i] = false; startedAlone[i] = false; }
+  cbBaselineAvg = nullptr;
+  sbFixedBaseline = nullptr;
+  cbChargeSens = nullptr;
+  haveLastTrace = false;
+  refreshPaused = false;
+  singleArmed = false;
+  dataYMin = 0; dataYMax = 0x3FFF; dataXMax = 1000;
+  persistNext = 0;
 
   ID = 0;
-  cbScopeDigi->setCurrentIndex(0);
-  for( int i = 0; i < digi[0]->GetNumInputCh(); i++) cbScopeCh->addItem("Ch-" + QString::number(i));
   tick2ns = digi[ID]->GetTick2ns();
-  factor = digi[ID]->IsDualTrace_PHA() ? 2 : 1;
+
+  //*================================== plot
+  plot = new RChart();
+  plot->setAnimationOptions(QChart::NoAnimation);
+  xAxis = new QValueAxis();
+  yAxis = new QValueAxis();
+  xAxis->setTitleText("Time [ns]");
+  xAxis->setLabelFormat("%.0f");
+  xAxis->setTickCount(11);
+  yAxis->setLabelFormat("%.0f");
+  yAxis->setTickCount(9);
+  plot->addAxis(xAxis, Qt::AlignBottom);
+  plot->addAxis(yAxis, Qt::AlignLeft);
+
+  auto attach = [&](QAbstractSeries * s, bool inLegend){
+    plot->addSeries(s);
+    s->attachAxis(xAxis);
+    s->attachAxis(yAxis);
+    if( !inLegend ) for( QLegendMarker * m : plot->legend()->markers(s) ) m->setVisible(false);
+  };
+
+  // drawn first, so beneath the traces: the gates (in the colours of the digital traces that show them), then the persistence
+  QColor gateColor[2] = {QColor(Qt::darkYellow), QColor(Qt::darkGreen)};
+  gateColor[0].setAlpha(45);
+  gateColor[1].setAlpha(45);
+  for( int i = 0; i < 2; i++ ){
+    gateUpper[i] = new QLineSeries(plot);
+    gateLower[i] = new QLineSeries(plot);
+    gateArea[i] = new QAreaSeries(gateUpper[i], gateLower[i]);
+    gateArea[i]->setPen(Qt::NoPen);
+    gateArea[i]->setBrush(gateColor[i]);
+    attach(gateArea[i], false);
+  }
+  for( int i = 0; i < MaxPersistTrace; i++ ){
+    persistTrace[i] = new QLineSeries();
+    persistTrace[i]->setPen(QPen(QColor(220, 0, 0, 45), 1));
+    attach(persistTrace[i], false);
+    persistTrace[i]->setVisible(false);
+  }
+
+  const QPen pens[MaxNumberOfTrace] = {QPen(Qt::red, 2), QPen(Qt::blue, 2), QPen(Qt::darkYellow, 1), QPen(Qt::darkGreen, 1), QPen(Qt::darkMagenta, 1)};
+  for( int i = 0; i < MaxNumberOfTrace; i++ ){
+    dataTrace[i] = new QLineSeries();
+    dataTrace[i]->setPen(pens[i]);
+    dataTrace[i]->setName("Trace " + QString::number(i));
+    attach(dataTrace[i], true);
+  }
+  thresholdLine = new QLineSeries();
+  thresholdLine->setName("Threshold");
+  thresholdLine->setPen(QPen(Qt::black, 1, Qt::DashLine));
+  attach(thresholdLine, true);
+
+  //*================================== UI
+  QWidget * layoutWidget = new QWidget(this);
+  setCentralWidget(layoutWidget);
+  QVBoxLayout * layout = new QVBoxLayout(layoutWidget);
+
+  //================ run control, the plot's icon bar (CoMPASS: Single, Start/Stop, Unzoom, Snapshot)
+  QHBoxLayout * top = new QHBoxLayout();
+  layout->addLayout(top);
+
+  bnScopeStart = new QPushButton("Start", this);
+  bnScopeStart->setToolTip("Start the boards for the scope (the x725/x730 that are not S versions calibrate their ADCs first, as CoMPASS).");
+  top->addWidget(bnScopeStart);
+  connect(bnScopeStart, &QPushButton::clicked, this, [=](){ StartScope(); });
+
+  bnScopeStop = new QPushButton("Stop", this);
+  top->addWidget(bnScopeStop);
+  connect(bnScopeStop, &QPushButton::clicked, this, &Scope::StopScope);
+
+  chkSoleRun = new QCheckBox("Only this channel", this);
+  chkSoleRun->setToolTip("Run only the selected board, with only the selected channel enabled and self-triggering.");
+  top->addWidget(chkSoleRun);
+
+  top->addSpacing(16);
+
+  auto toolButton = [&](const QString & text, QStyle::StandardPixmap icon, const QString & tip){
+    QToolButton * b = new QToolButton(this);
+    b->setText(text);
+    b->setIcon(style()->standardIcon(icon));
+    b->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    b->setToolTip(tip);
+    top->addWidget(b);
+    return b;
+  };
+  bnSingle    = toolButton("Single", QStyle::SP_MediaSkipForward, "Show the next waveform, then hold it.");
+  bnRefresh   = toolButton("Stop", QStyle::SP_MediaPause, "Stop / start the refresh of the plot (the boards keep running).");
+  bnUnzoom    = toolButton("Unzoom", QStyle::SP_BrowserReload, "Back to the whole waveform (or double-click the plot). Zoom: drag up or down over the plot.");
+  bnSnapshot  = toolButton("Snapshot", QStyle::SP_DialogSaveButton, "Save the plot as a PNG picture.");
+  bnSaveTrace = toolButton("Save trace", QStyle::SP_FileIcon, "Save the waveform on the plot as a CSV table.");
+
+  connect(bnSingle, &QToolButton::clicked, this, [=](){ singleArmed = true; SetRefreshPaused(false); });
+  connect(bnRefresh, &QToolButton::clicked, this, [=](){ singleArmed = false; SetRefreshPaused(!refreshPaused); });
+  connect(bnUnzoom, &QToolButton::clicked, this, [=](){ plot->zoomReset(); ApplyAutoRange(); });
+  connect(bnSnapshot, &QToolButton::clicked, this, &Scope::SaveSnapshot);
+  connect(bnSaveTrace, &QToolButton::clicked, this, &Scope::SaveTraceCSV);
+
+  top->addSpacing(16);
+
+  chkAutoTrigger = new QCheckBox("Auto trigger", this);
+  chkAutoTrigger->setToolTip("A software trigger to the selected channel every " + QString::number(AutoTriggerMiliSec) + " ms, in OR with its self-trigger,\n"
+                             "as CoMPASS's Auto trigger (an oscilloscope's force trigger): shows the baseline with no pulse over the threshold.");
+  top->addWidget(chkAutoTrigger);
+  connect(chkAutoTrigger, &QCheckBox::toggled, this, [=](){ UpdateAutoTrigger(); });
+
+  top->addWidget(new QLabel("Persistence", this));
+  cbPersist = new RComboBox(this);
+  cbPersist->addItem("Off", 0);
+  cbPersist->addItem("10", 10);
+  cbPersist->addItem("20", 20);
+  cbPersist->addItem(QString::number(MaxPersistTrace), MaxPersistTrace);
+  cbPersist->setToolTip("Also draw this many earlier waveforms of analog trace 1, faded.");
+  top->addWidget(cbPersist);
+  connect(cbPersist, &RComboBox::currentIndexChanged, this, [=](){ ClearPersistence(); });
+
+  top->addWidget(new QLabel("Y", this));
+  cbYUnit = new RComboBox(this);
+  cbYUnit->addItem("lsb", 0);
+  cbYUnit->addItem("mV", 1);
+  cbYUnit->setToolTip("mV: lsb x input range / 2^14. The input scale is not calibrated (CoMPASS manual): for relative amplitudes only.");
+  top->addWidget(cbYUnit);
+  connect(cbYUnit, &RComboBox::currentIndexChanged, this, [=](){ ClearPersistence(); if( haveLastTrace ) DrawTrace(lastTrace, false); });
+
+  chkAutoY = new QCheckBox("Auto Y", this);
+  chkAutoY->setChecked(false);   // the whole ADC range, steady; zoom with the mouse (an axis fitted to each waveform jumps)
+  chkAutoY->setToolTip("Fit the y axis to each waveform; off: the whole ADC range (zoom by dragging up or down over the plot).");
+  top->addWidget(chkAutoY);
+  connect(chkAutoY, &QCheckBox::toggled, this, [=](){ if( haveLastTrace ) DrawTrace(lastTrace, false); else ApplyAutoRange(); });
+
+  top->addStretch(1);
+
+  top->addWidget(new QLabel("Run", this));
+  runStatus = new QPushButton("", this);
+  runStatus->setEnabled(false);
+  runStatus->setFixedSize(QSize(20,20));
+  top->addWidget(runStatus);
+
+  top->addWidget(new QLabel("Trigger rate [Hz]", this));
+  leTriggerRate = new QLineEdit(this);
+  leTriggerRate->setAlignment(Qt::AlignRight);
+  leTriggerRate->setReadOnly(true);
+  leTriggerRate->setMaximumWidth(110);
+  top->addWidget(leTriggerRate);
+
+  //================ the source and the traces (CoMPASS: above the waveform plot)
+  QHBoxLayout * src = new QHBoxLayout();
+  layout->addLayout(src);
+
+  src->addWidget(new QLabel("Source", this));
+  cbScopeDigi = new RComboBox(this);
+  for(unsigned int i = 0; i < nDigi; i++) cbScopeDigi->addItem("Digi-" + QString::number(digi[i]->GetSerialNumber()), i);
+  src->addWidget(cbScopeDigi);
+  cbScopeCh = new RComboBox(this);
+  for( int i = 0; i < digi[ID]->GetNumInputCh(); i++) cbScopeCh->addItem("Ch-" + QString::number(i));
+  src->addWidget(cbScopeCh);
+  src->addSpacing(16);
+
+  auto traceBox = [&](const QString & label, RComboBox * & cb){
+    src->addWidget(new QLabel(label, this));
+    cb = new RComboBox(this);
+    cb->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    src->addWidget(cb);
+    connect(cb, &RComboBox::currentIndexChanged, this, [=](){ if( enableSignalSlot ) WriteTraceSelection(cb); });
+  };
+  traceBox("Analog trace 1", cbAnaTrace1);
+  traceBox("Analog trace 2", cbAnaTrace2);
+  traceBox("Digital trace 1", cbDigiTrace1);
+  traceBox("Digital trace 2", cbDigiTrace2);
+  src->addStretch(1);
 
   connect(cbScopeDigi, &RComboBox::currentIndexChanged, this, [=](int index){
     if( !enableSignalSlot ) return;
-
-    bool saveACQStartStatus = isACQStarted;
-    if( isACQStarted) StopScope();
-    ClearTraces();
+    const bool restart = isACQStarted && soleRun;   // only that board and channel run: start again with the new one
+    if( restart ) StopScope();
+    if( isACQStarted ) readDataThread[ID]->SetAutoTrigger(-1);
 
     ID = index;
     tick2ns = digi[ID]->GetTick2ns();
-    factor = digi[ID]->IsDualTrace_PHA() ? 2 : 1;
 
     enableSignalSlot = false;
-    //---setup cbScopeCh
     cbScopeCh->clear();
     for( int i = 0; i < digi[ID]->GetNumInputCh(); i++) cbScopeCh->addItem("Ch-" + QString::number(i));
+    enableSignalSlot = true;
 
-    //---Setup SettingGroup
-    CleanUpSettingsGroupBox();
-    if( digi[ID]->GetDPPType() == V1730_DPP_PHA_CODE ) SetUpPanel_PHA();
-    if( digi[ID]->GetDPPType() == V1730_DPP_PSD_CODE ) SetUpPanel_PSD();
-    if( digi[ID]->GetDPPType() == V1740_DPP_QDC_CODE ) SetUpPanel_QDC();
-
-    if( digi[ID]->GetDPPType() == V1730_DPP_PHA_CODE ) {
-      QValueAxis * yaxis = qobject_cast<QValueAxis*> (plot->axes(Qt::Vertical).first());
-      yaxis->setRange(-(0x1FFF), 0x1FFF);
-    }
-    if( digi[ID]->GetDPPType() == V1730_DPP_PSD_CODE ) {
-      QValueAxis * yaxis = qobject_cast<QValueAxis*> (plot->axes(Qt::Vertical).first());
-      yaxis->setRange(0, 0x3FFF);
-    }
-    if( digi[ID]->GetDPPType() == V1740_DPP_QDC_CODE ) {
-      QValueAxis * yaxis = qobject_cast<QValueAxis*> (plot->axes(Qt::Vertical).first());
-      yaxis->setRange(0, 0xFFF);
-    }
-
-    ReadSettingsFromBoard();
-
-    if( saveACQStartStatus )StartScope();
-
+    ClearTraces();
+    ClearPersistence();
+    BuildPanels();
+    if( !IsRunning(ID) ) ReadSettingsFromBoard();
+    UpdateAutoTrigger();
+    if( restart ) StartScope();
   });
-
-  if( digi[ID]->GetDPPType() == V1730_DPP_PHA_CODE ) {
-    QValueAxis * yaxis = qobject_cast<QValueAxis*> (plot->axes(Qt::Vertical).first());
-    yaxis->setRange(-(0x1FFF), 0x1FFF);
-  }
-  if( digi[ID]->GetDPPType() == V1730_DPP_PSD_CODE ) {
-    QValueAxis * yaxis = qobject_cast<QValueAxis*> (plot->axes(Qt::Vertical).first());
-    yaxis->setRange(0, 0x3FFF);
-  }
-  if( digi[ID]->GetDPPType() == V1740_DPP_QDC_CODE ) {
-    QValueAxis * yaxis = qobject_cast<QValueAxis*> (plot->axes(Qt::Vertical).first());
-    yaxis->setRange(0, 0xFFF);
-  }
-
 
   connect(cbScopeCh, &RComboBox::currentIndexChanged, this, [=](){
     if( !enableSignalSlot ) return;
-
-    bool saveACQStartStatus = isACQStarted;
-    if( isACQStarted) StopScope();
+    const bool restart = isACQStarted && soleRun;
+    if( restart ) StopScope();
     ClearTraces();
-
-    ReadSettingsFromBoard();
-
-    if( saveACQStartStatus )StartScope();
-
+    ClearPersistence();
+    if( !IsRunning(ID) ) ReadSettingsFromBoard(); else UpdatePanelFromMomeory();
+    UpdateAutoTrigger();
+    if( restart ) StartScope();
   });
 
-  bnReadSettingsFromBoard = new QPushButton("Refresh Settings", this);
-  layout->addWidget(bnReadSettingsFromBoard, rowID, 2);
+  //================ the plot, and the channel's parameters in CoMPASS's tabs beside it
+  QHBoxLayout * mid = new QHBoxLayout();
+  layout->addLayout(mid, 1);
+
+  plotView = new RChartView(plot, this);
+  plotView->setRubberBand(QChartView::VerticalRubberBand); // a drag zooms the y axis only; the time axis stays whole
+  plotView->viewport()->installEventFilter(this);           // double-click: unzoom
+  mid->addWidget(plotView, 1);
+
+  QVBoxLayout * side = new QVBoxLayout();
+  mid->addLayout(side);
+
+  tabs = new QTabWidget(this);
+  tabs->setMinimumWidth(340);
+  side->addWidget(tabs);
+
+  QLabel * lbApply = new QLabel("Enter or a new choice applies the value to the board, also while the scope runs (the board restarts).", this);
+  lbApply->setWordWrap(true);
+  lbApply->setMaximumWidth(340);
+  side->addWidget(lbApply);
+
+  bnReadSettingsFromBoard = new QPushButton("Read settings from board", this);
+  side->addWidget(bnReadSettingsFromBoard);
   connect(bnReadSettingsFromBoard, &QPushButton::clicked, this, &Scope::ReadSettingsFromBoard);
 
+  QPushButton * bnClearBuffer = new QPushButton("Clear board buffer", this);
+  side->addWidget(bnClearBuffer);
+  connect(bnClearBuffer, &QPushButton::clicked, this, [=](){ digi[ID]->WriteRegister(DPP::SoftwareClear_W, 1);});
+
   QPushButton * bnClearMemory = new QPushButton("Clear Memory", this);
-  layout->addWidget(bnClearMemory, rowID, 3);
+  side->addWidget(bnClearMemory);
   connect(bnClearMemory, &QPushButton::clicked, this, [=](){
     // not while the scope runs: its readout thread copies from this memory (the board mutexes are per
     // file, so the lock below does not keep it out)
@@ -209,92 +323,25 @@ Scope::Scope(Digitizer ** digi, unsigned int nDigi, ReadDataThread ** readDataTh
     digiMTX[ID].unlock();
   });
 
-  QPushButton * bnClearBuffer = new QPushButton("Clear Buffer/FIFO", this);
-  layout->addWidget(bnClearBuffer, rowID, 4);
-  connect(bnClearBuffer, &QPushButton::clicked, this, [=](){ digi[ID]->WriteRegister(DPP::SoftwareClear_W, 1);});
-
-  QLabel * lbRun = new QLabel("Run Status : ", this);
-  lbRun->setAlignment(Qt::AlignCenter | Qt::AlignRight);
-  layout->addWidget(lbRun, rowID, 5);
-
-  runStatus = new QPushButton("", this);
-  runStatus->setEnabled(false);
-  runStatus->setFixedSize(QSize(20,20));
-  layout->addWidget(runStatus, rowID, 6);
-
-  //================ Trace settings
-  rowID ++;
-  {
-    settingGroup = new QGroupBox("Trace Settings",this);
-    layout->addWidget(settingGroup, rowID, 0, 1, 7);
-
-    settingLayout = new QGridLayout(settingGroup);
-    settingLayout->setSpacing(0);
-
-    if( digi[ID]->GetDPPType() == V1730_DPP_PHA_CODE ) SetUpPanel_PHA();
-    if( digi[ID]->GetDPPType() == V1730_DPP_PSD_CODE ) SetUpPanel_PSD();
-    if( digi[ID]->GetDPPType() == V1740_DPP_QDC_CODE ) SetUpPanel_QDC();
-
-  }
-  //================ Plot view
-  rowID ++;
-  plotView = new RChartView(plot, this);
-  layout->addWidget(plotView, rowID, 0, 1, 7);
-
-  
-  //================ Key binding
-  rowID ++;
-  QLabel * lbhints = new QLabel("Type 'r' to restore view, '+/-' Zoom in/out, arrow key to pan.", this);
-  layout->addWidget(lbhints, rowID, 0, 1, 4);
-  
-  QLabel * lbinfo = new QLabel("Trace updates every " + QString::number(ScopeUpdateMiliSec / 1000.) + " sec.", this);
-  lbinfo->setAlignment(Qt::AlignRight);
-  layout->addWidget(lbinfo, rowID, 6);
-
-  rowID ++;
-  //TODO =========== Trace step
-  QLabel * lbinfo2 = new QLabel("Maximum time range is " + QString::number(MaxDisplayTraceTimeLength) + " ns due to processing speed.", this);
-  layout->addWidget(lbinfo2, rowID, 0, 1, 5);
-
-  //================ close button
-  rowID ++;
-  bnScopeStart = new QPushButton("Start", this);
-  layout->addWidget(bnScopeStart, rowID, 0);
-  connect(bnScopeStart, &QPushButton::clicked, this, [=](){this->StartScope();});
-
-  chkSoleRun = new QCheckBox("Only this channel", this);
-  layout->addWidget(chkSoleRun, rowID, 1);
-
-  bnScopeStop = new QPushButton("Stop", this);
-  layout->addWidget(bnScopeStop, rowID, 2);
-  connect(bnScopeStop, &QPushButton::clicked, this, &Scope::StopScope);
-
-  QLabel * lbTriggerRate = new QLabel("Trigger Rate [Hz] : ", this);
-  lbTriggerRate->setAlignment(Qt::AlignCenter | Qt::AlignRight);
-  layout->addWidget(lbTriggerRate, rowID, 3);
-
-  leTriggerRate = new QLineEdit(this);
-  leTriggerRate->setAlignment(Qt::AlignRight);
-  leTriggerRate->setReadOnly(true);
-  layout->addWidget(leTriggerRate, rowID, 4);
+  side->addStretch(1);
 
   QPushButton * bnClose = new QPushButton("Close", this);
-  layout->addWidget(bnClose, rowID, 6);
+  side->addWidget(bnClose);
   connect(bnClose, &QPushButton::clicked, this, &Scope::close);
 
-  layout->setColumnStretch(0, 1);
-  layout->setColumnStretch(1, 1);
-  layout->setColumnStretch(2, 1);
-  layout->setColumnStretch(3, 1);
-  layout->setColumnStretch(4, 1);
-  layout->setColumnStretch(5, 1);
+  //================ hints
+  QLabel * lbhints = new QLabel("Drag up or down over the plot to zoom the y axis; double-click, Unzoom or right-click to go back; the wheel zooms both axes; 'r' restores, '+/-' zoom, arrows pan.  "
+                                "Up to " + QString::number(MaxDisplayTraceTimeLength / 1000.) + " µs drawn, updates every " + QString::number(ScopeUpdateMiliSec / 1000.) + " s.", this);
+  layout->addWidget(lbhints);
 
   bnScopeStart->setEnabled(true);
   bnScopeStart->setStyleSheet("background-color: green;");
   bnScopeStop->setEnabled(false);
   bnScopeStop->setStyleSheet("");
 
-  UpdatePanelFromMomeory();
+  enableSignalSlot = true;
+  BuildPanels();
+  ApplyAutoRange();
 
   // UpdateScope() touches widgets and chart series, so it must run in the GUI
   // thread. It used to run in a worker thread (ScopeWorker), which is undefined
@@ -303,1130 +350,917 @@ Scope::Scope(Digitizer ** digi, unsigned int nDigi, ReadDataThread ** readDataTh
   scopeTimer = new QTimer(this);
   connect(scopeTimer, &QTimer::timeout, this, &Scope::UpdateScope);
 
-  enableSignalSlot = true;
-
 }
 
 Scope::~Scope(){
   DebugPrint("%s", "Scope");
-
   scopeTimer->stop();
-
-  for( int i = 0; i < MaxNumberOfTrace; i++) delete dataTrace[i];
-  delete plot;
+  // the chart, its series and axes belong to the chart view, a child of this window
 }
 
-void Scope::NullThePointers(){
-  DebugPrint("%s", "Scope");
-  sbReordLength = nullptr;
-  sbPreTrigger = nullptr;
-  sbDCOffset = nullptr;
-  cbDynamicRange = nullptr;
-  cbPolarity = nullptr;
+//*=======================================================
+//*======================================================= running the boards
 
-  /// PHA
-  sbInputRiseTime = nullptr;
-  sbTriggerHoldOff = nullptr;
-  sbThreshold = nullptr;
-  cbSmoothingFactor = nullptr;
+bool Scope::StartBoard(int i, bool alone){
+  Digitizer * d = digi[i];
+  const int dpp = d->GetDPPType();
 
-  sbTrapRiseTime = nullptr;
-  sbTrapFlatTop = nullptr;
-  sbDecayTime = nullptr;
-  sbPeakingTime = nullptr;
-  sbPeakHoldOff = nullptr;
-  cbPeakAvg = nullptr;
-  cbBaselineAvg = nullptr;
+  // The scope's settings go to the board only (written with isSave2MemAndFile = false): the settings
+  // memory and file keep the saved ones, and StopBoard writes those back.
+  d->WriteRegister(DPP::BoardConfiguration, SetField(d->GetSettingFromMemory(DPP::BoardConfiguration), DPP::Bit_BoardConfig::RecordTrace, 1), -1, false);
 
-  cbAnaProbe1 = nullptr;
-  cbAnaProbe2 = nullptr;
-  cbDigiProbe1 = nullptr;
-  cbDigiProbe2 = nullptr;
+  if( alone ){
+    // started without the others: it must not wait for a start from another board (S-IN or TRG-IN start)
+    uint32_t acq = d->GetSettingFromMemory(DPP::AcquisitionControl);
+    d->WriteRegister(DPP::AcquisitionControl, SetField(acq, DPP::Bit_AcquistionControl::StartStopMode, 0), -1, false);
+  }
 
-  /// PSD
-  sbShortGate = nullptr;
-  sbLongGate = nullptr;
-  sbGateOffset = nullptr;
+  if( soleRun && i == soleDigi ){
+    if( dpp == DPPTypeCode::DPP_PHA_CODE || dpp == DPPTypeCode::DPP_PSD_CODE ){
+      const bool pha = dpp == DPPTypeCode::DPP_PHA_CODE;
+      // self-trigger on, no coincidence, no couple trigger logic; only this channel enabled
+      uint32_t alg = d->GetSettingFromMemory(DPP::DPPAlgorithmControl, soleCh);
+      alg = ClearField(alg, pha ? DPP::Bit_DPPAlgorithmControl_PHA::TriggerMode : DPP::Bit_DPPAlgorithmControl_PSD::TriggerMode);
+      alg = ClearField(alg, pha ? DPP::Bit_DPPAlgorithmControl_PHA::DisableSelfTrigger : DPP::Bit_DPPAlgorithmControl_PSD::DisableSelfTrigger);
+      const Reg alg2Reg = pha ? DPP::PHA::DPPAlgorithmControl2_G : DPP::PSD::DPPAlgorithmControl2_G;
+      uint32_t alg2 = d->GetSettingFromMemory(alg2Reg, soleCh);
+      alg2 = ClearField(alg2, DPP::PSD::Bit_DPPAlgorithmControl2::LocalShapeTriggerMode);  // same bits in PHA
+      alg2 = ClearField(alg2, DPP::PSD::Bit_DPPAlgorithmControl2::LocalTrigValidMode);
+      d->WriteRegister(DPP::DPPAlgorithmControl, alg, soleCh, false);
+      d->WriteRegister(alg2Reg, alg2, soleCh, false);
+      d->WriteRegister(DPP::RegChannelEnableMask, 1u << soleCh, -1, false);
+    }
+    if( dpp == DPPTypeCode::DPP_QDC_CODE ){
+      const int grp = soleCh / 8;
+      uint32_t alg = d->GetSettingFromMemory(DPP::QDC::DPPAlgorithmControl, grp);
+      d->WriteRegister(DPP::QDC::DPPAlgorithmControl, ClearField(alg, DPP::QDC::Bit_DPPAlgorithmControl::TriggerMode), grp, false); // self-trigger
+      d->WriteRegister(DPP::QDC::GroupEnableMask, 1u << grp, -1, false);
+      uint32_t sub = 1u << (soleCh % 8);
+      if( grp == 0 ) sub |= 0x1; // must include the first subchannel
+      d->WriteRegister(DPP::QDC::SubChannelMask, sub, grp, false);
+    }
+  }
 
+  d->WriteRegister(DPP::SoftwareClear_W, 1);
+  readDataThread[i]->SetScopeMode(true);
+  readDataThread[i]->SetSaveData(false);
+  readDataThread[i]->SetAutoTrigger(-1);
+
+  boardRuns[i] = true;
+  startedAlone[i] = alone;
+  if( !d->StartACQ() ){
+    SendLogMsg("<font style=\"color: red;\">Digi-" + QString::number(d->GetSerialNumber()) + ": the scope could not start it.</font>");
+    StopBoard(i);
+    return false;
+  }
+  readDataThread[i]->Start();
+  return true;
+}
+
+void Scope::StopBoard(int i){
+  Digitizer * d = digi[i];
+  const int dpp = d->GetDPPType();
+
+  readDataThread[i]->SetAutoTrigger(-1);
+  if( readDataThread[i]->isRunning() ){
+    readDataThread[i]->Stop();
+    readDataThread[i]->quit();
+    readDataThread[i]->wait();
+  }
+  readDataThread[i]->SetScopeMode(false);
+
+  digiMTX[i].lock();
+  d->StopACQ();
+  digiMTX[i].unlock();
+
+  // the saved settings back on the board
+  d->WriteRegister(DPP::BoardConfiguration, d->GetSettingFromMemory(DPP::BoardConfiguration), -1, false);
+  if( startedAlone[i] ) d->WriteRegister(DPP::AcquisitionControl, d->GetSettingFromMemory(DPP::AcquisitionControl), -1, false);
+
+  if( soleRun && i == soleDigi ){
+    if( dpp == DPPTypeCode::DPP_PHA_CODE || dpp == DPPTypeCode::DPP_PSD_CODE ){
+      const Reg alg2Reg = dpp == DPPTypeCode::DPP_PHA_CODE ? DPP::PHA::DPPAlgorithmControl2_G : DPP::PSD::DPPAlgorithmControl2_G;
+      d->WriteRegister(DPP::DPPAlgorithmControl, d->GetSettingFromMemory(DPP::DPPAlgorithmControl, soleCh), soleCh, false);
+      d->WriteRegister(alg2Reg, d->GetSettingFromMemory(alg2Reg, soleCh), soleCh, false);
+      d->WriteRegister(DPP::RegChannelEnableMask, d->GetSettingFromMemory(DPP::RegChannelEnableMask), -1, false);
+    }
+    if( dpp == DPPTypeCode::DPP_QDC_CODE ){
+      const int grp = soleCh / 8;
+      d->WriteRegister(DPP::QDC::DPPAlgorithmControl, d->GetSettingFromMemory(DPP::QDC::DPPAlgorithmControl, grp), grp, false);
+      d->WriteRegister(DPP::QDC::GroupEnableMask, d->GetSettingFromMemory(DPP::QDC::GroupEnableMask), -1, false);
+      d->WriteRegister(DPP::QDC::SubChannelMask, d->GetSettingFromMemory(DPP::QDC::SubChannelMask, grp), grp, false);
+    }
+  }
+
+  boardRuns[i] = false;
+  startedAlone[i] = false;
+}
+
+void Scope::ApplyChange(const std::function<void()> & write){
+  // the board takes no settings while it runs (Digitizer::WriteRegister refuses them): stop it, write, start it again
+  const bool restart = IsRunning(ID);
+  if( restart ) StopBoard(ID);
+  write();
+  if( restart ){
+    StartBoard(ID, true);
+    UpdateAutoTrigger();
+    ClearPersistence();          // those were taken with the old settings
+    lastTrace.absIndex = -1;     // the restart begins the board's memory again
+  }
+}
+
+void Scope::UpdateAutoTrigger(){
+  const int ch = chkAutoTrigger->isChecked() ? cbScopeCh->currentIndex() : -1;
+  for( unsigned int i = 0; i < nDigi; i++ ) if( IsRunning(i) ) readDataThread[i]->SetAutoTrigger(i == ID ? ch : -1);
 }
 
 //*=======================================================
 //*=======================================================
 void Scope::StartScope(){
   DebugPrint("%s", "Scope");
-  if( !digi ) return;
+  if( !digi || isACQStarted ) return;
 
-  //TODO set other channel to be no trace;
-  emit UpdateOtherPanels();
+  soleRun = chkSoleRun->isChecked();
+  soleDigi = ID;
+  soleCh = cbScopeCh->currentIndex();
 
-  if( chkSoleRun->isChecked() ){
-
-    int ID = cbScopeDigi->currentIndex();
-    int ch = cbScopeCh->currentIndex();
-    oldDigi = ID;
-    oldCh = ch;
-
-    //save present settings, channleMap, trigger condition
-    traceOn[ID] = digi[ID]->IsRecordTrace();
-    digi[ID]->SetBits(DPP::BoardConfiguration, DPP::Bit_BoardConfig::RecordTrace, 1, -1);
-
-    if( digi[ID]->GetDPPType() == DPPTypeCode::DPP_PHA_CODE ){
-      chMask = digi[ID]->GetSettingFromMemory(DPP::RegChannelEnableMask);
-      dppAlg  = digi[ID]->GetSettingFromMemory(DPP::DPPAlgorithmControl, ch);
-      dppAlg2 = digi[ID]->GetSettingFromMemory(DPP::PHA::DPPAlgorithmControl2_G, ch);
-
-      digi[ID]->SetBits(DPP::DPPAlgorithmControl, DPP::Bit_DPPAlgorithmControl_PHA::TriggerMode, 0, ch);
-      digi[ID]->SetBits(DPP::DPPAlgorithmControl, DPP::Bit_DPPAlgorithmControl_PHA::DisableSelfTrigger, 0, ch);
-
-      digi[ID]->SetBits(DPP::PHA::DPPAlgorithmControl2_G, DPP::PHA::Bit_DPPAlgorithmControl2::LocalShapeTriggerMode, 0, ch);
-      digi[ID]->SetBits(DPP::PHA::DPPAlgorithmControl2_G, DPP::PHA::Bit_DPPAlgorithmControl2::LocalTrigValidMode, 0, ch);
-  
-      digi[ID]->WriteRegister(DPP::RegChannelEnableMask, (1 << ch));
-
-    }
-
-    if( digi[ID]->GetDPPType() == DPPTypeCode::DPP_PSD_CODE ){
-      chMask = digi[ID]->GetSettingFromMemory(DPP::RegChannelEnableMask);
-      dppAlg  = digi[ID]->GetSettingFromMemory(DPP::DPPAlgorithmControl, ch);
-      dppAlg2 = digi[ID]->GetSettingFromMemory(DPP::PSD::DPPAlgorithmControl2_G, ch);
-      
-      digi[ID]->SetBits(DPP::DPPAlgorithmControl, DPP::Bit_DPPAlgorithmControl_PHA::TriggerMode, 0, ch);
-      digi[ID]->SetBits(DPP::DPPAlgorithmControl, DPP::Bit_DPPAlgorithmControl_PHA::DisableSelfTrigger, 0, ch);
-
-      digi[ID]->SetBits(DPP::PSD::DPPAlgorithmControl2_G, DPP::PSD::Bit_DPPAlgorithmControl2::LocalShapeTriggerMode, 0, ch);
-      digi[ID]->SetBits(DPP::PSD::DPPAlgorithmControl2_G, DPP::PSD::Bit_DPPAlgorithmControl2::LocalTrigValidMode, 0, ch);
-  
-      digi[ID]->WriteRegister(DPP::RegChannelEnableMask, (1 << ch));
-    }
-
-    if( digi[ID]->GetDPPType() == DPPTypeCode::DPP_QDC_CODE ){
-      chMask = digi[ID]->GetSettingFromMemory(DPP::QDC::GroupEnableMask);
-      subChMask = digi[ID]->GetSettingFromMemory(DPP::QDC::SubChannelMask);
-      dppAlg  = digi[ID]->GetSettingFromMemory(DPP::QDC::DPPAlgorithmControl, ch);
-      digi[ID]->SetBits(DPP::QDC::DPPAlgorithmControl, DPP::QDC::Bit_DPPAlgorithmControl::TriggerMode, 0, ch); //set self-triiger
-  
-      digi[ID]->WriteRegister(DPP::QDC::GroupEnableMask, (1 << (ch/8)));
-
-      uint32_t haha = (1 << (ch%8));
-      if( ch/8 == 0 ) haha |= 0x1; //must include the first subchannel
-
-      digi[ID]->WriteRegister(DPP::QDC::SubChannelMask, haha); 
-    }
-
-
-    //=========== start 
-    digi[ID]->WriteRegister(DPP::SoftwareClear_W, 1);
-
-    readDataThread[ID]->SetScopeMode(true);
-    readDataThread[ID]->SetSaveData(false);
-
-    digi[ID]->StartACQ();
-    readDataThread[ID]->Start();
-
+  std::vector<int> boards;
+  if( soleRun ){
+    boards.push_back(ID);
   }else{
-
-    for( int iDigi = (int)nDigi-1 ; iDigi >= 0; iDigi --){
-
-      traceOn[iDigi] = digi[iDigi]->IsRecordTrace(); //remember setting
-      SendLogMsg("Digi-" + QString::number(digi[iDigi]->GetSerialNumber()) + " is starting ACQ." );
-      digi[iDigi]->WriteRegister(DPP::SoftwareClear_W, 1);
-      digi[iDigi]->SetBits(DPP::BoardConfiguration, DPP::Bit_BoardConfig::RecordTrace, 1, -1);
-
-      //AggPerRead[iDigi] = digi[iDigi]->GetSettingFromMemory(DPP::MaxAggregatePerBlockTransfer);
-      //SendLogMsg("Set Agg/Read to 1 for scope, it was " + QString::number(AggPerRead[iDigi]) + ".");
-      //digi[iDigi]->WriteRegister(DPP::MaxAggregatePerBlockTransfer, 1);
-
-      readDataThread[iDigi]->SetScopeMode(true);
-      readDataThread[iDigi]->SetSaveData(false);
-
-      digi[iDigi]->StartACQ();
-
-  //    printf("----- readDataThread running ? %d.\n", readDataThread[iDigi]->isRunning());
-      // if( readDataThread[iDigi]->isRunning() ){
-      //   readDataThread[iDigi]->quit();
-      //   readDataThread[iDigi]->wait();
-      // }
-      readDataThread[iDigi]->Start();
-  //    printf("----- readDataThread running ? %d.\n", readDataThread[iDigi]->isRunning());
-    }
-
+    for( int i = (int)nDigi - 1; i >= 0; i-- ) if( !digi[i]->IsBoardDisabled() ) boards.push_back(i); // the first (the master) last, as a run
   }
 
+  // the x725/x730 that are not S versions: calibrate the ADCs, as CoMPASS at every start
+  for( int i : boards ){
+    if( !digi[i]->NeedsADCCalibration() ) continue;
+    std::string why;
+    int ms = digi[i]->CalibrateADC(why);
+    QString name = "Digi-" + QString::number(digi[i]->GetSerialNumber()) + " (" + QString::fromStdString(digi[i]->GetModelName()) + ")";
+    if( ms >= 0 ) SendLogMsg(name + ": ADCs calibrated in " + QString::number(ms) + " ms.");
+    else SendLogMsg("<font style=\"color: orange;\">" + name + ": ADC calibration failed (" + QString::fromStdString(why) + ").</font>");
+  }
+
+  isACQStarted = true;
+  int nStarted = 0;
+  for( int i : boards ){
+    SendLogMsg("Digi-" + QString::number(digi[i]->GetSerialNumber()) + " is starting ACQ for the scope." );
+    if( StartBoard(i, soleRun) ) nStarted ++;
+  }
+  if( nStarted == 0 ){
+    isACQStarted = false;
+    SendLogMsg("<font style=\"color: red;\">The scope started no board.</font>");
+    return;
+  }
+  UpdateAutoTrigger();
+
+  lastTrace.absIndex = -1;
   scopeTimer->start(ScopeUpdateMiliSec);
 
   bnScopeStart->setEnabled(false);
   bnScopeStart->setStyleSheet("");
   bnScopeStop->setEnabled(true);
   bnScopeStop->setStyleSheet("background-color: red;");
-
-  chkSoleRun->setEnabled(false);
-
   EnableControl(false);
 
   emit TellACQOnOff(true);
-
-  isACQStarted = true;
-
+  emit UpdateOtherPanels();
 }
 
 void Scope::StopScope(){
   DebugPrint("%s", "Scope");
   if( !digi ) return;
 
-  // printf("------ Scope::%s \n", __func__);
   scopeTimer->stop();
-  // scalarTimer->stop();
+  for( unsigned int i = 0; i < nDigi; i++ ) if( boardRuns[i] ) StopBoard(i);
 
-  if( chkSoleRun->isChecked() ){
-
-    //int ID = cbScopeDigi->currentIndex();
-    int ID = oldDigi;
-
-    if( readDataThread[ID]->isRunning() ){
-      readDataThread[ID]->Stop();
-      readDataThread[ID]->quit();
-      readDataThread[ID]->wait();
-      readDataThread[ID]->SetScopeMode(false);
-    }
-
-    digiMTX[ID].lock();
-    digi[ID]->StopACQ();
-    digiMTX[ID].unlock();
-
-    //restore setting
-    digi[ID]->SetBits(DPP::BoardConfiguration, DPP::Bit_BoardConfig::RecordTrace, traceOn[ID], -1);
-
-    if( digi[ID]->GetDPPType() == DPPTypeCode::DPP_PHA_CODE ){
-      digi[ID]->WriteRegister(DPP::DPPAlgorithmControl, dppAlg, oldCh);
-      digi[ID]->WriteRegister(DPP::PHA::DPPAlgorithmControl2_G, dppAlg2, oldCh);
-      digi[ID]->WriteRegister(DPP::RegChannelEnableMask, chMask);
-    }
-
-    if( digi[ID]->GetDPPType() == DPPTypeCode::DPP_PSD_CODE ){
-      digi[ID]->WriteRegister(DPP::DPPAlgorithmControl, dppAlg, oldCh);
-      digi[ID]->WriteRegister(DPP::PSD::DPPAlgorithmControl2_G, dppAlg2, oldCh);
-      digi[ID]->WriteRegister(DPP::RegChannelEnableMask, chMask);
-    }
-
-    if( digi[ID]->GetDPPType() == DPPTypeCode::DPP_QDC_CODE ){
-      digi[ID]->WriteRegister(DPP::QDC::DPPAlgorithmControl, dppAlg, oldCh);
-      digi[ID]->WriteRegister(DPP::QDC::GroupEnableMask, chMask);
-      digi[ID]->WriteRegister(DPP::QDC::SubChannelMask, subChMask);
-    }
-
-  }else{
-
-    for( unsigned int iDigi = 0; iDigi < nDigi; iDigi ++){
-
-      if( readDataThread[iDigi]->isRunning() ){
-        readDataThread[iDigi]->Stop();
-        readDataThread[iDigi]->quit();
-        readDataThread[iDigi]->wait();
-        readDataThread[iDigi]->SetScopeMode(false);
-      }
-
-      digiMTX[iDigi].lock();
-      digi[iDigi]->StopACQ();
-      //digi[iDigi]->GetData()->PrintAllData();
-      digiMTX[iDigi].unlock();
-
-      digi[iDigi]->SetBits(DPP::BoardConfiguration, DPP::Bit_BoardConfig::RecordTrace, traceOn[iDigi], -1);
-      //digi[iDigi]->WriteRegister(DPP::MaxAggregatePerBlockTransfer, AggPerRead[iDigi]);
-
-    }
-
-  }
-
-  runStatus->setStyleSheet(""); // cheated, don;t know why digi[iDigi]->GetACQStatusFromMemory(), sometimes return ACQ one.
-
-  emit UpdateOtherPanels();
-
+  runStatus->setStyleSheet("");
   bnScopeStart->setEnabled(true);
   bnScopeStart->setStyleSheet("background-color: green;");
   bnScopeStop->setEnabled(false);
   bnScopeStop->setStyleSheet("");
-
-  chkSoleRun->setEnabled(true);
-  runStatus->setStyleSheet("");
-
   EnableControl(true);
 
-  emit TellACQOnOff(false);
-
   isACQStarted = false;
-
-  // printf("----- end of %s\n", __func__);
-
+  emit TellACQOnOff(false);
+  emit UpdateOtherPanels();
 }
+
+void Scope::EnableControl(bool enable){
+  // the parameters stay: they are applied while running too
+  chkSoleRun->setEnabled(enable);
+  bnReadSettingsFromBoard->setEnabled(enable);
+}
+
+//*=======================================================
+//*======================================================= the plot
 
 void Scope::UpdateScope(){
   DebugPrint("%s", "Scope");
   if( !digi ) return;
 
-  int ch = cbScopeCh->currentIndex();
-
-  if( digi[ID]->GetInputChannelOnOff(ch) == false) { ClearTraces(); return; }
-
-  //printf("### %d %d \n", ch, digi[ID]->GetData()->DataIndex[ch]);
+  const int ch = cbScopeCh->currentIndex();
 
   uint32_t acqStatus = digi[ID]->GetACQStatusFromMemory();
-  if( ( acqStatus >> 2 ) & 0x1 ){
-    runStatus->setStyleSheet("background-color : green;");
-  }else{
-    runStatus->setStyleSheet("");
-  }
-
-  factor = digi[ID]->IsDualTrace_PHA() ? 2 : 1;
-
-  const int dppType = digi[ID]->GetDPPType();
+  runStatus->setStyleSheet( IsRunning(ID) && ((acqStatus >> 2) & 0x1) ? "background-color : green;" : "");
 
   // The readout thread copies the newest trace of each channel after every decode
-  // (ReadDataThread::CopyScopeTraces); draw from that copy. No trace for 2 s: empty plot.
+  // (ReadDataThread::CopyScopeTraces); draw from that copy.
   ReadDataThread::ScopeTrace trace;
-  const bool haveTrace = readDataThread[ID]->GetScopeTrace(ch, trace)
-                         && std::chrono::steady_clock::now() - trace.when < std::chrono::milliseconds(ScopeTraceStaleMiliSec);
-  if( !haveTrace ) ClearTraces();
-  const std::vector<short> & wf1  = trace.wf1;
-  const std::vector<short> & wf2  = trace.wf2;
-  const std::vector<bool>  & dwf1 = trace.dwf1;
-  const std::vector<bool>  & dwf2 = trace.dwf2;
-  const std::vector<bool>  & dwf3 = trace.dwf3;
-  const std::vector<bool>  & dwf4 = trace.dwf4;
-  const float trigRate = trace.trigRate;
+  const bool valid = IsRunning(ID) && readDataThread[ID]->GetScopeTrace(ch, trace);
+  const bool fresh = valid && std::chrono::steady_clock::now() - trace.when < std::chrono::milliseconds(ScopeTraceStaleMiliSec);
 
-  int traceLength = (int) wf1.size();
-  if( dppType == V1730_DPP_PSD_CODE ) traceLength = (int) dwf1.size();
-
-  if( !haveTrace || trigRate == 0){
+  if( !fresh || trace.trigRate == 0 ){
     leTriggerRate->setStyleSheet("font-weight : bold; color : red;");
     leTriggerRate->setText("No Trigger");
   }else{
     leTriggerRate->setStyleSheet("");
-    leTriggerRate->setText(QString::number(trigRate));
+    leTriggerRate->setText(QString::number(trace.trigRate));
   }
 
-  if( traceLength * tick2ns * factor > MaxDisplayTraceTimeLength) traceLength = MaxDisplayTraceTimeLength / tick2ns/ factor;
+  if( refreshPaused || !valid ) return;
+  if( haveLastTrace && trace.absIndex == lastTrace.absIndex ) return; // nothing new: the last one stays, as in CoMPASS
 
-  if( haveTrace ){
+  lastTrace = trace;
+  haveLastTrace = true;
+  DrawTrace(trace, true);
 
-    QVector<QPointF> points[5];
-    if( dppType == V1730_DPP_PHA_CODE || dppType == V1730_DPP_PSD_CODE ) {
-      if( dataTrace[4]->count() > 0 ) dataTrace[4]->clear();
-      for( int i = 0; i < traceLength ; i++ ) {
-        if( i < (int) wf1.size() )  points[0].append(QPointF(tick2ns * i * factor, wf1[i])); 
-        if( i < (int) wf2.size() )  points[1].append(QPointF(tick2ns * i * factor, wf2[i]));
-        if( i < (int) dwf1.size() ) points[2].append(QPointF(tick2ns * i * factor, dwf1[i] * 1000));
-        if( i < (int) dwf2.size() ) points[3].append(QPointF(tick2ns * i * factor, dwf2[i] * 1000 + 500));
-      }
-      dataTrace[0]->replace(points[0]);
-      dataTrace[1]->replace(points[1]);
-      dataTrace[2]->replace(points[2]);
-      dataTrace[3]->replace(points[3]);
-    }
+  if( singleArmed ){
+    singleArmed = false;
+    SetRefreshPaused(true);
+  }
+}
 
-    if( dppType == V1740_DPP_QDC_CODE ) {
-      for( int i = 0; i < traceLength ; i++ ) {
-        if( i < (int) wf1.size() )  points[0].append(QPointF(tick2ns * i, wf1[i])); 
-        if( i < (int) dwf1.size() ) points[1].append(QPointF(tick2ns * i, dwf1[i] * 1000));
-        if( i < (int) dwf2.size() ) points[2].append(QPointF(tick2ns * i, dwf2[i] * 1000 + 500));
-        if( i < (int) dwf3.size() ) points[3].append(QPointF(tick2ns * i, dwf3[i] * 1000 + 1000));
-        if( i < (int) dwf4.size() ) points[4].append(QPointF(tick2ns * i, dwf4[i] * 1000 + 1500));
-      }
-      dataTrace[0]->replace(points[0]);
-      dataTrace[1]->replace(points[1]);
-      dataTrace[2]->replace(points[2]);
-      dataTrace[3]->replace(points[3]);
-      dataTrace[4]->replace(points[4]);
-    }
+double Scope::YScale() const{
+  if( cbYUnit->currentData().toInt() != 1 || digi[ID]->GetDPPType() == DPPTypeCode::DPP_QDC_CODE ) return 1.0;
+  const double vpp = digi[ID]->GetSettingFromMemory(DPP::InputDynamicRange, cbScopeCh->currentIndex()) == 1 ? 0.5 : 2.0;
+  return vpp * 1000. / 16384.;
+}
+
+void Scope::DrawTrace(const ReadDataThread::ScopeTrace & trace, bool isNew){
+  if( plot->animationOptions() != QChart::NoAnimation ) plot->setAnimationOptions(QChart::NoAnimation); // the chart view switches it on after a zoom
+
+  const int dpp = digi[ID]->GetDPPType();
+  const int ch = cbScopeCh->currentIndex();
+  const double ys = YScale();
+
+  // sample spacing: dual trace interleaves the two analog traces (half rate each); the DPP-PHA digital
+  // probes go with them, the DPP-PSD ones stay at the full rate
+  const bool dual = !trace.wf2.empty() && dpp != DPPTypeCode::DPP_QDC_CODE;
+  double aStep = tick2ns * (dual ? 2 : 1);
+  double dStep = dpp == DPPTypeCode::DPP_PSD_CODE ? tick2ns : aStep;
+  if( dpp == DPPTypeCode::DPP_QDC_CODE ) aStep = dStep = tick2ns;
+  const double xLimit = MaxDisplayTraceTimeLength;
+
+  // persistence: the waveform on the plot joins the faded ones
+  const int nPersist = cbPersist->currentData().toInt();
+  if( isNew && nPersist > 0 && dataTrace[0]->count() > 0 ){
+    persistTrace[persistNext]->replace(dataTrace[0]->points());
+    persistTrace[persistNext]->setVisible(true);
+    for( QLegendMarker * m : plot->legend()->markers(persistTrace[persistNext]) ) m->setVisible(false); // shown again with the series
+    persistNext = (persistNext + 1) % nPersist;
   }
 
-  if( haveTrace ) plot->axes(Qt::Horizontal).first()->setRange(0, tick2ns * traceLength * factor);
+  double yMin = 1e9, yMax = -1e9, xMax = 0;
+  auto analog = [&](const std::vector<short> & w){
+    QVector<QPointF> v;
+    for( size_t i = 0; i < w.size() && i * aStep <= xLimit; i++ ){
+      const double y = w[i] * ys;
+      v.append(QPointF(i * aStep, y));
+      yMin = std::min(yMin, y); yMax = std::max(yMax, y); xMax = std::max(xMax, i * aStep);
+    }
+    return v;
+  };
+  QVector<QPointF> a1 = analog(trace.wf1);
+  QVector<QPointF> a2 = analog(trace.wf2);
+  if( yMin > yMax ){ yMin = 0; yMax = 1; }
+  for( int i = 0; i < MaxPersistTrace; i++ ){   // the range holds the faded waveforms too
+    if( !persistTrace[i]->isVisible() ) continue;
+    for( const QPointF & p : persistTrace[i]->points() ){ yMin = std::min(yMin, p.y()); yMax = std::max(yMax, p.y()); }
+  }
+  dataXMax = std::max(xMax, 10.0);
 
+  // the threshold (DPP-PSD, analog trace 1 = Input): over the baseline, on the side of the polarity
+  thresholdLine->clear();
+  if( dpp == DPPTypeCode::DPP_PSD_CODE && cbAnaTrace1->currentData().toInt() == 0 && !trace.wf1.empty() ){
+    const uint32_t alg = digi[ID]->GetSettingFromMemory(DPP::DPPAlgorithmControl, ch);
+    const bool negative = Digitizer::ExtractBits(alg, DPP::Bit_DPPAlgorithmControl_PSD::Polarity);
+    const int preSamples = digi[ID]->GetSettingFromMemory(DPP::PreTrigger, ch) * DPP::PreTrigger.GetPartialStep() / (dual ? 2 : 1);
+    double base = 0;
+    if( cbAnaTrace2->currentData().toInt() == 1 && !trace.wf2.empty() ){
+      base = trace.wf2[std::min((size_t) std::max(preSamples, 0), trace.wf2.size() - 1)];
+    }else if( Digitizer::ExtractBits(alg, DPP::Bit_DPPAlgorithmControl_PSD::BaselineAvg) == 0 ){
+      base = digi[ID]->GetSettingFromMemory(DPP::PSD::FixedBaseline, ch);
+    }else{
+      const size_t n = std::min(trace.wf1.size(), (size_t) std::max(4, preSamples / 2));
+      for( size_t i = 0; i < n; i++ ) base += trace.wf1[i];
+      base /= n;
+    }
+    const double thr = digi[ID]->GetSettingFromMemory(DPP::PSD::TriggerThreshold, ch);
+    const double level = (base + (negative ? -thr : thr)) * ys;
+    thresholdLine->append(0, level);
+    thresholdLine->append(dataXMax, level);
+    yMin = std::min(yMin, level); yMax = std::max(yMax, level);
+  }
+  thresholdLine->setVisible(thresholdLine->count() > 0);
+
+  // the y range of the analog part: the waveform, or the whole ADC range
+  double fullLow = 0, fullHigh = 0x3FFF;
+  if( dpp == DPPTypeCode::DPP_PHA_CODE ){ fullLow = -0x1FFF; fullHigh = 0x1FFF; }
+  if( dpp == DPPTypeCode::DPP_QDC_CODE ) fullHigh = 0xFFF;
+  double low, high;
+  if( chkAutoY->isChecked() ){
+    const double span = std::max(yMax - yMin, 20 * ys);
+    low = yMin - 0.05 * span;
+    high = yMax + 0.05 * span;
+  }else{
+    low = fullLow * ys;
+    high = fullHigh * ys;
+  }
+
+  // the digital traces: logic lanes under the analog part
+  const std::vector<bool> * dw[4] = {&trace.dwf1, &trace.dwf2, &trace.dwf3, &trace.dwf4};
+  const int nDigital = dpp == DPPTypeCode::DPP_QDC_CODE ? 4 : 2;
+  const double lane = 0.07 * (high - low), gap = 0.03 * (high - low);
+  QVector<QPointF> d[4];
+  for( int k = 0; k < nDigital; k++ ){
+    const double base = low - (k + 1) * (lane + gap);
+    for( size_t i = 0; i < dw[k]->size() && i * dStep <= xLimit; i++ ) d[k].append(QPointF(i * dStep, base + ((*dw[k])[i] ? lane : 0)));
+  }
+  dataYMin = low - nDigital * (lane + gap) - gap;
+  dataYMax = high;
+
+  // the gates, shaded over the analog part, from the digital traces that show them
+  // (DPP-PSD: Long gate on digital trace 1, Short gate on digital trace 2; DPP-QDC: the gate)
+  for( int g = 0; g < 2; g++ ){
+    gateUpper[g]->clear();
+    gateLower[g]->clear();
+    const std::vector<bool> * w = nullptr;
+    if( dpp == DPPTypeCode::DPP_PSD_CODE && g == 0 && cbDigiTrace1->currentData().toInt() == 0 ) w = &trace.dwf1;
+    if( dpp == DPPTypeCode::DPP_PSD_CODE && g == 1 && cbDigiTrace2->currentData().toInt() == 0 ) w = &trace.dwf2;
+    if( dpp == DPPTypeCode::DPP_QDC_CODE && g == 0 ) w = &trace.dwf1;
+    if( !w ) continue;
+    int first = -1, last = -1;
+    for( size_t i = 0; i < w->size(); i++ ) if( (*w)[i] ){ if( first < 0 ) first = i; last = i; }
+    if( first < 0 ) continue;
+    const double x0 = first * dStep, x1 = std::min((last + 1) * dStep, xLimit);
+    gateUpper[g]->append(x0, high); gateUpper[g]->append(x1, high);
+    gateLower[g]->append(x0, low);  gateLower[g]->append(x1, low);
+  }
+
+  dataTrace[0]->replace(a1);
+  dataTrace[1]->replace(a2);
+  if( dpp == DPPTypeCode::DPP_QDC_CODE ){
+    for( int k = 0; k < 4; k++ ) dataTrace[1 + k]->replace(d[k]);
+  }else{
+    dataTrace[2]->replace(d[0]);
+    dataTrace[3]->replace(d[1]);
+    dataTrace[4]->clear();
+  }
+
+  yAxis->setTitleText(ys == 1.0 ? "ADC [lsb]" : "Amplitude [mV] (not calibrated)");
+  yAxis->setLabelFormat(ys == 1.0 ? "%.0f" : "%.1f");
+  if( !plot->isZoomed() ) ApplyAutoRange();
+}
+
+bool Scope::eventFilter(QObject * watched, QEvent * event){
+  if( watched == plotView->viewport() && event->type() == QEvent::MouseButtonDblClick ){
+    plot->zoomReset();
+    ApplyAutoRange();
+    return true;
+  }
+  return QMainWindow::eventFilter(watched, event);
+}
+
+void Scope::ApplyAutoRange(){
+  // ticks at round values (1, 2 or 5 x 10^n), about ten over the range
+  auto roundTicks = [](QValueAxis * axis, double low, double high){
+    const double raw = (high - low) / 10;
+    const double p = std::pow(10, std::floor(std::log10(raw > 0 ? raw : 1)));
+    const double step = raw <= p ? p : raw <= 2 * p ? 2 * p : raw <= 5 * p ? 5 * p : 10 * p;
+    axis->setTickType(QValueAxis::TicksDynamic);
+    axis->setTickAnchor(0);
+    axis->setTickInterval(step);
+    axis->setRange(low, high);
+  };
+  roundTicks(xAxis, 0, dataXMax);
+  roundTicks(yAxis, dataYMin, dataYMax);
 }
 
 void Scope::ClearTraces(){
   for( int i = 0; i < MaxNumberOfTrace; i++){
     if( dataTrace[i] && dataTrace[i]->count() > 0 ) dataTrace[i]->clear();
   }
+  thresholdLine->clear();
+  for( int g = 0; g < 2; g++ ){ gateUpper[g]->clear(); gateLower[g]->clear(); }
+  haveLastTrace = false;
+  lastTrace = ReadDataThread::ScopeTrace();
+}
+
+void Scope::ClearPersistence(){
+  for( int i = 0; i < MaxPersistTrace; i++ ){
+    persistTrace[i]->clear();
+    persistTrace[i]->setVisible(false);
+  }
+  persistNext = 0;
+}
+
+void Scope::SetRefreshPaused(bool paused){
+  refreshPaused = paused;
+  bnRefresh->setText(paused ? "Start" : "Stop");
+  bnRefresh->setIcon(style()->standardIcon(paused ? QStyle::SP_MediaPlay : QStyle::SP_MediaPause));
+}
+
+void Scope::SaveSnapshot(){
+  if( saveDir.isEmpty() ) saveDir = QDir::homePath();
+  const QString name = QString("Digi-%1_ch%2_%3.png").arg(digi[ID]->GetSerialNumber()).arg(cbScopeCh->currentIndex()).arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss"));
+  const QString file = QFileDialog::getSaveFileName(this, "Save the plot", saveDir + "/" + name, "PNG picture (*.png)");
+  if( file.isEmpty() ) return;
+  saveDir = QFileInfo(file).absolutePath();
+  if( plotView->grab().save(file, "PNG") ) SendLogMsg("Scope: plot saved to " + file + ".");
+  else SendLogMsg("<font style=\"color: red;\">Scope: could not save " + file + ".</font>");
+}
+
+void Scope::SaveTraceCSV(){
+  if( !haveLastTrace ){ SendLogMsg("Scope: no waveform on the plot to save."); return; }
+  if( saveDir.isEmpty() ) saveDir = QDir::homePath();
+  const QString name = QString("Digi-%1_ch%2_%3.csv").arg(digi[ID]->GetSerialNumber()).arg(cbScopeCh->currentIndex()).arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss"));
+  const QString fileName = QFileDialog::getSaveFileName(this, "Save the waveform", saveDir + "/" + name, "CSV table (*.csv)");
+  if( fileName.isEmpty() ) return;
+  saveDir = QFileInfo(fileName).absolutePath();
+
+  QFile file(fileName);
+  if( !file.open(QIODevice::WriteOnly | QIODevice::Text) ){ SendLogMsg("<font style=\"color: red;\">Scope: could not write " + fileName + ".</font>"); return; }
+  QTextStream out(&file);
+
+  const ReadDataThread::ScopeTrace & t = lastTrace;
+  const int dpp = digi[ID]->GetDPPType();
+  const bool dual = !t.wf2.empty() && dpp != DPPTypeCode::DPP_QDC_CODE;
+  const int aEvery = (dpp == DPPTypeCode::DPP_PSD_CODE && dual) ? 2 : 1;  // analog samples come every aEvery rows
+  const double rowStep = dpp == DPPTypeCode::DPP_PHA_CODE ? tick2ns * (dual ? 2 : 1) : tick2ns;
+  const std::vector<bool> * dw[4] = {&t.dwf1, &t.dwf2, &t.dwf3, &t.dwf4};
+  const int nDigital = dpp == DPPTypeCode::DPP_QDC_CODE ? 4 : 2;
+
+  out << "# Digi-" << digi[ID]->GetSerialNumber() << " (" << QString::fromStdString(digi[ID]->GetModelName()) << ") ch " << cbScopeCh->currentIndex()
+      << ", saved " << QDateTime::currentDateTime().toString(Qt::ISODate) << ", analog in lsb\n";
+  out << "time_ns," << TraceName(0) << "," << TraceName(1);
+  for( int k = 0; k < nDigital; k++ ) out << "," << TraceName(2 + k);
+  out << "\n";
+  size_t rows = std::max(t.wf1.size(), t.wf2.size()) * aEvery;
+  for( int k = 0; k < nDigital; k++ ) rows = std::max(rows, dw[k]->size());
+  for( size_t r = 0; r < rows; r++ ){
+    out << r * rowStep;
+    const bool analogRow = r % aEvery == 0;
+    const size_t a = r / aEvery;
+    out << "," << (analogRow && a < t.wf1.size() ? QString::number(t.wf1[a]) : "");
+    out << "," << (analogRow && a < t.wf2.size() ? QString::number(t.wf2[a]) : "");
+    for( int k = 0; k < nDigital; k++ ) out << "," << (r < dw[k]->size() ? QString::number((int)(*dw[k])[r]) : "");
+    out << "\n";
+  }
+  SendLogMsg("Scope: waveform saved to " + fileName + ".");
+}
+
+QString Scope::TraceName(int i) const{
+  QString n = dataTrace[i]->name();
+  n.replace(",", " ");
+  return n.isEmpty() ? "trace" + QString::number(i) : n;
 }
 
 //*=======================================================
-//*=======================================================
-void Scope::SetUpComboBoxSimple(RComboBox * &cb, QString str, int row, int col){
-  DebugPrint("%s", "Scope");
-  QLabel * lb = new QLabel(str, settingGroup);
-  lb->setAlignment(Qt::AlignRight | Qt::AlignCenter);
-  settingLayout->addWidget(lb, row, col);
+//*======================================================= the parameters
 
-  cb = new RComboBox(settingGroup);
-  settingLayout->addWidget(cb, row, col + 1);
-  
+int Scope::RegCh(int ch) const{
+  return digi[ID]->GetDPPType() == DPPTypeCode::DPP_QDC_CODE ? ch / 8 : ch;
 }
 
-void Scope::SetUpComboBox(RComboBox * &cb, QString str, int row, int col, const Reg para){
-  DebugPrint("%s", "Scope");
-  SetUpComboBoxSimple(cb, str, row, col);
-
-  for( int i = 0; i < (int) para.GetComboList().size(); i++){
-    cb->addItem(QString::fromStdString(para.GetComboList()[i].first), para.GetComboList()[i].second);
-  }
-
-  connect(cb, &RComboBox::currentIndexChanged, this , [=](){
-    if( ! enableSignalSlot ) return;
-
-    int ch = cbScopeCh->currentIndex();
-    int value = cb->currentData().toInt();
-
-    if( digi[ID]->GetDPPType() == DPPTypeCode::DPP_QDC_CODE ) {
-      int grp = ch/8; // convert ch to grp 
-
-      digiMTX[ID].lock();
-      digi[ID]->WriteRegister(para, value, grp);
-      digiMTX[ID].unlock();
-
-    }else{
-
-      digiMTX[ID].lock();
-      digi[ID]->WriteRegister(para, value, ch);
-      digiMTX[ID].unlock();
-
-    }
-
-    QString msg;
-    msg = QString::fromStdString(para.GetName()) ;
-    msg += "|DIG:"+ QString::number(digi[ID]->GetSerialNumber()) + ",CH:" + (ch == -1 ? "All" : QString::number(ch));
-    msg += " = " + cb->currentText();
-    if( digi[ID]->GetErrorCode() == CAEN_DGTZ_Success ){
-      SendLogMsg(msg + " | OK.");
-      cb->setStyleSheet("");
-      emit UpdateOtherPanels();
-    }else{
-      SendLogMsg(msg + " | Fail.");
-      cb->setStyleSheet("color:red;");
-    }
-
-  });
-
+QWidget * Scope::NewTab(const QString & name, QGridLayout * & grid){
+  QWidget * page = new QWidget(tabs);
+  grid = new QGridLayout(page);
+  grid->setColumnStretch(1, 1);
+  grid->setRowStretch(100, 1);   // the controls at the top
+  tabs->addTab(page, name);
+  return page;
 }
 
-void Scope::SetUpSpinBox(RSpinBox * &sb, QString str, int row, int col, const Reg para){
-  DebugPrint("%s", "Scope");
-  QLabel * lb = new QLabel(str, settingGroup);
-  lb->setAlignment(Qt::AlignRight | Qt::AlignCenter);
-  settingLayout->addWidget(lb, row, col);
-
-  sb = new RSpinBox(settingGroup);
-  if( para.GetPartialStep() != 0 ){
-    sb->setMinimum(0);
-    sb->setMaximum(para.GetMaxBit() * para.GetPartialStep() * tick2ns);
-    if( para.GetPartialStep() > 0 ) sb->setSingleStep(para.GetPartialStep() * tick2ns);
-    if( para.GetPartialStep() == -1 ) sb->setSingleStep(1);
-  }
-  settingLayout->addWidget(sb, row, col + 1);
-
-  connect(sb, &RSpinBox::valueChanged, this, [=](){
-    if( !enableSignalSlot ) return;
-    sb->setStyleSheet("color:blue");
-  });
-
-
-  connect(sb, &RSpinBox::returnPressed, this, [=](){
-    if( !enableSignalSlot ) return;
-    if( sb->decimals() == 0 && sb->singleStep() != 1) {
-      double step = sb->singleStep();
-      double value = sb->value();
-      sb->setValue( (std::round(value/step)*step));
-    }
-
-    int ch = cbScopeCh->currentIndex();
-    //if( chkSetAllChannel->isChecked() ) ch = -1;
-    QString msg;
-    msg = QString::fromStdString(para.GetName()) + "|DIG:"+ QString::number(digi[ID]->GetSerialNumber()) + ",CH:" + (ch == -1 ? "All" : QString::number(ch));
-    msg += " = " + QString::number(sb->value());
-
-    uint32_t value = sb->value() / tick2ns / abs(para.GetPartialStep());
-
-    //todo NEED TO CHECK
-    // if( para == DPP::RecordLength_G){
-    //   int factor = digi[ID]->IsDualTrace_PHA() ? 2 : 1;
-    //   value = value * factor;
-    // }
-
-    if( para == DPP::ChannelDCOffset || para == DPP::QDC::DCOffset){
-      value = uint16_t((1.0 - sb->value()/100.) * 0xFFFF);
-    }
-
-    if( para == DPP::PHA::TriggerThreshold || para == DPP::PSD::TriggerThreshold){
-      value = sb->value();
-    }
-
-    msg += " | 0x" + QString::number(value, 16); 
-
-    if( digi[ID]->GetDPPType() == DPPTypeCode::DPP_QDC_CODE ){
-      int grp = ch/8; // convert ch to grp 
-      digiMTX[ID].lock();
-      digi[ID]->WriteRegister(para, value, grp);
-      digiMTX[ID].unlock();
-    }else{
-      digiMTX[ID].lock();
-      digi[ID]->WriteRegister(para, value, ch);
-      digiMTX[ID].unlock();
-    }
-
-    if( digi[ID]->GetErrorCode() == CAEN_DGTZ_Success ){
-      SendLogMsg(msg + " | OK.");
-      sb->setStyleSheet("");
-      emit UpdateOtherPanels();
-    }else{
-      SendLogMsg(msg + " | Fail.");
-      sb->setStyleSheet("color:red;");
-    }
-  });  
-}
-
-void Scope::CleanUpSettingsGroupBox(){
-  DebugPrint("%s", "Scope");
-  QList<QLabel *> labelChildren1 = settingGroup->findChildren<QLabel *>();
-  for( int i = 0; i < labelChildren1.size(); i++) delete labelChildren1[i];
-  
-  QList<RComboBox *> labelChildren2 = settingGroup->findChildren<RComboBox *>();
-  for( int i = 0; i < labelChildren2.size(); i++) delete labelChildren2[i];
-
-  QList<RSpinBox *> labelChildren3 = settingGroup->findChildren<RSpinBox *>();
-  for( int i = 0; i < labelChildren3.size(); i++) delete labelChildren3[i];
-
-  NullThePointers();
-
-}
-
-void Scope::SetUpPanel_PHA(){
-  printf("--- %s \n", __func__);
-
-  enableSignalSlot = false;
-
-  int rowID = 0;
-  SetUpSpinBox(sbReordLength,     "Record Length [ns] ", rowID, 0, DPP::RecordLength_G);
-  SetUpSpinBox(sbPreTrigger,        "Pre Trigger [ns] ", rowID, 2, DPP::PreTrigger);
-  SetUpSpinBox(sbDCOffset,             "DC offset [%] ", rowID, 4, DPP::ChannelDCOffset);
-  sbDCOffset->setDecimals(2);    
-  SetUpComboBox(cbDynamicRange,        "Dynamic Range ", rowID, 6, DPP::InputDynamicRange);
-
-  rowID ++; //=============================================================
-  SetUpSpinBox(sbInputRiseTime, "Input Rise Time [ns] ", rowID, 0, DPP::PHA::InputRiseTime);
-  SetUpSpinBox(sbThreshold,          "Threshold [LSB] ", rowID, 2, DPP::PHA::TriggerThreshold);
-  SetUpSpinBox(sbTriggerHoldOff,"Trigger HoldOff [ns] ", rowID, 4, DPP::PHA::TriggerHoldOffWidth);
-  SetUpComboBox(cbSmoothingFactor,     "Smooth Factor ", rowID, 6, DPP::PHA::RCCR2SmoothingFactor);
-  
-  rowID ++; //=============================================================
-  SetUpSpinBox(sbTrapRiseTime,  "Trap. Rise Time [ns] ", rowID, 0, DPP::PHA::TrapezoidRiseTime);
-  SetUpSpinBox(sbTrapFlatTop,     "Trap. FlatTop [ns] ", rowID, 2, DPP::PHA::TrapezoidFlatTop);
-  SetUpSpinBox(sbDecayTime,          "Decay Time [ns] ", rowID, 4, DPP::PHA::DecayTime);
-  SetUpSpinBox(sbPeakingTime,      "Peaking Time [ns] ", rowID, 6, DPP::PHA::PeakingTime);
-
-  rowID ++; //=============================================================
-  SetUpComboBoxSimple(cbPolarity, "Polarity ", rowID, 0);
-  cbPolarity->addItem("Positive", 0);
-  cbPolarity->addItem("Negative", 1);
-  connect(cbPolarity, &RComboBox::currentIndexChanged, this, [=](){
-    if( !enableSignalSlot ) return;
-    digi[ID]->SetBits(DPP::DPPAlgorithmControl, DPP::Bit_DPPAlgorithmControl_PHA::Polarity, cbPolarity->currentData().toInt(), cbScopeCh->currentIndex());
-  });
-
-  SetUpComboBoxSimple(cbBaselineAvg, "Baseline Avg. ", rowID, 2);
-  cbBaselineAvg->addItem("Not evaluated", 0);
-  cbBaselineAvg->addItem("16 sample", 1);
-  cbBaselineAvg->addItem("64 sample", 2);
-  cbBaselineAvg->addItem("256 sample", 3);
-  cbBaselineAvg->addItem("1024 sample", 4);
-  cbBaselineAvg->addItem("4096 sample", 5);
-  cbBaselineAvg->addItem("16384 sample", 6);
-  connect(cbBaselineAvg, &RComboBox::currentIndexChanged, this, [=](){
-    if( !enableSignalSlot ) return;
-    digi[ID]->SetBits(DPP::DPPAlgorithmControl, DPP::Bit_DPPAlgorithmControl_PHA::BaselineAvg, cbBaselineAvg->currentData().toInt(), cbScopeCh->currentIndex());
-  });
-
-  SetUpComboBoxSimple(cbPeakAvg, "Peak Avg. ", rowID, 4);
-  cbPeakAvg->addItem("1 sample", 0);
-  cbPeakAvg->addItem("4 sample", 1);
-  cbPeakAvg->addItem("16 sample", 2);
-  cbPeakAvg->addItem("64 sample", 3);
-  connect(cbPeakAvg, &RComboBox::currentIndexChanged, this, [=](){
-    if( !enableSignalSlot ) return;
-    digi[ID]->SetBits(DPP::DPPAlgorithmControl, DPP::Bit_DPPAlgorithmControl_PHA::PeakMean, cbPeakAvg->currentData().toInt(), cbScopeCh->currentIndex());
-  });
-
-  SetUpSpinBox(sbPeakHoldOff,      "Peak HoldOff [ns] ", rowID, 6, DPP::PHA::PeakHoldOff);
-
-
-  rowID ++; //=============================================================
-  SetUpComboBoxSimple(cbAnaProbe1, "Ana. Probe 1 ", rowID, 0);
-  for( int i = 0; i < (int) DPP::Bit_BoardConfig::ListAnaProbe1_PHA.size(); i++){
-    cbAnaProbe1->addItem(QString::fromStdString(DPP::Bit_BoardConfig::ListAnaProbe1_PHA[i].first), DPP::Bit_BoardConfig::ListAnaProbe1_PHA[i].second);
-  }
-  connect(cbAnaProbe1, &RComboBox::currentIndexChanged, this, [=](){
-    if( !enableSignalSlot ) return;
-    digi[ID]->SetBits(DPP::BoardConfiguration, DPP::Bit_BoardConfig::AnalogProbe1, cbAnaProbe1->currentData().toInt(), cbScopeCh->currentIndex());
-    dataTrace[0]->setName(cbAnaProbe1->currentText());
-  });
-
-  SetUpComboBoxSimple(cbAnaProbe2, "Ana. Probe 2 ", rowID, 2);
-  for( int i = 0; i < (int) DPP::Bit_BoardConfig::ListAnaProbe2_PHA.size(); i++){
-    cbAnaProbe2->addItem(QString::fromStdString(DPP::Bit_BoardConfig::ListAnaProbe2_PHA[i].first), DPP::Bit_BoardConfig::ListAnaProbe2_PHA[i].second);
-  }
-  connect(cbAnaProbe2, &RComboBox::currentIndexChanged, this, [=](){
-    if( !enableSignalSlot ) return;
-    digi[ID]->SetBits(DPP::BoardConfiguration, DPP::Bit_BoardConfig::AnalogProbe2, cbAnaProbe2->currentData().toInt(), cbScopeCh->currentIndex());
-    dataTrace[1]->setName(cbAnaProbe2->currentText());
-  });
-
-  SetUpComboBoxSimple(cbDigiProbe1, "Digi. Probe 1 ", rowID, 4);
-  for( int i = 0; i < (int) DPP::Bit_BoardConfig::ListDigiProbe1_PHA.size(); i++){
-    cbDigiProbe1->addItem(QString::fromStdString(DPP::Bit_BoardConfig::ListDigiProbe1_PHA[i].first), DPP::Bit_BoardConfig::ListDigiProbe1_PHA[i].second);
-  }
-  connect(cbDigiProbe1, &RComboBox::currentIndexChanged, this, [=](){
-    if( !enableSignalSlot ) return;
-    digi[ID]->SetBits(DPP::BoardConfiguration, DPP::Bit_BoardConfig::DigiProbel1_PHA, cbDigiProbe1->currentData().toInt(), cbScopeCh->currentIndex());
-    dataTrace[2]->setName(cbDigiProbe1->currentText());
-  });
-
-  SetUpComboBoxSimple(cbDigiProbe2, "Digi. Probe 2 ", rowID, 6);
-  for( int i = 0; i < (int) DPP::Bit_BoardConfig::ListDigiProbe2_PHA.size(); i++){
-    cbDigiProbe2->addItem(QString::fromStdString(DPP::Bit_BoardConfig::ListDigiProbe2_PHA[i].first), DPP::Bit_BoardConfig::ListDigiProbe2_PHA[i].second);
-  }
-  dataTrace[3]->setName(cbDigiProbe2->currentText());
-  cbDigiProbe2->setEnabled(false);
-
-  dataTrace[4]->setVisible(false);
-
-  enableSignalSlot = true;
-
-}
-
-void Scope::SetUpPanel_PSD(){
-
-  enableSignalSlot = false;
-  printf("==== %s \n", __func__);
-
-  int rowID = 0;
-  SetUpSpinBox(sbReordLength,     "Record Length [ns] ", rowID, 0, DPP::RecordLength_G);
-  SetUpSpinBox(sbPreTrigger,        "Pre Trigger [ns] ", rowID, 2, DPP::PreTrigger);
-  SetUpSpinBox(sbDCOffset,             "DC offset [%] ", rowID, 4, DPP::ChannelDCOffset);
-  sbDCOffset->setDecimals(2);    
-  SetUpComboBox(cbDynamicRange,        "Dynamic Range ", rowID, 6, DPP::InputDynamicRange);
-
-
-  rowID ++; //=============================================================
-  SetUpComboBoxSimple(cbPolarity, "Polarity ", rowID, 0);
-  cbPolarity->addItem("Positive", 0);
-  cbPolarity->addItem("Negative", 1);
-  connect(cbPolarity, &RComboBox::currentIndexChanged, this, [=](){
-    if( !enableSignalSlot ) return;
-    digi[ID]->SetBits(DPP::DPPAlgorithmControl, DPP::Bit_DPPAlgorithmControl_PSD::Polarity, cbPolarity->currentData().toInt(), cbScopeCh->currentIndex());
-  });
-
-  SetUpSpinBox(sbShortGate, "Short Gate [ns] ", rowID, 2, DPP::PSD::ShortGateWidth);
-  SetUpSpinBox(sbLongGate, "Long Gate [ns] ", rowID, 4, DPP::PSD::LongGateWidth);
-  SetUpSpinBox(sbGateOffset, "Gate Offset [ns] ", rowID, 6, DPP::PSD::GateOffset);
-
-  rowID ++; //=============================================================
-  SetUpSpinBox(sbThreshold, "Threshold [LSB] ", rowID, 0, DPP::PSD::TriggerThreshold);
-  SetUpComboBoxSimple(cbAnaProbe1, "Ana. Probe ", rowID, 2);
-  for( int i = 0; i < (int) DPP::Bit_BoardConfig::ListAnaProbe_PSD.size(); i++){
-    cbAnaProbe1->addItem(QString::fromStdString(DPP::Bit_BoardConfig::ListAnaProbe_PSD[i].first), DPP::Bit_BoardConfig::ListAnaProbe_PSD[i].second);
-  }
-  connect(cbAnaProbe1, &RComboBox::currentIndexChanged, this, [=](){
-    if( !enableSignalSlot ) return;
-    digi[ID]->SetBits(DPP::BoardConfiguration, DPP::Bit_BoardConfig::AnalogProbe1, cbAnaProbe1->currentData().toInt(), cbScopeCh->currentIndex());
-    //dataTrace[0]->setName(cbAnaProbe1->currentText());
-
-    switch( cbAnaProbe1->currentIndex() ){
-      case 0 : dataTrace[0]->setName("input"); dataTrace[1]->setName("N/A"); break;
-      case 1 : dataTrace[0]->setName("CFD"); dataTrace[1]->setName("N/A"); break;
-      case 2 : dataTrace[0]->setName("baseline"); dataTrace[1]->setName("input"); break;
-      case 3 : dataTrace[0]->setName("baseline"); dataTrace[1]->setName("CFD"); break;
-      case 4 : dataTrace[0]->setName("CFD"); dataTrace[1]->setName("input"); break;
-    }
-
-  });
-
-  SetUpComboBoxSimple(cbDigiProbe1, "Digi. Probe 1 ", rowID, 4);
-  for( int i = 0; i < (int) DPP::Bit_BoardConfig::ListDigiProbe1_PSD.size(); i++){
-    cbDigiProbe1->addItem(QString::fromStdString(DPP::Bit_BoardConfig::ListDigiProbe1_PSD[i].first), DPP::Bit_BoardConfig::ListDigiProbe1_PSD[i].second);
-  }
-  connect(cbDigiProbe1, &RComboBox::currentIndexChanged, this, [=](){
-    if( !enableSignalSlot ) return;
-    digi[ID]->SetBits(DPP::BoardConfiguration, DPP::Bit_BoardConfig::DigiProbel1_PSD, cbDigiProbe1->currentData().toInt(), cbScopeCh->currentIndex());
-    dataTrace[2]->setName(cbDigiProbe1->currentText());
-  });
-
-  SetUpComboBoxSimple(cbDigiProbe2, "Digi. Probe 2 ", rowID, 6);
-  for( int i = 0; i < (int) DPP::Bit_BoardConfig::ListDigiProbe2_PSD.size(); i++){
-    cbDigiProbe2->addItem(QString::fromStdString(DPP::Bit_BoardConfig::ListDigiProbe2_PSD[i].first), DPP::Bit_BoardConfig::ListDigiProbe2_PSD[i].second);
-  }
-  connect(cbDigiProbe2, &RComboBox::currentIndexChanged, this, [=](){
-    if( !enableSignalSlot ) return;
-    digi[ID]->SetBits(DPP::BoardConfiguration, DPP::Bit_BoardConfig::DigiProbel1_PSD, cbDigiProbe1->currentData().toInt(), cbScopeCh->currentIndex());
-    dataTrace[3]->setName(cbDigiProbe2->currentText());
-  });
-
-  dataTrace[4]->setVisible(false);
-
-  enableSignalSlot = true;
-}
-
-void Scope::SetUpPanel_QDC() {
-
-  enableSignalSlot = false;
-  printf("==== %s \n", __func__);
-
-  int rowID = 0;
-
-  SetUpSpinBox(sbReordLength,     "Record Length [ns] ", rowID, 0, DPP::QDC::RecordLength_W);
-  SetUpSpinBox(sbPreTrigger,        "Pre Trigger [ns] ", rowID, 2, DPP::QDC::PreTrigger);
-  SetUpSpinBox(sbDCOffset,             "DC offset [%] ", rowID, 4, DPP::QDC::DCOffset);
-  sbDCOffset->setDecimals(2);   
-
-  SetUpComboBoxSimple(cbPolarity, "Polarity ", rowID, 6);
-  cbPolarity->addItem("Positive", 0);
-  cbPolarity->addItem("Negative", 1);
-  connect(cbPolarity, &RComboBox::currentIndexChanged, this, [=](){
-    if( !enableSignalSlot ) return;
-    digi[ID]->SetBits(DPP::QDC::DPPAlgorithmControl, DPP::QDC::Bit_DPPAlgorithmControl::Polarity, cbPolarity->currentData().toInt(), cbScopeCh->currentIndex()/8);
-  });
-
-  rowID ++; //=============================================================
-  SetUpSpinBox(sbShortGate,   "Gate Width [ns] ", rowID, 0, DPP::QDC::GateWidth);
-  SetUpSpinBox(sbGateOffset, "Gate Offset [ns] ", rowID, 2, DPP::QDC::GateOffset);
-
-
-  QLabel * lb = new QLabel("Threshold [LSB] ", settingGroup);
-  lb->setAlignment(Qt::AlignRight | Qt::AlignCenter);
-  settingLayout->addWidget(lb, rowID, 4);
-
-  sbThreshold = new RSpinBox(settingGroup);
-  settingLayout->addWidget(sbThreshold, rowID, 5);
-
-  sbThreshold->setMinimum(0); 
-  sbThreshold->setMaximum(0xFFF);
-  sbThreshold->setSingleStep(1);
-
-  connect(sbThreshold, &RSpinBox::valueChanged, this, [=](){
-    if( !enableSignalSlot ) return;
-    sbThreshold->setStyleSheet("color : blue;");
-  });
-
-  connect(sbThreshold, &RSpinBox::returnPressed, this, [=](){
-    if( !enableSignalSlot ) return;  
-
-    uint32_t value = sbThreshold->value();
-    sbThreshold->setStyleSheet("");
-
-    int ch = cbScopeCh->currentIndex();
-
-    int grp = ch/8;
-    int subCh = ch%8;
-
-    Reg para = DPP::QDC::TriggerThreshold_sub0;
-
-    digiMTX[ID].lock();
-    switch(subCh){
-      case 0: para = DPP::QDC::TriggerThreshold_sub0; break;
-      case 1: para = DPP::QDC::TriggerThreshold_sub1; break;
-      case 2: para = DPP::QDC::TriggerThreshold_sub2; break;
-      case 3: para = DPP::QDC::TriggerThreshold_sub3; break;
-      case 4: para = DPP::QDC::TriggerThreshold_sub4; break;
-      case 5: para = DPP::QDC::TriggerThreshold_sub5; break;
-      case 6: para = DPP::QDC::TriggerThreshold_sub6; break;
-      case 7: para = DPP::QDC::TriggerThreshold_sub7; break;
-    }
-    digiMTX[ID].unlock();
-
-    QString msg;
-    msg = QString::fromStdString(para.GetName()) + "|DIG:"+ QString::number(digi[ID]->GetSerialNumber()) + ",CH:" + (ch == -1 ? "All" : QString::number(ch));
-    msg += " = " + QString::number(sbThreshold->value());
-    msg += " | 0x" + QString::number(value, 16); 
-
-    digi[ID]->WriteRegister(para, value, grp);
-    
-    if( digi[ID]->GetErrorCode() == CAEN_DGTZ_Success ){
-      SendLogMsg(msg + " | OK.");
-      sbThreshold->setStyleSheet("");
-      emit UpdateOtherPanels();
-    }else{
-      SendLogMsg(msg + " | Fail.");
-      sbThreshold->setStyleSheet("color:red;");
-    }
-
-  });
-
-  rowID ++; //=============================================================
-  SetUpComboBoxSimple(cbAnaProbe1, "Ana. Probe ", rowID, 0);
-  for( int i = 0; i < (int) DPP::Bit_BoardConfig::ListAnaProbe_QDC.size(); i++){
-    cbAnaProbe1->addItem(QString::fromStdString(DPP::Bit_BoardConfig::ListAnaProbe_QDC[i].first), DPP::Bit_BoardConfig::ListAnaProbe_QDC[i].second);
-  }
-  connect(cbAnaProbe1, &RComboBox::currentIndexChanged, this, [=](){
-    if( !enableSignalSlot ) return;
-    digi[ID]->SetBits(DPP::BoardConfiguration, DPP::Bit_BoardConfig::AnalogProbe1, cbAnaProbe1->currentData().toInt(), cbScopeCh->currentIndex());
-    dataTrace[0]->setName(cbAnaProbe1->currentText());
-
-  });
-
-  dataTrace[1]->setVisible(true); dataTrace[1]->setName("Gate");
-  dataTrace[2]->setVisible(true); dataTrace[2]->setName("Trigger");
-  dataTrace[3]->setVisible(true); dataTrace[3]->setName("Trigger HoldOff");
-  dataTrace[4]->setVisible(true); dataTrace[4]->setName("OverThreshold");
-
-  enableSignalSlot = true;
-
-}
-
-void Scope::EnableControl(bool enable){
-  DebugPrint("%s", "Scope");
-  if( digi[ID]->GetDPPType() == V1730_DPP_PHA_CODE ){
-
-    sbReordLength->setEnabled(enable);
-    sbPreTrigger->setEnabled(enable);
-    sbDCOffset->setEnabled(enable);
-    cbDynamicRange->setEnabled(enable);
-
-    sbInputRiseTime->setEnabled(enable);
-    //sbThreshold->setEnabled(enable);
-    sbTriggerHoldOff->setEnabled(enable);
-    cbSmoothingFactor->setEnabled(enable);
-
-    sbTrapRiseTime->setEnabled(enable);
-    sbTrapFlatTop->setEnabled(enable);
-    sbDecayTime->setEnabled(enable);
-    sbPeakingTime->setEnabled(enable);
-
-    cbPolarity->setEnabled(enable);
-    cbBaselineAvg->setEnabled(enable);
-    cbPeakAvg->setEnabled(enable);
-    sbPeakHoldOff->setEnabled(enable);
-
-  }else{
-
-    settingGroup->setEnabled(enable);
-
-  }
-
-}
-
-//*=======================================================
-//*=======================================================
-
-void Scope::UpdateComobox(RComboBox * &cb, const Reg para){
-  DebugPrint("%s", "Scope");
-  int ch = cbScopeCh->currentIndex();
-
-  enableSignalSlot = false;
-  int haha = -99; 
-
-  if( digi[ID]->GetDPPType() == DPPTypeCode::DPP_QDC_CODE ){
-    haha = digi[ID]->GetSettingFromMemory(para, ch/8);
-  }else{
-    haha = digi[ID]->GetSettingFromMemory(para, ch);
-  }
-
-  for( int i = 0; i < cb->count(); i++){
-    int kaka = cb->itemData(i).toInt();
-    if( kaka == haha ){
-      cb->setCurrentIndex(i);
+void Scope::AddSpin(QGridLayout * grid, const QString & label, Param::Kind kind, const Reg & reg, Bits bits){
+  const int row = grid->count() / 2;
+  QLabel * lb = new QLabel(label, grid->parentWidget());
+  lb->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+  grid->addWidget(lb, row, 0);
+
+  Param p(kind, reg, bits);
+  p.sb = new RSpinBox(grid->parentWidget());
+  switch( kind ){
+    case Param::Time: {
+      const double unit = bits.first > 0 ? tick2ns : std::abs(reg.GetPartialStep()) * tick2ns;
+      const double maxRaw = bits.first > 0 ? (1u << bits.first) - 1 : reg.GetMaxBit();
+      p.sb->setMinimum(0);
+      p.sb->setMaximum(maxRaw * unit);
+      p.sb->setSingleStep(unit);
+    } break;
+    case Param::Raw:
+      p.sb->setMinimum(0);
+      p.sb->setMaximum(reg.GetMaxBit() > 0 ? reg.GetMaxBit() : 0xFFFF);
+      p.sb->setSingleStep(1);
       break;
-    }
+    case Param::DCOffset:
+      p.sb->setDecimals(2);
+      p.sb->setMinimum(0);
+      p.sb->setMaximum(100);
+      p.sb->setSingleStep(1);
+      break;
+    case Param::Combo: break;
+  }
+  p.sb->SetToolTip();
+  grid->addWidget(p.sb, row, 1);
+
+  params.push_back(p);
+  const size_t index = params.size() - 1;
+  RSpinBox * sb = p.sb;
+  connect(sb, &RSpinBox::valueChanged, this, [=](){ if( enableSignalSlot ) sb->setStyleSheet("color:blue"); });
+  connect(sb, &RSpinBox::returnPressed, this, [=](){ if( enableSignalSlot ) WriteParam(params[index]); });
+}
+
+void Scope::AddCombo(QGridLayout * grid, const QString & label, const Reg & reg, Bits bits, const std::vector<std::pair<std::string, unsigned int>> & list){
+  const int row = grid->count() / 2;
+  QLabel * lb = new QLabel(label, grid->parentWidget());
+  lb->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+  grid->addWidget(lb, row, 0);
+
+  Param p(Param::Combo, reg, bits);
+  p.cb = new RComboBox(grid->parentWidget());
+  Fill(p.cb, list.empty() ? reg.GetComboList() : list);
+  grid->addWidget(p.cb, row, 1);
+
+  params.push_back(p);
+  const size_t index = params.size() - 1;
+  connect(p.cb, &RComboBox::currentIndexChanged, this, [=](){ if( enableSignalSlot ) WriteParam(params[index]); });
+}
+
+void Scope::WriteParam(Param & p){
+  const int ch = cbScopeCh->currentIndex();
+  const int rch = RegCh(ch);
+  const Reg reg = RegOf(p, ch);
+  const int wch = reg.GetAddress() >= 0x8000 ? -1 : rch;
+
+  uint32_t value = 0;
+  QString shown;
+  switch( p.kind ){
+    case Param::Time: {
+      const double step = p.sb->singleStep();
+      if( step > 1 ) p.sb->setValue(std::round(p.sb->value() / step) * step);
+      const double unit = p.bits.first > 0 ? 1 : std::abs(reg.GetPartialStep());
+      value = (uint32_t) std::lround(p.sb->value() / tick2ns / unit);
+      shown = QString::number(p.sb->value()) + " ns";
+    } break;
+    case Param::Raw:
+      value = (uint32_t) std::lround(p.sb->value());
+      shown = QString::number(value);
+      break;
+    case Param::DCOffset:
+      value = uint16_t((1.0 - p.sb->value() / 100.) * 0xFFFF);
+      shown = QString::number(p.sb->value()) + " %";
+      break;
+    case Param::Combo:
+      if( p.cb->currentIndex() < 0 ) return;
+      value = p.cb->currentData().toUInt();
+      shown = p.cb->currentText();
+      break;
   }
 
-  //enableSignalSlot = true;
+  uint32_t full = value;
+  if( p.bits.first > 0 ) full = SetField(digi[ID]->GetSettingFromMemory(reg, wch < 0 ? 0 : wch), p.bits, value);
+
+  bool ok = false;
+  ApplyChange([&](){
+    digiMTX[ID].lock();
+    digi[ID]->WriteRegister(reg, full, wch);
+    ok = digi[ID]->GetErrorCode() == CAEN_DGTZ_Success;
+    digiMTX[ID].unlock();
+  });
+
+  QString msg = QString::fromStdString(reg.GetName()) + "|DIG:" + QString::number(digi[ID]->GetSerialNumber()) + ",CH:" + QString::number(ch)
+              + " = " + shown + " | 0x" + QString::number(full, 16) + (IsRunning(ID) ? " (board restarted)" : "");
+  QWidget * w = p.sb ? (QWidget *) p.sb : (QWidget *) p.cb;
+  if( ok ){
+    SendLogMsg(msg + " | OK.");
+    w->setStyleSheet("");
+    UpdatePanelFromMomeory();   // the values that follow from this one (fixed baseline, the coarse gain's list)
+    emit UpdateOtherPanels();
+  }else{
+    SendLogMsg(msg + " | Fail.");
+    w->setStyleSheet("color:red;");
+  }
 }
 
-void Scope::UpdateSpinBox(RSpinBox * &sb, const Reg para){
-  DebugPrint("%s", "Scope");
-  int ch = cbScopeCh->currentIndex();
+void Scope::ShowParam(Param & p){
+  const int ch = cbScopeCh->currentIndex();
+  const Reg reg = RegOf(p, ch);
+  const int rch = reg.GetAddress() >= 0x8000 ? 0 : RegCh(ch);
+  uint32_t v = digi[ID]->GetSettingFromMemory(reg, rch);
+  if( p.bits.first > 0 ) v = Digitizer::ExtractBits(v, p.bits);
 
-  if( digi[ID]->GetDPPType() == DPPTypeCode::DPP_QDC_CODE ) ch = ch /8;
+  switch( p.kind ){
+    case Param::Time: {
+      const double unit = p.bits.first > 0 ? 1 : std::abs(reg.GetPartialStep());
+      p.sb->setValue(v * unit * tick2ns);
+    } break;
+    case Param::Raw: p.sb->setValue(v); break;
+    case Param::DCOffset: p.sb->setValue((1.0 - v * 1.0 / 0xFFFF) * 100); break;
+    case Param::Combo: SelectData(p.cb, v); break;
+  }
+  if( p.sb ) p.sb->setStyleSheet("");
+  if( p.cb ) p.cb->setStyleSheet("");
+}
+
+void Scope::BuildPanels(){
+  const bool saved = enableSignalSlot;
+  enableSignalSlot = false;
+
+  params.clear();
+  cbBaselineAvg = nullptr;
+  sbFixedBaseline = nullptr;
+  cbChargeSens = nullptr;
+  while( tabs->count() > 0 ){
+    QWidget * page = tabs->widget(0);
+    tabs->removeTab(0);
+    delete page;
+  }
+
+  const int dpp = digi[ID]->GetDPPType();
+  if( dpp == DPPTypeCode::DPP_PHA_CODE ) SetUpTabs_PHA();
+  if( dpp == DPPTypeCode::DPP_PSD_CODE ) SetUpTabs_PSD();
+  if( dpp == DPPTypeCode::DPP_QDC_CODE ) SetUpTabs_QDC();
+  BuildTraceSelectors();
+  cbYUnit->setEnabled(dpp != DPPTypeCode::DPP_QDC_CODE);
+
+  enableSignalSlot = saved;
+  UpdatePanelFromMomeory();
+}
+
+void Scope::SetUpTabs_PSD(){
+  using namespace DPP;
+  QGridLayout * g;
+
+  NewTab("Input", g);
+  AddSpin (g, "Record length [ns]", Param::Time, RecordLength_G);
+  AddSpin (g, "Pre-trigger [ns]", Param::Time, PreTrigger);
+  AddCombo(g, "Polarity", DPPAlgorithmControl, Bit_DPPAlgorithmControl_PSD::Polarity, Bit_DPPAlgorithmControl_PSD::ListPolarity);
+  AddCombo(g, "N samples baseline", DPPAlgorithmControl, Bit_DPPAlgorithmControl_PSD::BaselineAvg, Bit_DPPAlgorithmControl_PSD::ListBaselineAvg);
+  cbBaselineAvg = params.back().cb;
+  AddSpin (g, "Fixed baseline [lsb]", Param::Raw, PSD::FixedBaseline);
+  sbFixedBaseline = params.back().sb;
+  AddSpin (g, "DC offset [%]", Param::DCOffset, DPP::ChannelDCOffset);
+  AddCombo(g, "Input dynamic", DPP::InputDynamicRange, {0, 0}, {});
+
+  NewTab("Discriminator", g);
+  AddCombo(g, "Discriminator mode", DPPAlgorithmControl, Bit_DPPAlgorithmControl_PSD::DiscriminationMode, {{"Leading edge", 0}, {"CFD", 1}});
+  AddSpin (g, "CFD delay [ns]", Param::Time, PSD::CFDSetting, PSD::Bit_CFDSetting::CFDDealy);
+  AddCombo(g, "CFD fraction", PSD::CFDSetting, PSD::Bit_CFDSetting::CFDFraction, PSD::Bit_CFDSetting::ListCFDFraction);
+  AddCombo(g, "Input smoothing", PSD::DPPAlgorithmControl2_G, PSD::Bit_DPPAlgorithmControl2::InputSmoothing, PSD::Bit_DPPAlgorithmControl2::ListInputSmoothing);
+  AddSpin (g, "Threshold [lsb]", Param::Raw, PSD::TriggerThreshold);
+  AddSpin (g, "Trigger holdoff [ns]", Param::Time, PSD::TriggerHoldOffWidth);
+
+  NewTab("QDC", g);
+  AddCombo(g, "Energy coarse gain", DPPAlgorithmControl, Bit_DPPAlgorithmControl_PSD::ChargeSensitivity, Bit_DPPAlgorithmControl_PSD::ListChargeSensitivity_2Vpp);
+  cbChargeSens = params.back().cb;
+  AddSpin (g, "Gate [ns]", Param::Time, PSD::LongGateWidth);
+  AddSpin (g, "Short gate [ns]", Param::Time, PSD::ShortGateWidth);
+  AddSpin (g, "Pre-gate [ns]", Param::Time, PSD::GateOffset);
+}
+
+void Scope::SetUpTabs_PHA(){
+  using namespace DPP;
+  QGridLayout * g;
+
+  NewTab("Input", g);
+  AddSpin (g, "Record length [ns]", Param::Time, RecordLength_G);
+  AddSpin (g, "Pre-trigger [ns]", Param::Time, PreTrigger);
+  AddCombo(g, "Polarity", DPPAlgorithmControl, Bit_DPPAlgorithmControl_PHA::Polarity, {{"Positive", 0}, {"Negative", 1}});
+  AddCombo(g, "N samples baseline", DPPAlgorithmControl, Bit_DPPAlgorithmControl_PHA::BaselineAvg, Bit_DPPAlgorithmControl_PHA::ListBaselineAvg);
+  AddSpin (g, "DC offset [%]", Param::DCOffset, DPP::ChannelDCOffset);
+  AddCombo(g, "Input dynamic", DPP::InputDynamicRange, {0, 0}, {});
+
+  NewTab("Discriminator", g);
+  AddSpin (g, "Threshold [lsb]", Param::Raw, PHA::TriggerThreshold);
+  AddSpin (g, "Input rise time [ns]", Param::Time, PHA::InputRiseTime);
+  AddSpin (g, "Trigger holdoff [ns]", Param::Time, PHA::TriggerHoldOffWidth);
+  AddCombo(g, "Fast discr. smoothing", PHA::RCCR2SmoothingFactor, {0, 0}, {});
+
+  NewTab("Trapezoid", g);
+  AddSpin (g, "Trap. rise time [ns]", Param::Time, PHA::TrapezoidRiseTime);
+  AddSpin (g, "Trap. flat top [ns]", Param::Time, PHA::TrapezoidFlatTop);
+  AddSpin (g, "Decay time [ns]", Param::Time, PHA::DecayTime);
+  AddSpin (g, "Peaking time [ns]", Param::Time, PHA::PeakingTime);
+  AddCombo(g, "N samples peak", DPPAlgorithmControl, Bit_DPPAlgorithmControl_PHA::PeakMean, {{"1 sample", 0}, {"4 samples", 1}, {"16 samples", 2}, {"64 samples", 3}});
+  AddSpin (g, "Peak holdoff [ns]", Param::Time, PHA::PeakHoldOff);
+}
+
+void Scope::SetUpTabs_QDC(){
+  using namespace DPP;
+  QGridLayout * g;
+
+  NewTab("Input", g);
+  AddSpin (g, "Record length [ns]", Param::Time, QDC::RecordLength_W);
+  AddSpin (g, "Pre-trigger [ns]", Param::Time, QDC::PreTrigger);
+  AddCombo(g, "Polarity", QDC::DPPAlgorithmControl, QDC::Bit_DPPAlgorithmControl::Polarity, {{"Positive", 0}, {"Negative", 1}});
+  AddSpin (g, "DC offset [%]", Param::DCOffset, QDC::DCOffset);
+
+  NewTab("Discriminator", g);
+  AddSpin (g, "Threshold [lsb]", Param::Raw, QDC::TriggerThreshold_sub0);
+  params.back().regOf = [](int ch) -> Reg {
+    switch( ch % 8 ){
+      case 1: return QDC::TriggerThreshold_sub1;
+      case 2: return QDC::TriggerThreshold_sub2;
+      case 3: return QDC::TriggerThreshold_sub3;
+      case 4: return QDC::TriggerThreshold_sub4;
+      case 5: return QDC::TriggerThreshold_sub5;
+      case 6: return QDC::TriggerThreshold_sub6;
+      case 7: return QDC::TriggerThreshold_sub7;
+    }
+    return QDC::TriggerThreshold_sub0;
+  };
+  params.back().sb->setMaximum(0xFFF);
+
+  NewTab("QDC", g);
+  AddSpin (g, "Gate [ns]", Param::Time, QDC::GateWidth);
+  AddSpin (g, "Pre-gate [ns]", Param::Time, QDC::GateOffset);
+}
+
+//*======================================================= the trace selectors
+
+void Scope::BuildTraceSelectors(){
+  using namespace DPP::Bit_BoardConfig;
+  const int dpp = digi[ID]->GetDPPType();
+  RComboBox * all[4] = {cbAnaTrace1, cbAnaTrace2, cbDigiTrace1, cbDigiTrace2};
+  for( RComboBox * cb : all ){ cb->clear(); cb->setEnabled(true); }
+
+  if( dpp == DPPTypeCode::DPP_PSD_CODE ){
+    Fill(cbAnaTrace1, {{"Input", 0}, {"CFD / smoothed input", 1}});
+    Fill(cbAnaTrace2, {{"None", 0}, {"Baseline", 1}, {"CFD / smoothed input", 2}});
+    Fill(cbDigiTrace1, ListDigiProbe1_PSD);
+    Fill(cbDigiTrace2, ListDigiProbe2_PSD);
+  }
+  if( dpp == DPPTypeCode::DPP_PHA_CODE ){
+    Fill(cbAnaTrace1, ListAnaProbe1_PHA);
+    cbAnaTrace2->addItem("None", PHANoSecondTrace);
+    for( auto & x : ListAnaProbe2_PHA ) cbAnaTrace2->addItem(QString::fromStdString(x.first), x.second);
+    Fill(cbDigiTrace1, ListDigiProbe1_PHA);
+    Fill(cbDigiTrace2, ListDigiProbe2_PHA);
+    cbDigiTrace2->setEnabled(false);
+  }
+  if( dpp == DPPTypeCode::DPP_QDC_CODE ){
+    Fill(cbAnaTrace1, ListAnaProbe_QDC);
+    cbAnaTrace2->addItem("N/A", 0);
+    cbDigiTrace1->addItem("Gate, Trigger", 0);
+    cbDigiTrace2->addItem("Trigger holdoff, Over threshold", 0);
+    cbAnaTrace2->setEnabled(false);
+    cbDigiTrace1->setEnabled(false);
+    cbDigiTrace2->setEnabled(false);
+  }
+}
+
+void Scope::ShowTraceSelection(){
+  using namespace DPP::Bit_BoardConfig;
+  const int dpp = digi[ID]->GetDPPType();
+  const uint32_t bd = digi[ID]->GetSettingFromMemory(DPP::BoardConfiguration);
+
+  if( dpp == DPPTypeCode::DPP_PSD_CODE ){
+    int a1, a2;
+    PSDTraces(Digitizer::ExtractBits(bd, AnalogProbe_PSD), a1, a2);
+    SelectData(cbAnaTrace1, a1);
+    SelectData(cbAnaTrace2, a2);
+    SelectData(cbDigiTrace1, Digitizer::ExtractBits(bd, DigiProbel1_PSD));
+    SelectData(cbDigiTrace2, Digitizer::ExtractBits(bd, DigiProbel2_PSD));
+  }
+  if( dpp == DPPTypeCode::DPP_PHA_CODE ){
+    SelectData(cbAnaTrace1, Digitizer::ExtractBits(bd, AnalogProbe1));
+    SelectData(cbAnaTrace2, Digitizer::ExtractBits(bd, DualTrace) ? (int) Digitizer::ExtractBits(bd, AnalogProbe2) : PHANoSecondTrace);
+    SelectData(cbDigiTrace1, Digitizer::ExtractBits(bd, DigiProbel1_PHA));
+    cbDigiTrace2->setCurrentIndex(0);
+  }
+  if( dpp == DPPTypeCode::DPP_QDC_CODE ){
+    SelectData(cbAnaTrace1, Digitizer::ExtractBits(bd, AnalogProbe1));
+  }
+
+  // the legend
+  if( dpp == DPPTypeCode::DPP_QDC_CODE ){
+    dataTrace[0]->setName(cbAnaTrace1->currentText());
+    const char * names[4] = {"Gate", "Trigger", "Trigger holdoff", "Over threshold"};
+    for( int k = 0; k < 4; k++ ){ dataTrace[1 + k]->setName(names[k]); dataTrace[1 + k]->setVisible(true); }
+  }else{
+    dataTrace[0]->setName(cbAnaTrace1->currentText());
+    dataTrace[1]->setName(cbAnaTrace2->currentText());
+    dataTrace[1]->setVisible(cbAnaTrace2->currentText() != "None");
+    dataTrace[2]->setName(cbDigiTrace1->currentText());
+    dataTrace[3]->setName(cbDigiTrace2->currentText());
+    dataTrace[4]->setVisible(false);
+  }
+  gateArea[0]->setName(dpp == DPPTypeCode::DPP_QDC_CODE ? "Gate" : "Long gate");
+  gateArea[1]->setName("Short gate");
+}
+
+void Scope::WriteTraceSelection(QObject * from){
+  using namespace DPP::Bit_BoardConfig;
+  const int dpp = digi[ID]->GetDPPType();
+  const uint32_t now = digi[ID]->GetSettingFromMemory(DPP::BoardConfiguration);
+  uint32_t bd = now;
+
+  if( dpp == DPPTypeCode::DPP_PSD_CODE ){
+    int a1 = cbAnaTrace1->currentData().toInt(), a2 = cbAnaTrace2->currentData().toInt();
+    if( a1 == 1 && a2 == 2 ){   // the firmware has no "CFD + CFD": the other trace gives way
+      enableSignalSlot = false;
+      if( from == cbAnaTrace1 ){ a2 = 0; SelectData(cbAnaTrace2, 0); } else { a1 = 0; SelectData(cbAnaTrace1, 0); }
+      enableSignalSlot = true;
+    }
+    bd = SetField(bd, AnalogProbe_PSD, PSDProbeField(a1, a2));
+    bd = SetField(bd, DigiProbel1_PSD, cbDigiTrace1->currentData().toUInt());
+    bd = SetField(bd, DigiProbel2_PSD, cbDigiTrace2->currentData().toUInt());
+  }
+  if( dpp == DPPTypeCode::DPP_PHA_CODE ){
+    bd = SetField(bd, AnalogProbe1, cbAnaTrace1->currentData().toUInt());
+    const int a2 = cbAnaTrace2->currentData().toInt();
+    bd = SetField(bd, DualTrace, a2 == PHANoSecondTrace ? 0 : 1);
+    if( a2 != PHANoSecondTrace ) bd = SetField(bd, AnalogProbe2, a2);
+    bd = SetField(bd, DigiProbel1_PHA, cbDigiTrace1->currentData().toUInt());
+  }
+  if( dpp == DPPTypeCode::DPP_QDC_CODE ){
+    bd = SetField(bd, AnalogProbe1, cbAnaTrace1->currentData().toUInt());
+  }
+  if( bd == now ){ ShowTraceSelection(); return; }
+
+  bool ok = false;
+  ApplyChange([&](){
+    digiMTX[ID].lock();
+    digi[ID]->WriteRegister(DPP::BoardConfiguration, bd, -1);
+    ok = digi[ID]->GetErrorCode() == CAEN_DGTZ_Success;
+    digiMTX[ID].unlock();
+  });
+  SendLogMsg("BoardConfiguration|DIG:" + QString::number(digi[ID]->GetSerialNumber()) + " traces: " + cbAnaTrace1->currentText() + ", "
+             + cbAnaTrace2->currentText() + ", " + cbDigiTrace1->currentText() + ", " + cbDigiTrace2->currentText()
+             + " | 0x" + QString::number(bd, 16) + (ok ? " | OK." : " | Fail."));
 
   enableSignalSlot = false;
-  unsigned int haha = digi[ID]->GetSettingFromMemory(para, ch);
-
-  if( para.GetPartialStep() >   0 ) sb->setValue(haha * para.GetPartialStep() * tick2ns);
-  if( para.GetPartialStep() == -1 ) sb->setValue(haha);
-  //enableSignalSlot = true;
+  ShowTraceSelection();
+  enableSignalSlot = true;
+  ClearTraces();
+  ClearPersistence();
+  if( ok ) emit UpdateOtherPanels();
 }
 
+//*=======================================================
+//*=======================================================
 
 void Scope::UpdatePanelFromMomeory(){
-
-  enableSignalSlot = false;
-  printf("==== Scope::%s \n", __func__);
-
-  int ch = cbScopeCh->currentIndex();
-
-  if( digi[ID]->GetDPPType() == V1730_DPP_PHA_CODE ) UpdatePanel_PHA();
-  if( digi[ID]->GetDPPType() == V1730_DPP_PSD_CODE ) UpdatePanel_PSD();
-  if( digi[ID]->GetDPPType() == V1740_DPP_QDC_CODE ) UpdatePanel_QDC();
-
-  settingGroup->setEnabled(digi[ID]->GetInputChannelOnOff(ch));
-
-}
-
-void Scope::UpdatePanel_PHA(){
-  enableSignalSlot = false;
-  printf("==== %s \n", __func__);
-
-  int ch = cbScopeCh->currentIndex();
-
-  uint32_t DPPAlg = digi[ID]->GetSettingFromMemory(DPP::DPPAlgorithmControl, ch);
-  if( Digitizer::ExtractBits(DPPAlg, DPP::Bit_DPPAlgorithmControl_PHA::Polarity) ){
-    cbPolarity->setCurrentIndex(1);
-  }else{
-    cbPolarity->setCurrentIndex(0);
-  }
-
-  unsigned int haha = digi[ID]->GetSettingFromMemory(DPP::RecordLength_G, ch);
-  sbReordLength->setValue(haha * DPP::RecordLength_G.GetPartialStep() * tick2ns);
-
-  haha = digi[ID]->GetSettingFromMemory(DPP::ChannelDCOffset, ch);
-  sbDCOffset->setValue((1.0 - haha * 1.0 / 0xFFFF) * 100 );
-
-  UpdateComobox(cbDynamicRange, DPP::InputDynamicRange);
-  UpdateSpinBox(sbPreTrigger, DPP::PreTrigger);
-
-  UpdateSpinBox(sbInputRiseTime,  DPP::PHA::InputRiseTime);
-  UpdateSpinBox(sbThreshold,      DPP::PHA::TriggerThreshold);
-  UpdateSpinBox(sbTriggerHoldOff, DPP::PHA::TriggerHoldOffWidth);
-
-  UpdateSpinBox(sbTrapRiseTime, DPP::PHA::TrapezoidRiseTime);
-  UpdateSpinBox(sbTrapFlatTop,  DPP::PHA::TrapezoidFlatTop);
-  UpdateSpinBox(sbDecayTime,    DPP::PHA::DecayTime);
-  UpdateSpinBox(sbPeakingTime,  DPP::PHA::PeakingTime);
-
-  UpdateComobox(cbSmoothingFactor, DPP::PHA::RCCR2SmoothingFactor);
-
-  int temp = Digitizer::ExtractBits(DPPAlg, DPP::Bit_DPPAlgorithmControl_PHA::BaselineAvg);
-  for(int i = 0; i < cbBaselineAvg->count(); i++){
-    if( cbBaselineAvg->itemData(i).toInt() == temp) {
-      cbBaselineAvg->setCurrentIndex(i);
-      break;
-    }
-  }
-
-  temp = Digitizer::ExtractBits(DPPAlg, DPP::Bit_DPPAlgorithmControl_PHA::PeakMean);
-  for(int i = 0; i < cbPeakAvg->count(); i++){
-    if( cbPeakAvg->itemData(i).toInt() == temp) {
-      cbPeakAvg->setCurrentIndex(i);
-      break;
-    }
-  }
-
-  uint32_t BdCfg = digi[ID]->GetSettingFromMemory(DPP::BoardConfiguration);
-
-  temp = Digitizer::ExtractBits(BdCfg, DPP::Bit_BoardConfig::AnalogProbe1);
-  for(int i = 0; i < cbAnaProbe1->count(); i++){
-    if( cbAnaProbe1->itemData(i).toInt() == temp) {
-      cbAnaProbe1->setCurrentIndex(i);
-      dataTrace[0]->setName(cbAnaProbe1->currentText());
-      break;
-    }
-  }
-  temp = Digitizer::ExtractBits(BdCfg, DPP::Bit_BoardConfig::AnalogProbe2);
-  for(int i = 0; i < cbAnaProbe2->count(); i++){
-    if( cbAnaProbe2->itemData(i).toInt() == temp) {
-      cbAnaProbe2->setCurrentIndex(i);
-      dataTrace[1]->setName(cbAnaProbe2->currentText());
-      break;
-    }
-  }
-  temp = Digitizer::ExtractBits(BdCfg, DPP::Bit_BoardConfig::DigiProbel1_PHA);
-  for(int i = 0; i < cbDigiProbe1->count(); i++){
-    if( cbDigiProbe1->itemData(i).toInt() == temp) {
-      cbDigiProbe1->setCurrentIndex(i);
-      dataTrace[2]->setName(cbDigiProbe1->currentText());
-      break;
-    }
-  }
-
-  enableSignalSlot = true;
-}
-
-void Scope::UpdatePanel_PSD(){
+  const bool saved = enableSignalSlot;
   enableSignalSlot = false;
 
-  printf("==== %s \n", __func__);
+  const int ch = cbScopeCh->currentIndex();
 
-  int ch = cbScopeCh->currentIndex();
-
-  uint32_t DPPAlg = digi[ID]->GetSettingFromMemory(DPP::DPPAlgorithmControl, ch);
-  if( Digitizer::ExtractBits(DPPAlg, DPP::Bit_DPPAlgorithmControl_PSD::Polarity) ){
-    cbPolarity->setCurrentIndex(1);
-  }else{
-    cbPolarity->setCurrentIndex(0);
+  // DPP-PSD: the coarse gain's choices follow the input range
+  if( cbChargeSens ){
+    const bool half = digi[ID]->GetSettingFromMemory(DPP::InputDynamicRange, ch) == 1;
+    Fill(cbChargeSens, half ? DPP::Bit_DPPAlgorithmControl_PSD::ListChargeSensitivity_p5Vpp : DPP::Bit_DPPAlgorithmControl_PSD::ListChargeSensitivity_2Vpp);
   }
 
-  unsigned int haha = digi[ID]->GetSettingFromMemory(DPP::RecordLength_G, ch);
-  sbReordLength->setValue(haha * DPP::RecordLength_G.GetPartialStep() * tick2ns);
+  for( Param & p : params ) ShowParam(p);
+  if( sbFixedBaseline && cbBaselineAvg ) sbFixedBaseline->setEnabled(cbBaselineAvg->currentData().toInt() == 0);
+  ShowTraceSelection();
 
-  haha = digi[ID]->GetSettingFromMemory(DPP::ChannelDCOffset, ch);
-  sbDCOffset->setValue((1.0 - haha * 1.0 / 0xFFFF) * 100 );
+  tabs->setEnabled(digi[ID]->GetInputChannelOnOff(ch));
 
-  UpdateComobox(cbDynamicRange, DPP::InputDynamicRange);
-  UpdateSpinBox(sbPreTrigger, DPP::PreTrigger);
-
-  UpdateSpinBox(sbShortGate, DPP::PSD::ShortGateWidth);
-  UpdateSpinBox(sbLongGate,  DPP::PSD::LongGateWidth);
-  UpdateSpinBox(sbGateOffset, DPP::PSD::GateOffset);
-  UpdateSpinBox(sbThreshold, DPP::PSD::TriggerThreshold);
-
-  uint32_t BdCfg = digi[ID]->GetSettingFromMemory(DPP::BoardConfiguration, ch);
-
-  int temp = Digitizer::ExtractBits(BdCfg, DPP::Bit_BoardConfig::AnalogProbe1);
-  for( int i = 0; i < cbAnaProbe1->count(); i++){
-    if( cbAnaProbe1->itemData(i).toInt() == temp ) {
-      cbAnaProbe1->setCurrentIndex(i);
-      dataTrace[0]->setName(cbAnaProbe1->currentText());
-      break;
-    }
-  }
-  temp = Digitizer::ExtractBits(BdCfg, DPP::Bit_BoardConfig::DigiProbel1_PSD);
-  for( int i = 0; i < cbDigiProbe1->count(); i++){
-    if( cbDigiProbe1->itemData(i).toInt() == temp ) {
-      cbDigiProbe1->setCurrentIndex(i);
-      dataTrace[2]->setName(cbDigiProbe1->currentText());
-      break;
-    }
-  }
-  temp = Digitizer::ExtractBits(BdCfg, DPP::Bit_BoardConfig::DigiProbel2_PSD);
-  for( int i = 0; i < cbDigiProbe2->count(); i++){
-    if( cbDigiProbe2->itemData(i).toInt() == temp ) {
-      cbDigiProbe2->setCurrentIndex(i);
-      dataTrace[3]->setName(cbDigiProbe2->currentText());
-      break;
-    }
-  }
-
-  enableSignalSlot = true;
-}
-
-void Scope::UpdatePanel_QDC(){
-  enableSignalSlot = false;
-
-  printf("==== %s \n", __func__);
-
-  int ch = cbScopeCh->currentIndex();
-
-  int grp = ch/8;
-
-  uint32_t DPPAlg = digi[ID]->GetSettingFromMemory(DPP::QDC::DPPAlgorithmControl, grp);
-  if( Digitizer::ExtractBits(DPPAlg, DPP::QDC::Bit_DPPAlgorithmControl::Polarity) ){
-    cbPolarity->setCurrentIndex(1);
-  }else{
-    cbPolarity->setCurrentIndex(0);
-  }
-
-  uint32_t haha = digi[ID]->GetSettingFromMemory(DPP::QDC::DCOffset, grp);
-  sbDCOffset->setValue((1.0 - haha * 1.0 / 0xFFFF) * 100 );
-
-  //UpdateSpinBox(sbReordLength, DPP::QDC::RecordLength);
-  sbReordLength->setValue(digi[ID]->ReadQDCRecordLength() * 8 * 16);
-  UpdateSpinBox(sbPreTrigger, DPP::QDC::PreTrigger);
-
-  UpdateSpinBox(sbShortGate, DPP::QDC::GateWidth);
-  UpdateSpinBox(sbGateOffset, DPP::QDC::GateOffset);
-
-  int subCh = ch%8;
-  uint32_t threshold = 0 ;
-  switch( subCh ){
-    case 0 : threshold = digi[ID]->GetSettingFromMemory(DPP::QDC::TriggerThreshold_sub0, grp); break;
-    case 1 : threshold = digi[ID]->GetSettingFromMemory(DPP::QDC::TriggerThreshold_sub1, grp); break;
-    case 2 : threshold = digi[ID]->GetSettingFromMemory(DPP::QDC::TriggerThreshold_sub2, grp); break;
-    case 3 : threshold = digi[ID]->GetSettingFromMemory(DPP::QDC::TriggerThreshold_sub3, grp); break;
-    case 4 : threshold = digi[ID]->GetSettingFromMemory(DPP::QDC::TriggerThreshold_sub4, grp); break;
-    case 5 : threshold = digi[ID]->GetSettingFromMemory(DPP::QDC::TriggerThreshold_sub5, grp); break;
-    case 6 : threshold = digi[ID]->GetSettingFromMemory(DPP::QDC::TriggerThreshold_sub6, grp); break;
-    case 7 : threshold = digi[ID]->GetSettingFromMemory(DPP::QDC::TriggerThreshold_sub7, grp); break;
-  }
-  sbThreshold->setValue(threshold);
-
-
-  uint32_t BdCfg = digi[ID]->GetSettingFromMemory(DPP::BoardConfiguration, 0);
-
-  int temp = Digitizer::ExtractBits(BdCfg, DPP::Bit_BoardConfig::AnalogProbe1);
-  for( int i = 0; i < cbAnaProbe1->count(); i++){
-    if( cbAnaProbe1->itemData(i).toInt() == temp ) {
-      cbAnaProbe1->setCurrentIndex(i);
-      dataTrace[0]->setName(cbAnaProbe1->currentText());
-      break;
-    }
-  }
-
-  enableSignalSlot = true;
+  enableSignalSlot = saved;
 }
 
 void Scope::ReadSettingsFromBoard(){
   DebugPrint("%s", "Scope");
+  if( IsRunning(ID) ){ UpdatePanelFromMomeory(); return; } // a running board answers no reads; the memory has its settings
+
+  const int ch = cbScopeCh->currentIndex();
   digi[ID]->ReadRegister(DPP::BoardConfiguration);
 
   if( digi[ID]->GetDPPType() == V1730_DPP_PHA_CODE ){
-    int ch = cbScopeCh->currentIndex();
-  
-    digi[ID]->ReadRegister(DPP::RecordLength_G, ch);
-    digi[ID]->ReadRegister(DPP::PreTrigger, ch);
-    digi[ID]->ReadRegister(DPP::ChannelDCOffset, ch);
-    digi[ID]->ReadRegister(DPP::InputDynamicRange, ch);
-    digi[ID]->ReadRegister(DPP::BoardConfiguration, ch);
-    digi[ID]->ReadRegister(DPP::DPPAlgorithmControl, ch);
-
-    digi[ID]->ReadRegister(DPP::PHA::InputRiseTime, ch);
-    digi[ID]->ReadRegister(DPP::PHA::TriggerThreshold, ch);
-    digi[ID]->ReadRegister(DPP::PHA::TriggerHoldOffWidth, ch);
-    digi[ID]->ReadRegister(DPP::PHA::TrapezoidRiseTime, ch);
-    digi[ID]->ReadRegister(DPP::PHA::TrapezoidFlatTop, ch);
-    digi[ID]->ReadRegister(DPP::PHA::DecayTime, ch);
-    digi[ID]->ReadRegister(DPP::PHA::PeakingTime, ch);
+    const Reg regs[] = {DPP::RecordLength_G, DPP::PreTrigger, DPP::ChannelDCOffset, DPP::InputDynamicRange, DPP::DPPAlgorithmControl,
+                        DPP::PHA::InputRiseTime, DPP::PHA::TriggerThreshold, DPP::PHA::TriggerHoldOffWidth, DPP::PHA::RCCR2SmoothingFactor,
+                        DPP::PHA::TrapezoidRiseTime, DPP::PHA::TrapezoidFlatTop, DPP::PHA::DecayTime, DPP::PHA::PeakingTime, DPP::PHA::PeakHoldOff};
+    for( const Reg & r : regs ) digi[ID]->ReadRegister(r, ch);
   }
 
-  if( digi[ID]->GetDPPType() == V1730_DPP_PSD_CODE){
-    int ch = cbScopeCh->currentIndex();
-  
-    digi[ID]->ReadRegister(DPP::RecordLength_G, ch);
-    digi[ID]->ReadRegister(DPP::PreTrigger, ch);
-    digi[ID]->ReadRegister(DPP::ChannelDCOffset, ch);
-    digi[ID]->ReadRegister(DPP::InputDynamicRange, ch);
-    digi[ID]->ReadRegister(DPP::BoardConfiguration, ch);
-    digi[ID]->ReadRegister(DPP::DPPAlgorithmControl, ch);
-
-    digi[ID]->ReadRegister(DPP::PSD::ShortGateWidth);
-    digi[ID]->ReadRegister(DPP::PSD::LongGateWidth);
-    digi[ID]->ReadRegister(DPP::PSD::GateOffset);
+  if( digi[ID]->GetDPPType() == V1730_DPP_PSD_CODE ){
+    const Reg regs[] = {DPP::RecordLength_G, DPP::PreTrigger, DPP::ChannelDCOffset, DPP::InputDynamicRange, DPP::DPPAlgorithmControl,
+                        DPP::PSD::DPPAlgorithmControl2_G, DPP::PSD::CFDSetting, DPP::PSD::TriggerThreshold, DPP::PSD::TriggerHoldOffWidth,
+                        DPP::PSD::FixedBaseline, DPP::PSD::ShortGateWidth, DPP::PSD::LongGateWidth, DPP::PSD::GateOffset};
+    for( const Reg & r : regs ) digi[ID]->ReadRegister(r, ch);
   }
 
-  if( digi[ID]->GetDPPType() == V1740_DPP_QDC_CODE){
-    int ch = cbScopeCh->currentIndex();
-    int grp = ch/8;
-
-    //digi[ID]->ReadRegister(DPP::QDC::RecordLength, grp);
-
+  if( digi[ID]->GetDPPType() == V1740_DPP_QDC_CODE ){
+    const int grp = ch / 8;
     digi[ID]->ReadQDCRecordLength();
-    
-    digi[ID]->ReadRegister(DPP::QDC::PreTrigger, grp);
-    digi[ID]->ReadRegister(DPP::QDC::DCOffset, grp);
-    digi[ID]->ReadRegister(DPP::QDC::DPPAlgorithmControl, grp);
-
-    digi[ID]->ReadRegister(DPP::QDC::GateOffset, grp);
-    digi[ID]->ReadRegister(DPP::QDC::GateWidth, grp);
-
-    digi[ID]->ReadRegister(DPP::QDC::TriggerThreshold_sub0, grp);
-    digi[ID]->ReadRegister(DPP::QDC::TriggerThreshold_sub1, grp);
-    digi[ID]->ReadRegister(DPP::QDC::TriggerThreshold_sub2, grp);
-    digi[ID]->ReadRegister(DPP::QDC::TriggerThreshold_sub3, grp);
-    digi[ID]->ReadRegister(DPP::QDC::TriggerThreshold_sub4, grp);
-    digi[ID]->ReadRegister(DPP::QDC::TriggerThreshold_sub5, grp);
-    digi[ID]->ReadRegister(DPP::QDC::TriggerThreshold_sub6, grp);
-    digi[ID]->ReadRegister(DPP::QDC::TriggerThreshold_sub7, grp);
-
+    const Reg regs[] = {DPP::QDC::PreTrigger, DPP::QDC::DCOffset, DPP::QDC::DPPAlgorithmControl, DPP::QDC::GateOffset, DPP::QDC::GateWidth,
+                        DPP::QDC::TriggerThreshold_sub0, DPP::QDC::TriggerThreshold_sub1, DPP::QDC::TriggerThreshold_sub2, DPP::QDC::TriggerThreshold_sub3,
+                        DPP::QDC::TriggerThreshold_sub4, DPP::QDC::TriggerThreshold_sub5, DPP::QDC::TriggerThreshold_sub6, DPP::QDC::TriggerThreshold_sub7};
+    for( const Reg & r : regs ) digi[ID]->ReadRegister(r, grp);
   }
 
   UpdatePanelFromMomeory();
-
 }
-
-

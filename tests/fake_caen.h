@@ -30,6 +30,7 @@ typedef struct {
   long startSeq;       // order of the last SWStart / SWStop over all boards (1, 2, ...; 0 = never)
   long stopSeq;
   int calibrations;    // CAEN_DGTZ_Calibrate calls
+  int swTriggers;      // software triggers (0x8108, 0x80C0, 0x1nC0)
 } fake_caen_stats;
 
 // Add a board. link: 0 = USB (num = USB link), 1 = optical (num = port, node = daisy-chain index).

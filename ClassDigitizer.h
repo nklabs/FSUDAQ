@@ -103,6 +103,7 @@ class Digitizer{
     bool WaitSPIFree(int ch); /// before a DC offset write: wait until the channel's (ch < 0: every channel's) SPI bus is free
     bool NeedsADCCalibration() const; /// a x725/x730 that is not an "S" version (DT5730B, DT5725B): its ADCs want a calibration
     int  CalibrateADC(std::string & why); /// calibrate every channel's ADC, as CoMPASS at each start: ms taken, or -1 (why says why)
+    bool SendSoftwareTrigger(int ch);     /// one software trigger to channel ch (DPP-QDC: to the board), also while taking data
     bool IsDummy()         {return isDummy;}
     bool IsConnected()     {return isConnected;}
     

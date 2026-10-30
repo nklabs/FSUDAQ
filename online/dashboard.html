@@ -42,7 +42,16 @@
   .bar { display:flex; align-items:center; gap:4px; margin:0 0 4px; }
   .bar h2 { flex:1; margin:0; cursor:grab; user-select:none; }
   .ctl input[type=number] { width:64px; font:12px system-ui, sans-serif; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:4px; padding:0 3px; }
-  #c_q, #c_psd { cursor:crosshair; }
+  #c_q, #c_psd, .cmpgrid canvas.zoomable { cursor:crosshair; }
+  /* channels side by side: one panel each, as many per row as fit */
+  .cmpgrid { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:8px; }
+  .cmpgrid .p { border:1px solid var(--line); border-radius:4px; padding:4px 6px; min-width:0; }
+  .cmpgrid .ph { display:flex; align-items:center; gap:6px; font-size:12px; }
+  .cmpgrid .ph b { flex:1; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .cmpgrid .ph span { color:var(--muted); font-variant-numeric:tabular-nums; }
+  .cmpgrid .ph button { font:11px/16px system-ui, sans-serif; padding:0 5px; border:1px solid var(--line); background:transparent; color:var(--muted); border-radius:4px; cursor:pointer; }
+  .cmpgrid .ph i { display:inline-block; width:9px; height:9px; border-radius:2px; }
+  .cmpgrid .empty { color:var(--muted); padding:16px 0; }
   #c_grid { height:430px; cursor:pointer; }
   .card.tall1 #c_grid { height:620px; }
   .card.tall2 #c_grid { height:840px; }
@@ -101,6 +110,14 @@
       <canvas id="c_q"></canvas><div class="note" id="note_q"></div></div>
     <div class="card"><h2>Pulse shape: (Qlong − Qshort) ÷ Qlong against Qlong · <b class="chname">–</b></h2>
       <canvas id="c_psd"></canvas><div class="note" id="note_psd"></div></div>
+    <div class="card wfull"><h2>Channels side by side</h2>
+      <div class="ctl"><label>show <select id="cmp_what"><option value="q">pulse height (Qlong)</option><option value="iat">time since the previous hit</option>
+          <option value="dt">time to the reference channel</option><option value="rate">hit rate over time</option></select></label>
+        <label>add <select id="cmp_add"></select></label><button id="cmp_add_sel" title="Add the channel picked at the top">add picked channel</button>
+        <button id="cmp_none">remove all</button>
+        <label><input type="checkbox" id="cmp_same" checked> same y scale</label><label><input type="checkbox" id="cmp_log" checked> log y</label>
+        <span>Ctrl-click a bar above or a panel of the grid below to add or remove a channel</span></div>
+      <div class="cmpgrid" id="cmp" data-card></div><div class="note" id="note_cmp"></div></div>
     <div class="card wfull"><h2>Pulse height on every channel</h2>
       <div class="ctl"><label><input type="checkbox" id="grid_log" checked> log y</label>
         <span id="grid_note"></span></div>
@@ -160,8 +177,10 @@ function message(id, text){ const {g,w,h}=setupCanvas(id); g.fillStyle=css('--mu
 // spec: {xlog, ylog, x0, x1, xfmt, yfmt, xticks, series:[{kind:'bars'|'step'|'line', edges|x, y, color, colors, width, gap}], marks:[{x}], ylabel, empty}
 function plot(id, spec){
   const {g,w,h}=setupCanvas(id); const L=50,B=24,T=8,R=10;
-  const ys = spec.series.flatMap(s=>s.y).filter(v=>isFinite(v) && (spec.ylog ? v>0 : true));
-  if(!ys.length || (!spec.ylog && !ys.some(v=>v>0))){ message(id, spec.empty || 'no entries yet'); PLOTS[id]=null; return null; }
+  const own = spec.series.flatMap(s=>s.y).filter(v=>isFinite(v) && (spec.ylog ? v>0 : true));
+  if(!own.length || (!spec.ylog && !own.some(v=>v>0))){ message(id, spec.empty || 'no entries yet'); PLOTS[id]=null; return null; }
+  // spec.yall: the values of several plots that share one y scale
+  const ys = spec.yall ? spec.yall.filter(v=>isFinite(v) && (spec.ylog ? v>0 : true)) : own;
   let y0, y1;
   if(spec.ylog){ y1 = Math.pow(10, Math.ceil(Math.log10(Math.max(...ys))+1e-9)); y0 = Math.pow(10, Math.floor(Math.log10(Math.min(...ys)))); if(y1<=y0) y1=y0*10; }
   else { y0 = Math.min(0, ...ys); y1 = Math.max(...ys)*1.08; }
@@ -249,10 +268,12 @@ document.getElementById('q_full').onclick = ()=>setView({lo:0, hi:65536});
 // drag across the spectrum or the PSD map to zoom in on Qlong; double-click for the full range
 const zsel = document.createElement('div'); zsel.className='zoomsel'; zsel.hidden=true; document.body.appendChild(zsel);
 let zdrag = null;
-for(const id of ['c_q','c_psd']){ const c=document.getElementById(id);
-  c.addEventListener('mousedown', ev=>{ const A=PLOTS[id]; if(!A || ev.button!==0) return; ev.preventDefault();
-    const r=c.getBoundingClientRect(); zdrag={id, A, r, x:Math.min(Math.max(ev.clientX, r.left+A.L), r.left+A.w-A.R)}; });
-  c.addEventListener('dblclick', ()=>setView({lo:0, hi:65536})); }
+// enabled(): whether the canvas shows Qlong now (a comparison panel may show another histogram)
+function qZoomable(c, enabled=()=>true){
+  c.addEventListener('mousedown', ev=>{ const A=PLOTS[c.id]; if(!A || ev.button!==0 || !enabled()) return; ev.preventDefault();
+    const r=c.getBoundingClientRect(); zdrag={id:c.id, A, r, x:Math.min(Math.max(ev.clientX, r.left+A.L), r.left+A.w-A.R)}; });
+  c.addEventListener('dblclick', ()=>{ if(enabled()) setView({lo:0, hi:65536}); }); }
+for(const id of ['c_q','c_psd']) qZoomable(document.getElementById(id));
 window.addEventListener('mousemove', ev=>{ if(!zdrag) return; const {A, r}=zdrag; const x=Math.min(Math.max(ev.clientX, r.left+A.L), r.left+A.w-A.R);
   Object.assign(zsel.style, {left:Math.min(x, zdrag.x)+'px', width:Math.abs(x-zdrag.x)+'px', top:(r.top+A.T)+'px', height:(A.h-A.B-A.T)+'px'}); zsel.hidden=false; });
 window.addEventListener('mouseup', ev=>{ if(!zdrag) return; const {A, r}=zdrag; zsel.hidden=true;
@@ -313,6 +334,9 @@ async function fetchChannel(){
   if(selSlot===null) return;
   try { CH = await (await fetch(`/channel?slot=${selSlot}&${viewQuery()}`)).json();
         if(document.getElementById('spec_which').value==='all') SPEC_ALL = await (await fetch('/channel?slot=-1')).json();
+        const cc = document.getElementById('cmp').closest('.card');
+        if(tab==='daq' && CMP.length && !cc.classList.contains('collapsed')){   // on its own: an analysis older than the page has no /compare
+          try { const r = await fetch(`/compare?slots=${CMP.join(',')}&${viewQuery()}`); CMPD = r.ok ? await r.json() : null; } catch(e){ CMPD = null; } }
         const gc = document.getElementById('c_grid').closest('.card');
         if(tab==='daq' && !gc.classList.contains('collapsed')) GRID = await (await fetch('/grid?'+viewQuery(64))).json(); } catch(e){ return; }
   draw();
@@ -352,7 +376,8 @@ function drawDaq(){
     let start=0; for(let i=1;i<=slots.length;i++){ if(i===slots.length || slots[i].board!==slots[start].board){
         g.fillText(`Digi-${slots[start].board} ch0–${slots[i-1].ch}`, (A.X(start)+A.X(i))/2, A.h-7); start=i; } } }
   document.getElementById('c_chan').onclick = ev=>{ if(!A) return; const r=ev.target.getBoundingClientRect(); const x=ev.clientX-r.left;
-    const i=Math.floor((x-A.L)/((A.w-A.L-A.R)/slots.length)); if(i>=0 && i<slots.length){ selSlot=slots[i].slot; store.set('fsudaq-sel-slot', selSlot); fillSelects(); fetchChannel(); } };
+    const i=Math.floor((x-A.L)/((A.w-A.L-A.R)/slots.length)); if(i>=0 && i<slots.length && (ev.ctrlKey || ev.metaKey)){ toggleCmp(slots[i].slot); return; }
+    if(i>=0 && i<slots.length){ selSlot=slots[i].slot; store.set('fsudaq-sel-slot', selSlot); fillSelects(); fetchChannel(); } };
   legend('leg_chan', S.boards.map((b,i)=>({name:'Digi-'+b.serial, color:BOARD_COLOR[i%BOARD_COLOR.length]})).concat([{name:'selected channel', color:css('--sel')}]));
   const slowCh = D.total_rate==null ? [] : slots.filter(s=>s.rate==null && s.written);
   const pauseLate = S.pause_flush_s!=null;
@@ -369,6 +394,7 @@ function drawDaq(){
   if(secs.length>1) plot('c_total', {x0:secs[0].t, x1:secs[secs.length-1].t, xfmt:v=>sinum(v)+' s', series:ser, ylabel:'Hz'}); else message('c_total','no data yet');
   legend('leg_total', [{name:'all channels', color:css('--fg')}].concat(S.boards.map((b,i)=>({name:'Digi-'+b.serial, color:BOARD_COLOR[i%BOARD_COLOR.length]}))));
   drawGrid();
+  drawCompare();
   if(!CH || CH.slot!==selSlot){ ['c_q','c_psd','c_iat','c_dt','c_crate'].forEach(id=>{ message(id,'loading…'); PLOTS[id]=null; }); }
   else {
     // Qlong over the range picked above; on the log axis per count, since the bins widen with Q
@@ -418,6 +444,68 @@ function drawDaq(){
         (b.slow_couples.length ? 'slow pairs: ' + b.slow_couples.map(c=>`ch${2*c}/${2*c+1}`).join(', ') : '')}</td></tr>`).join('');
 }
 
+// ---------------------------------------------------------------- channels side by side
+const CMP_MAX = 8;
+let CMP = store.get('fsudaq-cmp', []), CMPD = null;   // the channels compared (in the order added), and their histograms
+{ const pre = new URLSearchParams(location.search).get('cmp');   // ?cmp=3,17,40: these slots (a link to a comparison)
+  if(pre!==null){ CMP = pre.split(',').filter(x=>x.trim()!=='').map(Number).filter(n=>Number.isInteger(n) && n>=0).slice(0, CMP_MAX); store.set('fsudaq-cmp', CMP); } }
+function setCmp(list){ CMP = list.slice(0, CMP_MAX); store.set('fsudaq-cmp', CMP); CMPD = null; draw(); fetchChannel(); }
+function toggleCmp(sl){ setCmp(CMP.includes(sl) ? CMP.filter(x=>x!==sl) : CMP.concat([sl])); }
+document.getElementById('cmp_add').onchange = e=>{ const v=+e.target.value; e.target.value=''; if(v>=0 && !CMP.includes(v)) setCmp(CMP.concat([v])); };
+document.getElementById('cmp_add_sel').onclick = ()=>{ if(selSlot!==null && !CMP.includes(selSlot)) setCmp(CMP.concat([selSlot])); };
+document.getElementById('cmp_none').onclick = ()=>setCmp([]);
+['cmp_what','cmp_same','cmp_log'].forEach(id=>document.getElementById(id).onchange=()=>draw());
+const cmpWhat = () => document.getElementById('cmp_what').value;
+// the histogram a panel shows, as plot() series, for the choice above
+function cmpSeries(d, color){
+  const w = cmpWhat(), ylog = document.getElementById('cmp_log').checked;
+  if(w==='q'){ const q=d.q, qe=q.edges, bw=qe[1]-qe[0];
+    return {x0:VIEW.lo, x1:VIEW.hi, xlog:q.log, ylog, series:[{kind:'bars', edges:qe, y:q.log ? q.counts.map((c,i)=>c/(qe[i+1]-qe[i])) : q.counts, color, gap:0}],
+            empty:'no hits in this range yet', ylabel: q.log ? 'hits per Qlong count' : `hits per ${bw===1?'count':bw+' counts'}`}; }
+  if(w==='iat') return {x0:1, x1:1e9, xlog:true, ylog, xfmt:nsfmt, series:[{kind:'bars', edges:d.iat.edges, y:d.iat.counts, color, gap:0}], empty:'no hits yet', ylabel:'hits'};
+  if(w==='dt') return CMPD.ref===null ? null : {x0:-200, x1:200, ylog, series:[{kind:'bars', edges:d.dt.edges, y:d.dt.counts, color, gap:0}], empty:'no pairs within ±200 ns yet', ylabel:'pairs per 0.5 ns'};
+  if(d.rate.length<2) return {x0:0, x1:1, series:[{kind:'line', x:[], y:[], color}], empty:'no data yet'};
+  return {x0:d.rate[0][0], x1:d.rate[d.rate.length-1][0], ylog, xfmt:v=>sinum(v)+' s', series:[{kind:'line', x:d.rate.map(r=>r[0]), y:d.rate.map(r=>r[1]), color}], ylabel:'Hz'};
+}
+function drawCompare(){
+  const box = document.getElementById('cmp');
+  const slots = S.daq.slots, add = document.getElementById('cmp_add');
+  const opts = '<option value="">channel…</option>' + slots.filter(s=>!CMP.includes(s.slot)).map(s=>`<option value="${s.slot}">${slotName(s)}</option>`).join('');
+  if(add.dataset.k !== opts){ add.innerHTML = opts; add.dataset.k = opts; }
+  CMP = CMP.filter(sl=>slots.some(s=>s.slot===sl));
+  if(box.closest('.card').classList.contains('collapsed')) return;
+  const note = document.getElementById('note_cmp');
+  if(!CMP.length){ box.innerHTML = '<div class="empty">No channels yet: add some above, or Ctrl-click a bar or a grid panel.</div>'; box.dataset.k=''; note.textContent=''; return; }
+  // one panel per channel, rebuilt only when the channels change
+  const key = CMP.join(',');
+  if(box.dataset.k !== key){
+    box.innerHTML = CMP.map(sl=>`<div class="p"><div class="ph"><i></i><b></b><span></span><button data-sl="${sl}" title="remove from the comparison">×</button></div><canvas id="cmp_c_${sl}"></canvas></div>`).join('');
+    box.dataset.k = key;
+    box.querySelectorAll('button').forEach(b=>b.onclick=()=>toggleCmp(+b.dataset.sl));
+    box.querySelectorAll('canvas').forEach(c=>qZoomable(c, ()=>cmpWhat()==='q'));
+  }
+  box.querySelectorAll('canvas').forEach(c=>c.classList.toggle('zoomable', cmpWhat()==='q'));
+  const byslot = CMPD ? Object.fromEntries(CMPD.channels.map(d=>[d.slot, d])) : {};
+  const specs = CMP.map(sl=>{ const d=byslot[sl], s=slots.find(x=>x.slot===sl);
+    const color = BOARD_COLOR[boardIndex(s.board)%BOARD_COLOR.length];
+    return {sl, d, s, color, spec: d ? cmpSeries(d, color) : undefined}; });
+  // same y scale: every panel's values together
+  if(document.getElementById('cmp_same').checked){ const yall = specs.flatMap(x=>x.spec ? x.spec.series.flatMap(s=>s.y) : []); specs.forEach(x=>{ if(x.spec) x.spec.yall = yall; }); }
+  const w = cmpWhat();
+  for(const {sl, d, s, color, spec} of specs){
+    const panel = document.getElementById('cmp_c_'+sl).parentElement;
+    panel.querySelector('i').style.background = color;
+    panel.querySelector('b').textContent = slotName(s); panel.querySelector('b').title = slotName(s);
+    panel.querySelector('span').textContent = d ? (w==='q' ? `${sinum(d.q.counts.reduce((a,b)=>a+b,0))} in range · ${sinum(d.count)} hits` : `${sinum(d.count)} hits`) : '';
+    if(!d) message('cmp_c_'+sl, 'loading…');
+    else if(spec===null) message('cmp_c_'+sl, 'pick a timing reference channel above');
+    else plot('cmp_c_'+sl, spec);
+  }
+  note.textContent = (w==='q' ? `Q ${VIEW.lo}–${VIEW.hi}, the range and binning of the pulse-height plot: drag across a panel to zoom all of them, double-click for the full range. ` : '') +
+    (w==='dt' && CMPD && CMPD.ref!==null ? `Reference: ${slotName(slots.find(s=>s.slot===CMPD.ref))}. ` : '') +
+    (document.getElementById('cmp_same').checked ? 'One y scale for all panels. ' : 'Each panel scaled to its own peak. ') + `Up to ${CMP_MAX} channels; kept in this browser.`;
+}
+
 // every channel's Qlong spectrum over the shown range: one row per board, one panel per channel
 let GRID_BOXES = [];
 function drawGrid(){
@@ -446,6 +534,7 @@ function drawGrid(){
 }
 document.getElementById('c_grid').onclick = ev=>{ const r=ev.target.getBoundingClientRect(), x=ev.clientX-r.left, y=ev.clientY-r.top;
   const b=GRID_BOXES.find(b=>x>=b.x && x<b.x+b.w && y>=b.y && y<b.y+b.h);
+  if(b && (ev.ctrlKey || ev.metaKey)){ toggleCmp(b.slot); return; }
   if(b){ selSlot=b.slot; store.set('fsudaq-sel-slot', selSlot); fillSelects(); draw(); fetchChannel(); } };
 
 const STATUS_ORDER = ['unique','tracks','ambiguous','multitrack','veto','electron','dropped','none','incomplete'];
@@ -516,7 +605,7 @@ const LAYOUT_KEY = 'fsudaq-dashboard-layout-2';
 const WIDTHS = ['', 'w2', 'wfull'], HEIGHTS = ['', 'tall1', 'tall2'];
 const grids = [...document.querySelectorAll('.grid')];
 const cards = grids.flatMap(gr => [...gr.querySelectorAll('.card')]);
-cards.forEach(c => { c.dataset.id = c.querySelector('canvas,table').id; c.dataset.grid = c.parentElement.dataset.grid; });
+cards.forEach(c => { c.dataset.id = c.querySelector('[data-card],canvas,table').id; c.dataset.grid = c.parentElement.dataset.grid; });
 const defaults = Object.fromEntries(cards.map(c => [c.dataset.id, {w: Math.max(0, WIDTHS.findIndex(x=>x && c.classList.contains(x)))}]));
 const defaultOrder = Object.fromEntries(grids.map(gr => [gr.dataset.grid, [...gr.children].map(c=>c.dataset.id)]));
 function saveLayout(){
@@ -541,7 +630,7 @@ for(const c of cards){
   c.insertBefore(bar, h2); bar.appendChild(h2); h2.title = 'drag to move this card';
   const btn = (label, title, fn) => { const b=document.createElement('button'); b.textContent=label; b.title=title; b.onclick=()=>{ fn(); saveLayout(); draw(); }; bar.appendChild(b); };
   btn('↔', 'width: one column, two columns, full row', ()=>setSize(c, ((+c.dataset.w||0)+1)%3, +c.dataset.h||0));
-  if(c.querySelector('canvas')) btn('↕', 'height: normal, tall, taller', ()=>setSize(c, +c.dataset.w||0, ((+c.dataset.h||0)+1)%3));
+  if(c.querySelector('canvas,[data-card]')) btn('↕', 'height: normal, tall, taller', ()=>setSize(c, +c.dataset.w||0, ((+c.dataset.h||0)+1)%3));
   btn('–', 'collapse / expand', ()=>c.classList.toggle('collapsed'));
   h2.addEventListener('mousedown', ()=>{ c.draggable = true; });
   h2.addEventListener('mouseup', ()=>{ c.draggable = false; });

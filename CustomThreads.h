@@ -44,6 +44,9 @@ public:
   QString FailReason() const { return failReason; }
   void SetSaveData(bool onOff)  {this->isSaveData = onOff;}
   void SetScopeMode(bool onOff) {this->isScope = onOff;}
+  /// the scope's auto trigger, as CoMPASS's (an oscilloscope's force trigger): a software trigger to channel ch
+  /// every AutoTriggerMiliSec while the board is read, in OR with the self-triggers; -1 = off
+  void SetAutoTrigger(int ch) {this->autoTriggerCh = ch;}
 
   void SetReadCountZero() {readCount = 0;}
   unsigned long GetReadCount() const {return readCount;}
@@ -107,6 +110,16 @@ public:
         digiMTX[ID].unlock();
         boardStopped = true;
         drainStart = lastData = std::chrono::steady_clock::now();
+      }
+
+      if( autoTriggerCh >= 0 && !boardStopped ){
+        const auto now = std::chrono::steady_clock::now();
+        if( now - lastAutoTrigger >= std::chrono::milliseconds(AutoTriggerMiliSec) ){
+          digiMTX[ID].lock();
+          digi->SendSoftwareTrigger(autoTriggerCh);
+          digiMTX[ID].unlock();
+          lastAutoTrigger = now;
+        }
       }
 
       digiMTX[ID].lock();
@@ -220,6 +233,8 @@ private:
   timespec ta, tb, t1, t2, t0;
   bool isSaveData;
   bool isScope;
+  std::atomic<int> autoTriggerCh{-1};
+  std::chrono::steady_clock::time_point lastAutoTrigger{};
   unsigned long readCount; 
 };
 

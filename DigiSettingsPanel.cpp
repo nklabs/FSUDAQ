@@ -1924,7 +1924,7 @@ void DigiSettingsPanel::SetUpBoard_PSD(){
   SetUpCheckBox(chkTraceRecording[ID],     "Record Trace", bdCfgLayout[ID], 2, 1, DPP::BoardConfiguration, DPP::Bit_BoardConfig::RecordTrace);
   SetUpCheckBox(chkEnableExtra2[ID],       "Enable Extra", bdCfgLayout[ID], 3, 1, DPP::BoardConfiguration, DPP::Bit_BoardConfig::EnableExtra2);
 
-  SetUpComboBoxBit(cbAnaProbe1[ID],     "Ana. Probe ", bdCfgLayout[ID], 1, 2, DPP::Bit_BoardConfig::ListAnaProbe_PSD, DPP::BoardConfiguration, DPP::Bit_BoardConfig::AnalogProbe1, 1, 0);
+  SetUpComboBoxBit(cbAnaProbe1[ID],     "Ana. Probe ", bdCfgLayout[ID], 1, 2, DPP::Bit_BoardConfig::ListAnaProbe_PSD, DPP::BoardConfiguration, DPP::Bit_BoardConfig::AnalogProbe_PSD, 1, 0);
   SetUpComboBoxBit(cbDigiProbe1[ID], "Digi. Probe 1 ", bdCfgLayout[ID], 3, 2, DPP::Bit_BoardConfig::ListDigiProbe1_PSD, DPP::BoardConfiguration, DPP::Bit_BoardConfig::DigiProbel1_PSD, 1, 0);
   SetUpComboBoxBit(cbDigiProbe2[ID], "Digi. Probe 2 ", bdCfgLayout[ID], 4, 2, DPP::Bit_BoardConfig::ListDigiProbe2_PSD, DPP::BoardConfiguration, DPP::Bit_BoardConfig::DigiProbel2_PSD, 1, 0);
 
@@ -3310,7 +3310,7 @@ void DigiSettingsPanel::UpdatePanelFromMemory(){
   ///==========================================
   if( digi[ID]->GetDPPType() == V1730_DPP_PSD_CODE ) {
     chkDecimateTrace[ID]->setChecked(   Digitizer::ExtractBits(BdCfg, DPP::Bit_BoardConfig::DisableDigiTrace_PSD) );
-    int temp = Digitizer::ExtractBits(BdCfg, DPP::Bit_BoardConfig::AnalogProbe1);
+    int temp = Digitizer::ExtractBits(BdCfg, DPP::Bit_BoardConfig::AnalogProbe_PSD);
     for( int i = 0; i < cbAnaProbe1[ID]->count(); i++){
       if( cbAnaProbe1[ID]->itemData(i).toInt() == temp) {
         cbAnaProbe1[ID]->setCurrentIndex(i);

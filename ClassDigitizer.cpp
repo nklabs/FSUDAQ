@@ -140,6 +140,16 @@ bool Digitizer::NeedsADCCalibration() const{
   return *p != 'S';
 }
 
+/// DPP-PHA/PSD: the Individual Software Trigger (0x1nC0), which the trigger validation does not block
+/// (UM4380); DPP-QDC: the board's Software Trigger (0x8108). A write-only action, so it is sent while
+/// the board runs, unlike the settings WriteRegister writes.
+bool Digitizer::SendSoftwareTrigger(int ch){
+  if( !isConnected || isDummy || softwareDisable ) return false;
+  Reg trigger = DPPType == DPPTypeCode::DPP_QDC_CODE ? DPP::SoftwareTrigger_W : DPP::IndividualSoftwareTrigger_W;
+  uint32_t address = trigger.ActualAddress(ch);
+  return CAEN_DGTZ_WriteRegister(handle, address, 1) == CAEN_DGTZ_Success;
+}
+
 int Digitizer::CalibrateADC(std::string & why){
   DebugPrint("%s", "Digitizer");
   why.clear();

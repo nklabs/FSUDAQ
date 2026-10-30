@@ -21,6 +21,8 @@
 #define ScopeUpdateMiliSec  200 // msec
 #define ScopeTraceStaleMiliSec 2000 // msec, the scope shows an empty plot when no trace arrived for this long
 #define MaxNumberOfTrace  5   // in an event
+#define AutoTriggerMiliSec 20 // msec, the scope's auto trigger (50 Hz)
+#define MaxPersistTrace 50    // the scope's persistence: at most this many earlier traces drawn
 
 #define SETTINGSIZE 2048
 

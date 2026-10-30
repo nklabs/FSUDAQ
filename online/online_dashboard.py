@@ -1024,9 +1024,10 @@ class Online:
             seconds=[dict(t=s - t0s, boards=[int(self.secs[s][bi * nbc:(bi + 1) * nbc].sum()) for bi in range(len(self.serials))])
                      for s in secs[-HISTORY_S:]])
 
-    def channel(self, sl, view=None):
+    def channel(self, sl, view=None, light=False):
         """One channel's histograms for the DAQ tab (sl = -1: all channels together, spectrum only).
-        view = (lo, hi, nb, log): the Qlong range [lo, hi) and binning the page shows."""
+        view = (lo, hi, nb, log): the Qlong range [lo, hi) and binning the page shows.
+        light: without the PSD map and the rate spectrum (the side-by-side comparison does not show them)."""
         with self.lock:
             D = self.daq
             f = 0.5 * (dh.F_EDGES[:-1] + dh.F_EDGES[1:])
@@ -1045,19 +1046,34 @@ class Online:
             tot = int(row.sum())
             inside = dh.rebin(row, np.array([0, 65536]))[0]          # all but Q = 0 and 65535
             shown = dh.rebin(row, e)
+            out = dict(slot=sl, **self.labels[sl], count=int(D.counts[sl]), late=int(D.late[sl]), early=int(D.early[sl]), ref=self.ref_slot,
+                       q=dict(edges=e.tolist(), counts=shown.tolist(), total=tot, zero=int(row[0]), sat=int(row[65535]),
+                              outside=int(inside - shown.sum()), log=bool(log)),
+                       iat=dict(edges=dh.IAT_EDGES.tolist(), counts=D.iat[sl].tolist()),
+                       dt=dict(edges=dh.DT_EDGES.tolist(), counts=D.dt[sl].tolist()),
+                       windows=D.n_seg, rate=rates)
+            if light:
+                return out
             # PSD map: the Qlong bins that overlap the shown range
             i0 = max(0, int(np.searchsorted(dh.PX_EDGES, e[0], side="right")) - 1)
             i1 = min(dh.NPX, int(np.searchsorted(dh.PX_EDGES, e[-1], side="left")))
             P = D.psd[sl, i0:i1]
-            return dict(slot=sl, **self.labels[sl], count=int(D.counts[sl]), late=int(D.late[sl]), early=int(D.early[sl]), ref=self.ref_slot,
-                        q=dict(edges=e.tolist(), counts=shown.tolist(), total=tot, zero=int(row[0]), sat=int(row[65535]),
-                               outside=int(inside - shown.sum()), log=bool(log)),
-                        psd=dict(xedges=dh.PX_EDGES[i0:i1 + 1].tolist(), ny=dh.NPY, counts=P.tolist(),
-                                 n=int(D.psd[sl].sum()), out=int(D.psd_out[sl])),
-                        iat=dict(edges=dh.IAT_EDGES.tolist(), counts=D.iat[sl].tolist()),
-                        dt=dict(edges=dh.DT_EDGES.tolist(), counts=D.dt[sl].tolist()),
-                        spectrum=dict(f=f.tolist(), p=(D.spec_p[sl] / n if n else D.spec_p[sl]).tolist()),
-                        windows=D.n_seg, rate=rates)
+            out["psd"] = dict(xedges=dh.PX_EDGES[i0:i1 + 1].tolist(), ny=dh.NPY, counts=P.tolist(),
+                              n=int(D.psd[sl].sum()), out=int(D.psd_out[sl]))
+            out["spectrum"] = dict(f=f.tolist(), p=(D.spec_p[sl] / n if n else D.spec_p[sl]).tolist())
+            return out
+
+    COMPARE_MAX = 8   # channels side by side on the page
+
+    def compare(self, slots, view=None):
+        """Several channels' histograms for the side-by-side comparison: pulse height, time since the previous
+        hit, time to the reference, rate. Channels not in the setup are left out."""
+        out = []
+        for sl in slots[:self.COMPARE_MAX]:
+            d = self.channel(sl, view, light=True) if sl >= 0 else None
+            if d is not None:
+                out.append(d)
+        return dict(ref=self.ref_slot, channels=out)
 
     def grid(self, view):
         """Every channel's Qlong spectrum over the shown range, coarsely binned, for the overview grid."""
@@ -1143,13 +1159,16 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/state"):
             body = json.dumps(self.online.state(), allow_nan=False).encode()   # Infinity/NaN are not JSON
             ctype = "application/json"
-        elif self.path.startswith("/channel") or self.path.startswith("/grid"):
+        elif self.path.startswith("/channel") or self.path.startswith("/grid") or self.path.startswith("/compare"):
             try:
                 view = None
                 if "lo" in q:
                     view = (int(q["lo"][0]), int(q["hi"][0]), int(q.get("nb", ["4096"])[0]), q.get("log", ["0"])[0] == "1")
                 if self.path.startswith("/grid"):
                     d = self.online.grid(view or (0, 65536, 64, False))
+                elif self.path.startswith("/compare"):
+                    slots = [int(x) for x in q.get("slots", [""])[0].split(",") if x.strip()]
+                    d = self.online.compare(slots, view)
                 else:
                     d = self.online.channel(int(q.get("slot", ["-1"])[0]), view)
             except (ValueError, KeyError):

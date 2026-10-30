@@ -19,6 +19,7 @@ against the hits that were written:
 
     python3 tests/test_online.py
 """
+import json
 import os
 import shutil
 import signal
@@ -297,6 +298,15 @@ def scenario_steady(tmp):
     diff = same_finder(online.acc, offline(online, boards, SERIALS))
     good &= check(not diff, f"steady: finder histograms differ from all hits at once: {diff}")
     good &= check(online.status == "run stopped: everything processed", f"steady: status '{online.status}' at the end")
+    view = (0, 65536, 4096, False)
+    a, b = online.slots[0], online.slots[1]
+    cmp = online.compare([b, a, 99999], view)        # channels side by side: in the order asked, unknown ones left out
+    one = online.channel(a, view)
+    good &= check([d["slot"] for d in cmp["channels"]] == [b, a], f"steady: compare gave slots {[d['slot'] for d in cmp['channels']]}")
+    good &= check(cmp["channels"][1]["q"] == one["q"] and cmp["channels"][1]["iat"] == one["iat"] and "psd" not in cmp["channels"][1],
+                  "steady: compare differs from the channel's own histograms")
+    good &= check(len(online.compare(list(online.slots), view)["channels"]) == online.COMPARE_MAX, "steady: compare not capped")
+    json.dumps(cmp, allow_nan=False)
     online.clear()
     st = online.state()
     good &= check(st["hits"] == 0 and st["bunches"] == 0 and st["late"] == 0, f"steady: after Clear {st['hits']} hits, "
