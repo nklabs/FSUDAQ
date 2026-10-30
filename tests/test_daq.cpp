@@ -858,9 +858,8 @@ public:
     Choose(s->cbDigiTrace2, 3);
     CHECK(((fake_caen_reg(1443, 0x8000) >> 23) & 7) == 7 && ((fake_caen_reg(1443, 0x8000) >> 26) & 7) == 3,
           "digital probes: 0x%08X", fake_caen_reg(1443, 0x8000));
-    CHECK(InFile(d, DPP::BoardConfiguration) == fake_caen_reg(1443, 0x8000), "settings file 0x%08X, board 0x%08X", InFile(d, DPP::BoardConfiguration), fake_caen_reg(1443, 0x8000));
     s->close();
-    if( nFail == 0 ) OK("five analog choices, CFD + CFD avoided, both digital probes; memory and file follow");
+    if( nFail == 0 ) OK("five analog choices, CFD + CFD avoided, both digital probes; memory follows");
     w->CloseDigitizers();
   }
 
@@ -888,8 +887,8 @@ public:
     if( thr ){
       thr->sb->setValue(321);
       emit thr->sb->returnPressed();
-      CHECK(fake_caen_reg(58918, 0x1360) == 321 && d->GetSettingFromMemory(DPP::PSD::TriggerThreshold, 3) == 321 && InFile(d, DPP::PSD::TriggerThreshold, 3) == 321,
-            "threshold: board %u, memory %u, file %u", fake_caen_reg(58918, 0x1360), d->GetSettingFromMemory(DPP::PSD::TriggerThreshold, 3), InFile(d, DPP::PSD::TriggerThreshold, 3));
+      CHECK(fake_caen_reg(58918, 0x1360) == 321 && d->GetSettingFromMemory(DPP::PSD::TriggerThreshold, 3) == 321,
+            "threshold: board %u, memory %u", fake_caen_reg(58918, 0x1360), d->GetSettingFromMemory(DPP::PSD::TriggerThreshold, 3));
       fake_caen_stats st;
       fake_caen_get_stats(58918, &st);
       CHECK(st.running && s->IsRunning(s->ID), "not running again after the change");
@@ -950,6 +949,45 @@ public:
     d->SetSettingToMemory(DPP::BoardConfiguration, cfg);
     if( nFail == nFail0 ) OK("one trigger, one flush");
     w->CloseDigitizers();
+  }
+
+  // the scope at 15880 ch 2: dual trace (Input + CFD), and a threshold of 777 written while it runs
+  void ScopeEdits(Scope * s){
+    Choose(s->cbAnaTrace1, 0);
+    Choose(s->cbAnaTrace2, 2);
+    s->StartScope();
+    for( auto & p : s->params ) if( p.sb && p.reg.GetAddress() == DPP::PSD::TriggerThreshold.GetAddress() ){ p.sb->setValue(777); emit p.sb->returnPressed(); }
+  }
+  void ScopeChangesUndone(){
+    printf("== scope: what it changed on the boards is undone when it closes (window, Ctrl-C), and never reaches the settings file\n");
+    int nFail0 = nFail;
+    for( int viaSignal = 0; viaSignal < 2; viaSignal++ ){
+      NewWorkDir(); AddBoards(5, 2); NewFSUDAQ();
+      Open();
+      Digitizer * d = Digi(15880);
+      d->SetSettingFileUpdate(true);   // "Live Setting Update"
+      const uint32_t cfg = d->GetSettingFromMemory(DPP::BoardConfiguration), thr = d->GetSettingFromMemory(DPP::PSD::TriggerThreshold, 2);
+      CHECK(((cfg >> 11) & 7) != 5 && thr != 777, "fixture already has the scope's values (0x%X, %u)", cfg, thr);
+      Scope * s = ScopeOn(15880, 2);
+      ScopeEdits(s);
+      CHECK(s->isACQStarted && fake_caen_reg(15880, 0x1260) == 777 && d->GetSettingFromMemory(DPP::PSD::TriggerThreshold, 2) == 777,
+            "threshold not applied: board %u, memory %u", fake_caen_reg(15880, 0x1260), d->GetSettingFromMemory(DPP::PSD::TriggerThreshold, 2));
+      CHECK(((d->GetSettingFromMemory(DPP::BoardConfiguration) >> 11) & 7) == 5, "dual trace not applied (0x%X)", d->GetSettingFromMemory(DPP::BoardConfiguration));
+      CHECK(InFile(d, DPP::BoardConfiguration) == cfg && InFile(d, DPP::PSD::TriggerThreshold, 2) == thr, "scope change in the settings file while open: 0x%X, %u",
+            InFile(d, DPP::BoardConfiguration), InFile(d, DPP::PSD::TriggerThreshold, 2));
+      if( viaSignal ) w->ShutdownOnSignal(SIGINT); else s->close();
+      const char * how = viaSignal ? "Ctrl-C" : "closed";
+      CHECK(!s->isACQStarted && !d->IsRunning(), "%s: still running", how);
+      CHECK(fake_caen_reg(15880, 0x8000) == cfg && d->GetSettingFromMemory(DPP::BoardConfiguration) == cfg && InFile(d, DPP::BoardConfiguration) == cfg,
+            "%s: 0x8000 board 0x%X, memory 0x%X, file 0x%X (was 0x%X)", how, fake_caen_reg(15880, 0x8000), d->GetSettingFromMemory(DPP::BoardConfiguration), InFile(d, DPP::BoardConfiguration), cfg);
+      CHECK(fake_caen_reg(15880, 0x1260) == thr && d->GetSettingFromMemory(DPP::PSD::TriggerThreshold, 2) == thr && InFile(d, DPP::PSD::TriggerThreshold, 2) == thr,
+            "%s: threshold board %u, memory %u, file %u (was %u)", how, fake_caen_reg(15880, 0x1260), d->GetSettingFromMemory(DPP::PSD::TriggerThreshold, 2), InFile(d, DPP::PSD::TriggerThreshold, 2), thr);
+      CHECK(!d->IsSettingFileHeld(), "%s: settings file still held", how);
+      d->WriteRegister(DPP::PSD::TriggerThreshold, 555, 2);   // after the scope, changes reach the file again
+      CHECK(InFile(d, DPP::PSD::TriggerThreshold, 2) == 555, "%s: file not updated after the scope (%u)", how, InFile(d, DPP::PSD::TriggerThreshold, 2));
+      w->CloseDigitizers();
+    }
+    if( nFail == nFail0 ) OK("board, memory and file as before the scope, after a close and after Ctrl-C; the file untouched meanwhile");
   }
 
   void ScopeOnlyThisChannel(){
@@ -1039,6 +1077,7 @@ int main(int argc, char ** argv){
   t.ScopeChangesWhileRunning();
   t.ScopeForceFlush();
   t.ScopeOnlyThisChannel();
+  t.ScopeChangesUndone();
   t.StartStopOrder();
   t.DrainWaitsForFlushedData();
   t.ProblemAtStopEndsSeries();

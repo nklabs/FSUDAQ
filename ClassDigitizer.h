@@ -60,6 +60,7 @@ class Digitizer{
     FILE *       settingFile;              /// 
     bool         isSettingFileExist;         /// 
     bool         isSettingFileUpdate;
+    bool         settingFileHeld;          /// nothing goes to the settings file (the scope is open)
     bool         isSettingFilledinMemeory; /// false for disabled ReadAllSettingFromBoard()
     bool         hasOverThresholdWidth;  /// for QDC
     bool         programmedFromFile;       /// a settings file was written to the board and every register reads back as in the file
@@ -192,6 +193,11 @@ class Digitizer{
     void           SetSettingFileUpdate(bool onOff) {isSettingFileUpdate = onOff;}     
     bool           IsSettingFileUpdate()  const {return isSettingFileUpdate;}
     bool           IsSettingFileExist()   const {return isSettingFileExist;}
+    void           HoldSettingFile(bool hold) {settingFileHeld = hold;}  /// while held, changes reach the board and memory only
+    bool           IsSettingFileHeld()    const {return settingFileHeld;}
+    /// write back, to the board and memory, every register ProgramSettingsToBoard() writes whose value in memory
+    /// differs from saved (a copy of GetSettings()). Returns the number of failed writes; restored lists the others.
+    int            RestoreSettings(const std::vector<unsigned int> & saved, std::vector<std::string> & restored);
 
     /// memory <--> file
     void         SaveAllSettingsAsText       (std::string fileName);

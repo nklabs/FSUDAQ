@@ -361,6 +361,34 @@ Scope::~Scope(){
   // the chart, its series and axes belong to the chart view, a child of this window
 }
 
+void Scope::showEvent(QShowEvent * event){
+  if( openingSettings.empty() ){
+    for( unsigned int i = 0; i < nDigi; i++ ){
+      openingSettings.emplace_back(digi[i]->GetSettings(), digi[i]->GetSettings() + SETTINGSIZE);
+      digi[i]->HoldSettingFile(true);
+    }
+  }
+  QMainWindow::showEvent(event);
+}
+
+void Scope::closeEvent(QCloseEvent * event){
+  if( isACQStarted ) StopScope();
+
+  for( unsigned int i = 0; i < openingSettings.size() && i < nDigi; i++ ){
+    std::vector<std::string> restored;
+    const int nFailed = digi[i]->RestoreSettings(openingSettings[i], restored);
+    digi[i]->HoldSettingFile(false);
+    const QString name = "Digi-" + QString::number(digi[i]->GetSerialNumber());
+    for( const std::string & r : restored ) SendLogMsg("Scope closed, " + name + " back as before: " + QString::fromStdString(r));
+    if( nFailed > 0 ) SendLogMsg("<font style=\"color: red;\">Scope closed: " + name + ", " + QString::number(nFailed) + " register(s) could not be put back.</font>");
+  }
+  if( !openingSettings.empty() ) emit UpdateOtherPanels();
+  openingSettings.clear();
+
+  emit CloseWindow();
+  event->accept();
+}
+
 //*=======================================================
 //*======================================================= running the boards
 

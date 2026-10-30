@@ -53,6 +53,7 @@ void Digitizer::Initalization(){
   settingFileName = "";
   isSettingFileExist = false;
   isSettingFileUpdate = false;
+  settingFileHeld = false;
   settingFile = NULL;
   hasOverThresholdWidth = false;
   programmedFromFile = false;
@@ -1216,6 +1217,28 @@ int Digitizer::ProgramSettingsToBoard(){
 
 }
 
+int Digitizer::RestoreSettings(const std::vector<unsigned int> & saved, std::vector<std::string> & restored){
+  restored.clear();
+  if( softwareDisable || AcqRun || !isConnected || isDummy || saved.size() != SETTINGSIZE ) return 0;
+
+  int nFailed = 0;
+  for( auto & [r, ch] : ProgrammedRegisters() ){
+    Reg reg = r;
+    const unsigned short index = reg.Index(ch < 0 ? 0 : ch);
+    uint32_t value = saved[index];
+    if( reg == DPP::AcquisitionControl ) value &= ~0x4u;   // the run bit, as ProgramSettingsToBoard()
+    if( setting[index] == value ) continue;
+    char line[160];
+    snprintf(line, sizeof(line), "%s%s = 0x%X (was 0x%X)", reg.GetNameChar(), ch < 0 ? "" : (",CH:" + std::to_string(ch)).c_str(), value, setting[index]);
+    WriteRegister(reg, value, ch);
+    if( ret != 0 ){ nFailed++; continue; }
+    // a register the couple shares: the odd channel's copy in memory, as it was
+    if( ch >= 0 && reg.IsCoupled() && !reg.IsPerChannel() && ch + 1 < NumInputCh ) SetSettingToMemory(reg, saved[reg.Index(ch + 1)], ch + 1);
+    restored.push_back(line);
+  }
+  return nFailed;
+}
+
 int Digitizer::LoadAndProgramSettings(std::string fileName, std::vector<std::string> & problems){
   problems.clear();
   if( !isConnected || isDummy || softwareDisable || AcqRun ){
@@ -1369,6 +1392,7 @@ void Digitizer::SaveSettingToFile(Reg registerAddress, unsigned int value, unsig
   DebugPrint("%s", "Digitizer");
   if ( !isSettingFileExist ) return ;
   if ( !isSettingFileUpdate ) return;
+  if ( settingFileHeld ) return;
 
   // printf("Write setting file : %s. %s, ch:%u, 0x%8X\n", settingFileName.c_str(), registerAddress.GetNameChar(), ch, value);
 

@@ -43,11 +43,10 @@ public:
   Scope(Digitizer ** digi, unsigned int nDigi, ReadDataThread ** readDataThread, QMainWindow * parent = nullptr);
   ~Scope();
 
-  void closeEvent(QCloseEvent * event){
-    if(isACQStarted) StopScope();
-    emit CloseWindow();
-    event->accept();
-  }
+  // while the scope is open, what it (or anything else) changes on the boards stays out of the settings
+  // files, and closing it (also on Ctrl-C) puts the boards as they were when it opened
+  void showEvent(QShowEvent * event);
+  void closeEvent(QCloseEvent * event);
 
   unsigned short ID; // the id of digi, index of cbScopeDigi
   bool isACQStarted;
@@ -83,6 +82,7 @@ private:
   void UpdateAutoTrigger();
 
   bool boardRuns[MaxNDigitizer];   // started by the scope
+  std::vector<std::vector<unsigned int>> openingSettings; // each board's settings when the scope opened; empty when closed
   bool startedAlone[MaxNDigitizer];// started on its own (software start), not with the others
   bool soleRun;                    // "Only this channel" when the scope started: the board and channel
   int  soleDigi;
