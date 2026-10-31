@@ -112,9 +112,17 @@ class Tables:
 
 
 # ---------------------------------------------------------------- cabling, gains, offsets
-def default_cabling(serials, n_channels, planes=(16, 35, 59), counters=COUNTERS):
+def plane_counts(setting="high"):
+    """Channels per tracker plane (T0, T1, T2) of the map in finder/ (its handoff_meta.json)."""
+    meta = json.load(open(os.path.join(FINDER_DIR, "handoff_meta.json")))
+    return tuple(int(meta["channels"][t][setting]) for t in ("t0", "t1", "t2"))
+
+
+def default_cabling(serials, n_channels, planes=None, counters=COUNTERS):
     """Placeholder: tracker channels in plane order across the boards in the given order, then
-    the counters. Rows: (serial, channel, kind, plane, ch) with kind 'trk' or a counter name."""
+    the counters. Rows: (serial, channel, kind, plane, ch) with kind 'trk' or a counter name.
+    planes: channels per plane, by default the map's."""
+    planes = planes or plane_counts()
     slots = [(s, c) for s in serials for c in range(n_channels.get(s, 16))]
     want = [("trk", p, ch) for p, n in enumerate(planes) for ch in range(1, n + 1)] + [(c, -1, 0) for c in counters]
     return [(s, c, kind, p, ch) for (s, c), (kind, p, ch) in zip(slots, want)]

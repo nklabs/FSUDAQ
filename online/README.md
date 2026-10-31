@@ -7,7 +7,12 @@ FSUDAQ starts it on the current data path and opens the browser.
 
 The track finder is the handoff in `finder/` (`online_finder.py`, `INTERFACE.md`, the
 momentum map, channel table, one-track light and constants), kept unchanged as the
-reference. `finder_fast.py` builds the bunches in numba and decides every bunch with no
+reference. The map installed is PSI's official one for 0.20 T, frozen default layout
+(pion-spectrometer-simulations `handoff/B0.200`, built 30 Oct 2026): T0/T1/T2 = 8/56/46
+channels. Another field: copy that handoff's `B<field>/` files over the ones in `finder/`.
+`cabling.csv` puts those 110 channels in sequence over the boards in rack order (T0 on
+15880 ch0-7, T1 from 15880 ch8 to the end of 62839, T2 from 65316 on), the Cherenkov on
+Digi-1443 ch6-7. `finder_fast.py` builds the bunches in numba and decides every bunch with no
 or one candidate itself, with the reference's arithmetic in the reference's order; a
 bunch with two or more candidates goes to `online_finder.find()`. Both self tests compare
 the two bunch by bunch and must report no difference:

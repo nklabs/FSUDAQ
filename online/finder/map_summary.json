@@ -1,0 +1,45 @@
+{
+ "library": {
+  "n": 1000000,
+  "seed": 19,
+  "geometry": {
+   "z_t0": -453.0,
+   "z_t1": 1375.0,
+   "z_t2": 1925.0,
+   "mag_x": -33.0,
+   "field_T": 0.2,
+   "focus_z": 329.0
+  },
+  "p_range_MeV": [
+   100.0,
+   500.0
+  ]
+ },
+ "threshold_mevee": 0.1,
+ "settings": {
+  "high": {
+   "tracks": 385743,
+   "triplets": 4110,
+   "rows_n_ge_5": 2138,
+   "rows_n_ge_15": 1725,
+   "tracks_on_n_ge_15": 0.983,
+   "p_range_MeV": [
+    167.3,
+    493.6
+   ],
+   "rms_dp_over_p_pct": 6.42
+  },
+  "low": {
+   "tracks": 122641,
+   "triplets": 5180,
+   "rows_n_ge_5": 3274,
+   "rows_n_ge_15": 2332,
+   "tracks_on_n_ge_15": 0.905,
+   "p_range_MeV": [
+    134.4,
+    342.9
+   ],
+   "rms_dp_over_p_pct": 5.96
+  }
+ }
+}
