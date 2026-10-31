@@ -4,41 +4,66 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Experiment Status</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
   :root { --bg:#f4f5f7; --card:#fff; --fg:#1d232b; --muted:#6b7480; --soft:#8a929c; --line:#eceef1;
           --ok:#2e9e4f; --info:#9aa3ad; --idle:#2f7fd8; --nodata:var(--info); --warn:#e0a100; --bad:#d6342c; --crit:var(--bad); }
   @media (prefers-color-scheme: dark) { :root { --bg:#121519; --card:#1b1f25; --fg:#e4e8ec; --muted:#98a1ab; --soft:#7c858f; --line:#2a3038;
           --info:#7c858f; --idle:#4b95e8; } }
   * { box-sizing:border-box; }
-  body { margin:0; padding:16px 20px 32px; background:var(--bg); color:var(--fg); font:13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  header { display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; margin-bottom:12px; }
-  header h1 { font-size:18px; font-weight:650; margin:0; letter-spacing:-.01em; }
-  header small { color:var(--soft); font-size:12px; }
-  header nav { margin-left:auto; display:flex; gap:14px; }
-  header nav a, header nav button { font:12px system-ui, sans-serif; color:var(--muted); background:none; border:none; padding:0; cursor:pointer; text-decoration:none; }
-  header nav a:hover, header nav button:hover { color:var(--fg); text-decoration:underline; }
-  /* the one line that matters most */
-  #summary { display:flex; align-items:center; gap:10px; border-radius:10px; padding:10px 14px; margin-bottom:14px; font-size:14px; font-weight:550;
-             background:color-mix(in srgb, var(--nodata) 18%, var(--card)); border-left:5px solid var(--nodata); }
-  #summary .t { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  #summary .counts { font-size:12px; font-weight:500; color:var(--muted); white-space:nowrap; }
-  #summary.ok, #summary.info, #summary.idle { background:color-mix(in srgb, var(--ok) 12%, var(--card)); border-left-color:var(--ok); }
-  #summary.warn { background:color-mix(in srgb, var(--warn) 16%, var(--card)); border-left-color:var(--warn); }
-  #summary.bad { background:color-mix(in srgb, var(--bad) 14%, var(--card)); border-left-color:var(--bad); animation:pulse 1s infinite; }
-  #summary.critical { background:var(--crit); border-left-color:var(--crit); color:#fff; animation:pulse 1s infinite; } #summary.critical .counts { color:#fff; }
-  #summary.stale { background:#555; border-left-color:#333; color:#fff; }
-  /* the big picture */
-  #overview { display:flex; flex-wrap:wrap; gap:16px 26px; justify-content:center; padding:6px 0 20px; }
-  #overview a { display:flex; flex-direction:column; align-items:center; gap:8px; text-decoration:none; color:var(--muted); width:88px; text-align:center; }
-  #overview a:hover { color:var(--fg); }
-  #overview .big { width:64px; height:64px; border-radius:50%; background:var(--nodata); transition:transform .15s; }
-  #overview a:hover .big { transform:scale(1.06); }
-  #overview .big.ok { background:var(--ok); } #overview .big.info { background:var(--info); } #overview .big.idle { background:var(--idle); }
-  #overview .big.warn { background:var(--warn); } #overview .big.bad { background:var(--bad); animation:pulse 1s infinite; }
-  #overview .big.critical { background:var(--crit); animation:pulse 1s infinite; box-shadow:0 0 0 6px color-mix(in srgb, var(--crit) 30%, transparent); }
-  #overview span { font-size:12px; font-weight:550; line-height:1.2; }
-  @media (max-width: 480px) { #overview .big { width:48px; height:48px; } #overview a { width:68px; } }
+  body { margin:0; padding:16px 20px 32px; background:var(--bg); color:var(--fg); font:12.5px/1.5 "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace; }
+  button { font-family:inherit; }
   @keyframes pulse { 50% { opacity:.55; } }
+  @keyframes blink { 50% { filter:brightness(.4) saturate(.6); box-shadow:inset 0 2px 6px rgba(0,0,0,.6); } }
+  /* ------------------------------------------------ the control panel header: steel plate, readouts, pilot lamps */
+  .panel { position:relative; margin-bottom:16px; padding:14px 22px 18px; border-radius:10px; color:#e3e7eb;
+           background:linear-gradient(180deg, #474d55 0%, #353a41 45%, #2b2f35 100%);
+           border:1px solid #1a1d21; box-shadow:inset 0 1px 0 rgba(255,255,255,.12), inset 0 -2px 0 rgba(0,0,0,.25), 0 3px 8px rgba(0,0,0,.25); }
+  .panel .screw { position:absolute; width:9px; height:9px; border-radius:50%; background:radial-gradient(circle at 35% 35%, #c9ced4, #6d737b 70%);
+                  box-shadow:inset 0 0 0 1px rgba(0,0,0,.35); }
+  .panel .screw::after { content:""; position:absolute; left:1px; right:1px; top:4px; height:1px; background:rgba(0,0,0,.45); transform:rotate(35deg); }
+  .panel .screw.tl { top:7px; left:7px; } .panel .screw.tr { top:7px; right:7px; } .panel .screw.bl { bottom:7px; left:7px; } .panel .screw.br { bottom:7px; right:7px; }
+  .panel header { display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin-bottom:12px; }
+  .panel h1 { margin:0; font-size:13px; font-weight:800; letter-spacing:.18em; text-transform:uppercase; color:#f1f3f5;
+              padding:4px 12px; border-radius:3px; background:#1c1f23; border:1px solid #0f1113; box-shadow:inset 0 1px 2px rgba(0,0,0,.6), 0 1px 0 rgba(255,255,255,.08); }
+  .readout { font-size:12px; font-weight:600; letter-spacing:.06em; color:#8dff8a; text-shadow:0 0 6px rgba(141,255,138,.45);
+             padding:3px 10px; border-radius:3px; background:#070908; border:1px solid #000; box-shadow:inset 0 1px 3px rgba(0,0,0,.9), 0 1px 0 rgba(255,255,255,.08); }
+  .panel nav { margin-left:auto; display:flex; gap:8px; }
+  .panel nav a, .panel nav button { font-size:10.5px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:#e3e7eb; text-decoration:none; cursor:pointer;
+             padding:4px 10px; border-radius:4px; border:1px solid #16191c; background:linear-gradient(180deg, #5a616a, #3c4148);
+             box-shadow:inset 0 1px 0 rgba(255,255,255,.18), 0 1px 2px rgba(0,0,0,.4); }
+  .panel nav a:hover, .panel nav button:hover { background:linear-gradient(180deg, #666e78, #454b53); }
+  .panel nav a:active, .panel nav button:active { box-shadow:inset 0 2px 3px rgba(0,0,0,.5); transform:translateY(1px); }
+  /* the alarm message display */
+  #summary { display:flex; align-items:center; gap:12px; padding:8px 14px; border-radius:4px; font-size:13px; font-weight:600; letter-spacing:.02em;
+             background:#070908; border:1px solid #000; box-shadow:inset 0 2px 5px rgba(0,0,0,.9), 0 1px 0 rgba(255,255,255,.08); color:#9aa3ad; }
+  #summary::before { content:"■"; font-size:11px; }
+  #summary .t { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #summary .counts { font-size:11px; font-weight:600; white-space:nowrap; opacity:.85; }
+  #summary.ok, #summary.info, #summary.idle { color:#8dff8a; text-shadow:0 0 6px rgba(141,255,138,.4); }
+  #summary.warn { color:#ffc23a; text-shadow:0 0 6px rgba(255,194,58,.45); }
+  #summary.bad, #summary.critical { color:#ff5a4d; text-shadow:0 0 7px rgba(255,90,77,.55); animation:pulse 1s infinite; }
+  #summary.critical { background:#2a0705; }
+  #summary.stale { color:#9aa3ad; text-shadow:none; }
+  /* the pilot lamps */
+  #overview { display:flex; flex-wrap:wrap; gap:16px 22px; justify-content:center; margin-top:16px; }
+  #overview a { display:flex; flex-direction:column; align-items:center; gap:9px; text-decoration:none; width:104px; text-align:center; }
+  #overview .bezel { width:70px; height:70px; border-radius:50%; padding:6px;
+                     background:conic-gradient(from 210deg, #f2f4f6, #8e959d, #e1e4e8, #6c737b, #f2f4f6);
+                     box-shadow:0 2px 4px rgba(0,0,0,.55), inset 0 0 0 1px rgba(0,0,0,.35); transition:transform .12s; }
+  #overview a:hover .bezel { transform:scale(1.05); }
+  #overview .big { --lamp:#4b5057; width:100%; height:100%; border-radius:50%;
+                   background:radial-gradient(circle at 34% 28%, rgba(255,255,255,.75) 0 8%, rgba(255,255,255,.18) 22%, transparent 46%),
+                              radial-gradient(circle at 50% 60%, var(--lamp) 0 55%, color-mix(in srgb, var(--lamp) 60%, #000) 100%);
+                   box-shadow:inset 0 -3px 6px rgba(0,0,0,.45), 0 0 16px 2px color-mix(in srgb, var(--lamp) 70%, transparent); }
+  #overview .big.ok { --lamp:#36d158; } #overview .big.idle { --lamp:#3d8cf0; } #overview .big.warn { --lamp:#ffb81f; }
+  #overview .big.bad, #overview .big.critical { --lamp:#ff3b2f; animation:blink 1s infinite; }
+  #overview .big.info, #overview .big.nodata { --lamp:#5d636b; box-shadow:inset 0 -3px 6px rgba(0,0,0,.5); }   /* unlit */
+  #overview .bezel:has(.critical) { box-shadow:0 0 0 4px rgba(255,59,47,.45), 0 2px 4px rgba(0,0,0,.55); }
+  #overview span { font-size:10px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; line-height:1.25; color:#eef1f4;
+                   padding:3px 7px; border-radius:2px; background:#1c1f23; border:1px solid #0f1113; box-shadow:inset 0 1px 2px rgba(0,0,0,.6), 0 1px 0 rgba(255,255,255,.07); }
+  @media (max-width: 480px) { #overview .bezel { width:54px; height:54px; padding:5px; } #overview a { width:80px; } .panel { padding:12px 14px 16px; } }
   /* the cards */
   .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(400px, 1fr)); gap:14px; align-items:start; }
   @media (max-width: 480px) { .grid { grid-template-columns:1fr; } }
@@ -71,10 +96,12 @@
 </style>
 </head>
 <body>
-<header><h1>Experiment status</h1><small id="updated">connecting…</small>
-  <nav><a href="/limits" target="_blank">limits and names</a><button id="reset" title="Put the cards back in their original order">reset layout</button></nav></header>
-<div id="summary"><span class="t">connecting…</span></div>
-<div id="overview"></div>
+<section class="panel"><i class="screw tl"></i><i class="screw tr"></i><i class="screw bl"></i><i class="screw br"></i>
+  <header><h1>Experiment status</h1><span class="readout" id="updated">--:--:--</span>
+    <nav><a href="/limits" target="_blank">Limits</a><button id="reset" title="Put the cards back in their original order">Reset layout</button></nav></header>
+  <div id="summary"><span class="t">connecting…</span></div>
+  <div id="overview"></div>
+</section>
 <div class="grid" id="grid"></div>
 <footer><i style="background:var(--ok);margin-left:0"></i>as it should be<i style="background:var(--idle)"></i>not running<i style="background:var(--info)"></i>a plain fact, or no data<i style="background:var(--warn)"></i>look at it<i style="background:var(--bad)"></i>wrong (flashing)<i style="background:var(--crit)"></i>act now (flashing, with a ring)<br>
 Click a line for what is behind it. Drag a card by its title, or a line within its card, to rearrange (kept in this browser; "reset layout" undoes it). Read-only: FSUDAQ, the online dashboard and pion-ros are not changed from here.</footer>
@@ -126,7 +153,7 @@ function render(S){
   const say = (stale ? `NO CONNECTION to the status server since ${new Date(lastOK).toLocaleTimeString()} — shown as it was then. ` : '') + S.summary.text;
   sm.innerHTML = `<span class="t" title="${esc(say)}">${esc(say)}</span>` +
     `<span class="counts">${['critical','bad','warn'].filter(k=>c[k]).map(k=>c[k]+' '+(k==='warn'?'to look at':k)).join(' · ')}</span>`;
-  document.getElementById('updated').textContent = S.updated ? 'updated ' + new Date(S.updated*1000).toLocaleTimeString() : '';
+  document.getElementById('updated').textContent = S.updated ? new Date(S.updated*1000).toLocaleTimeString([], {hour12:false}) : '--:--:--';
   if(dragging || dragRow) return;   // nothing moves under the mouse while a card or a line is being dragged
   const groups = {};
   for(const it of S.items) (groups[it.group] = groups[it.group] || []).push(it);
@@ -135,7 +162,7 @@ function render(S){
   // the big picture: one big circle per card, always in the fixed ORDER (dragging the cards does not move them)
   const fixed = Object.keys(groups).sort((a,b)=>{ const ia=ORDER.indexOf(a), ib=ORDER.indexOf(b); return (ia<0?99:ia)-(ib<0?99:ib) || a.localeCompare(b); });
   document.getElementById('overview').innerHTML = fixed.map(g =>
-    `<a href="#" data-go="${esc(g)}" title="${esc(g)}: ${worstOf(g)}"><div class="big ${worstOf(g)}"></div><span>${esc(g)}</span></a>`).join('');
+    `<a href="#" data-go="${esc(g)}" title="${esc(g)}: ${worstOf(g)}"><div class="bezel"><div class="big ${worstOf(g)}"></div></div><span>${esc(g)}</span></a>`).join('');
   for(const g of Object.keys(cards)) if(!groups[g]){ cards[g].remove(); delete cards[g]; }
   names.forEach((g, i)=>{
     const card = cardFor(g), its = groups[g];

@@ -52,17 +52,17 @@ DEFAULT_LIMITS = {
          "rules": [{"above": 2, "level": "warn"},
                    {"below": 0.3, "level": "warn", "when": {"cherenkov": "full of isobutane"}},
                    {"change": 0.05, "within_s": 3600, "level": "warn", "when": {"cherenkov": "full of isobutane"}}]},
-        {"id": "isobutane_1", "name": "Gas sensor 1 (RKI M2A)", "group": "Cherenkov", "source": "plc.ai1",
+        {"id": "isobutane_1", "name": "Stack gas sensor (RKI M2A)", "group": "Cherenkov", "source": "plc.ai1",
          "scale": 1.0, "offset": 0.0, "unit": "%LEL", "digits": 1, "range": [0, 100],
          "note": "100 %LEL = 1.6 % isobutane in air",
          "rules": [{"at_or_above": 5, "level": "warn"}, {"at_or_above": 10, "level": "bad"},
                    {"at_or_above": 100, "level": "critical"}]},
-        {"id": "isobutane_2", "name": "Gas sensor 2 (RKI M2A)", "group": "Cherenkov", "source": "plc.ai2",
+        {"id": "isobutane_2", "name": "Cherenkov floor gas sensor (RKI M2A)", "group": "Cherenkov", "source": "plc.ai2",
          "scale": 1.0, "offset": 0.0, "unit": "%LEL", "digits": 1, "range": [0, 100],
          "note": "100 %LEL = 1.6 % isobutane in air",
          "rules": [{"at_or_above": 5, "level": "warn"}, {"at_or_above": 10, "level": "bad"},
                    {"at_or_above": 100, "level": "critical"}]},
-    ] + [{"id": f"trumeter_{i - 4}", "name": f"Trumeter {i - 4}", "group": "PLC", "source": f"plc.ai{i}",
+    ] + [{"id": f"trumeter_{i - 4}", "name": {5: "T0 current", 6: "T1 + T2 current", 7: "ESPEON current"}[i] + f" (Trumeter {i - 4})", "group": "PLC", "source": f"plc.ai{i}",
           "scale": 1.0, "offset": 0.0, "unit": "", "digits": 3, "range": [0, 5], "rules": []} for i in (5, 6, 7)]
       # two thermocouples per detector: tc0/1 tracker 0, tc2/3 tracker 1, tc4/5 tracker 2, tc6/7 the Cherenkov.
       # An open input on this card reads a noisy staircase (about 120-520) or 3276.7, which looks like a real temperature:

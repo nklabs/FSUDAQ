@@ -4,22 +4,24 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Status Limits</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   :root { --bg:#f6f7f9; --card:#fff; --fg:#1d232b; --muted:#6b7480; --line:#dfe3e8; --acc:#1f6feb; --bad:#d6342c; --ok:#2e9e4f;
           --warn:#e0a100; --crit:#d6342c; }
   @media (prefers-color-scheme: dark) { :root { --bg:#14171b; --card:#1d2127; --fg:#e4e8ec; --muted:#98a1ab; --line:#30363e; } }
   * { box-sizing:border-box; }
-  body { margin:0; padding:12px 16px 80px; background:var(--bg); color:var(--fg); font:13px/1.4 system-ui, sans-serif; }
+  body { margin:0; padding:12px 16px 80px; background:var(--bg); color:var(--fg); font:12.5px/1.5 "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace; }
   h1 { font-size:17px; margin:0 0 4px; } h2 { font-size:14px; margin:16px 0 6px; }
   p.lead { color:var(--muted); margin:0 0 10px; max-width:900px; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-bottom:10px; }
   .fields { display:flex; flex-wrap:wrap; gap:8px 14px; align-items:end; }
   label { display:flex; flex-direction:column; gap:2px; font-size:11px; color:var(--muted); }
-  input, select { font:13px system-ui, sans-serif; padding:3px 6px; border:1px solid var(--line); border-radius:4px; background:var(--bg); color:var(--fg); }
+  input, select { font:12.5px "JetBrains Mono", ui-monospace, monospace; padding:3px 6px; border:1px solid var(--line); border-radius:4px; background:var(--bg); color:var(--fg); }
   input[type=number] { width:90px; } input.wide { width:220px; } input.mid { width:120px; }
   .live { font:12px ui-monospace, monospace; color:var(--muted); padding-bottom:4px; }
   table { border-collapse:collapse; margin-top:8px; } td { padding:3px 6px 3px 0; vertical-align:middle; }
-  button { font:12px system-ui, sans-serif; padding:3px 10px; border:1px solid var(--line); border-radius:4px; background:var(--card); color:var(--fg); cursor:pointer; }
+  button { font:12px "JetBrains Mono", ui-monospace, monospace; padding:3px 10px; border:1px solid var(--line); border-radius:4px; background:var(--card); color:var(--fg); cursor:pointer; }
   button:hover { border-color:var(--muted); } button.primary { background:var(--acc); color:#fff; border-color:var(--acc); }
   button.x { color:var(--muted); padding:1px 7px; }
   .bar { position:fixed; left:0; right:0; bottom:0; background:var(--card); border-top:1px solid var(--line); padding:8px 16px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }

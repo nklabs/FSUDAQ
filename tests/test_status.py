@@ -144,7 +144,7 @@ def scenario_rules(tmp):
     it = find(m, "Cherenkov", NAME["tc6"])
     good &= check(it["level"] == "bad" and "> 80" in it["text"] and "outside" not in it["text"], f"85 C: {it}")
     src.plc["tc6"] = 20.6
-    good &= check(find(m, "PLC", "Trumeter 1") is not None, "Trumeters not on the PLC card")
+    good &= check(find(m, "PLC", NAME["trumeter_1"]) is not None, "Trumeters not on the PLC card")
     good &= check(find(m, "PLC inputs (not named)", "ai1") is None, "an assigned input also listed as not named")
     good &= check(find(m, "PLC inputs (not named)", "ai3") is None, "an unused input listed")
     good &= check(find(m, "PLC inputs (not named)", "ai2")["text"].endswith("(raw)"), "a free input not listed")
