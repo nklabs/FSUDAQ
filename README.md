@@ -86,7 +86,9 @@ When programSettings.txt is presented in the same folder as the FSUDAQ_Qt, the p
 - (line 9) elog user password
 - then `key=value` lines, in any order: `settingsPath` (folder of the `Digi-*.bin` files),
   `autoIncrementRunID`, `maxFileSizeMB` (roll-over size, up to 4000), `repeatPauseSec`,
-  `autoDashboard`. FSUDAQ writes the file back when these change.
+  `autoDashboard`, `boardOrder`, and the LED trigger's `ledTrigger`, `ledDelaySec`, `ledHoldSec`,
+  `ledRelayURL`, `ledOnCommand`, `ledOffCommand` (see below). FSUDAQ writes the file back when
+  these change.
 
 If no programSettings.txt is found. The program can still search for all digitizers that connected using optical cable. 
 
@@ -111,6 +113,40 @@ User must setup the data path for data take. Without the data path, user still c
 - `<prefix>_<run>/` <- one folder per run, with
   - `<prefix>_<run>_<serial>_<DPP>_<tick>_<index>.fsu` <- data files, a new index at the roll-over size
   - `<prefix>_<run>_<serial>_<DPP>.bin` <- each board's settings, read back from the board at the start
+  - `<prefix>_<run>_run.json` <- the run file: everything about the run that is not data (below)
+
+The `.bin` snapshots are the boards' register memory as FSUDAQ loads it; the run file is the same
+read-back in words, with the rest of the run's settings, so a run can be understood later without
+FSUDAQ. It is written when the run starts, again at each LED answer and at the stop, always whole:
+
+| key | what |
+|---|---|
+| `run`, `prefix`, `folder` | which run |
+| `start`, `stop` | times (ISO 8601 with the UTC offset), comments, run time in ms, problems found at the stop, bytes saved per board; `stop` is `null` while the run is going (or if FSUDAQ died in it) |
+| `led` | the LED trigger's settings, and each command sent: when (`sent`, and `run_ms` since the boards started), the PLC's `reply`, whether it was `ok`, and whether it could have `switched` the LED (`yes`; `no`: refused or never reached the PLC; `unknown`: e.g. no answer in time) |
+| `run_control` | run length, repeat and pause, file size, settings path, board order, elog |
+| `fsudaq` | the branch and commit of the source tree FSUDAQ ran from, and when its binary was built |
+| `boards` | per board in rack order: serial, model, DPP, channels, its `.bin` snapshot, and every register as `"<address> [chNN] <name>": "0x<hex> <decimal>"` |
+
+About 25 kB per 16-channel board. Read it with `less`, or e.g.
+`python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["led"])' <file>`.
+
+## LED trigger
+
+A light on the detectors, powered through the Slowtronics PLC, gives every board the same hits at
+the start of each run, so each board's start phase against its 16 ns clock can be measured. With
+**LED trigger** ticked (it then reads "enabled"), in every run FSUDAQ switches it on *delay* seconds after the boards
+started and off again *hold* seconds later, and off at the stop if the run ends first. It is never
+left on by a run that ends, a Stop, a closed window or a signal.
+
+The commands go by HTTP to the plc_command node of pion-ros on romulus, which holds the PLC's
+command connection (`ledRelayURL`, default `http://129.129.141.236:8770/command`; the node only
+takes commands from the hosts in its `http_allowed_hosts`). Nothing is spawned during a run. The
+PLC's DQ1 is the LED: `ledOnCommand=slowtronics,dq1,on`, `ledOffCommand=slowtronics,dq1,off`.
+A command that is refused or unanswered is logged in red and recorded in the run file; the run
+goes on. The switching is good to a few tens of ms (FSUDAQ, ROS, the PLC's scan): the LED's own
+hits give the ns timing, the run file's `run_ms` only where to look. The online dashboard shows the
+run file (DAQ tab, "Run and LED trigger") and marks the LED commands on its rate plots.
 
 # ToDo
 

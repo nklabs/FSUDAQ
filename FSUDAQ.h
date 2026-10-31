@@ -13,6 +13,7 @@
 #include <QElapsedTimer>
 #include <QNetworkAccessManager>
 #include <QMessageBox>
+#include <QJsonObject>
 
 #include "ClassDigitizer.h"
 #include "CustomThreads.h"
@@ -44,6 +45,7 @@ public:
       }
     }
     StopEverything("FSUDAQ was closed");
+    WaitForLed(3000);
     if( scope ) {
       delete scope;
       scope = nullptr;
@@ -229,6 +231,42 @@ private:
 
   QString startComment;
   QString stopComment;
+
+  //@----- LED trigger: a light on the detectors, switched through the PLC in every run, so that
+  //       the boards' start phase against their 16 ns clock can be measured from it
+  QCheckBox * chkLed;
+  RSpinBox  * sbLedDelaySec;     // on this long after the boards started
+  RSpinBox  * sbLedHoldSec;      // then off this long after it went on
+  QLabel    * lbLedStatus;
+  QString ledRelayURL;           // the pion-ros plc_command node's HTTP relay (programSettings.txt)
+  QString ledOnCommand;
+  QString ledOffCommand;
+  QTimer * ledOnTimer;
+  QTimer * ledOffTimer;
+  struct LedEvent {              // one command of this run, for the run file
+    QString what, command, sent, answered, reply, error;
+    QString switched;            // could the PLC have switched: "yes", "no" (refused, or never reached it), "unknown" (e.g. no answer in time)
+    qint64 runMs = -1;           // since the boards started (the run clock)
+    bool done = false, ok = false;
+  };
+  QList<LedEvent> ledEvents;
+  int ledRun = 0;                // which run the events belong to: a late answer of the previous run is not this run's
+  bool ledOnSent = false;        // this run asked for the LED on: it is switched off at the stop
+  int ledPending = 0;            // requests not answered yet
+  void StartLedCycle();          // at the start of a run: the on and off timers
+  void LedCommand(const QString & what); // "on" / "off": POST to the relay, the answer into ledEvents
+  void EndLedCycle();            // at the stop: the timers end, the LED off if this run switched it on
+  void WaitForLed(int ms);       // closing: let a last "off" be answered
+  void EnableLedControls(bool enable);
+
+  //@----- run file: <prefix>_<run>_run.json in the run folder, everything about the run that is not data
+  QString runFilePath;           // empty: no saved run yet
+  QJsonObject runFileHead;       // what is known at the start
+  QJsonObject runFileStop;       // filled at the stop
+  void StartRunFile(const QString & runDir, const QString & runIDStr);
+  void SaveRunFile();            // (re)written at the start, at each LED answer and at the stop
+  static QJsonObject BoardSettingsJson(Digitizer * d); // the registers in memory (read back at the start), by name
+  static QString SourceCommit(); // the git commit of the source tree FSUDAQ runs from
 
   //@----- Scalar
   QMainWindow  * scalar;

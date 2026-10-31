@@ -131,6 +131,7 @@
     <div class="card"><h2>Rate spectrum: periodic signals in the hit times</h2>
       <div class="ctl"><label>for <select id="spec_which"><option value="ch">this channel</option><option value="all">all channels</option></select></label></div>
       <canvas id="c_spec"></canvas><div class="note" id="note_spec"></div></div>
+    <div class="card"><h2>Run and LED trigger (FSUDAQ's run file)</h2><table id="t_run"></table><div class="note" id="note_run"></div></div>
     <div class="card"><h2>Data and processing</h2><table id="t_data"></table></div>
     <div class="card"><h2>Boards</h2><table id="t_boards"></table></div>
   </div>
@@ -181,7 +182,7 @@ function logTicks(a, b){ const out=[]; for(let e=Math.floor(Math.log10(a)); e<=M
 function setupCanvas(id){ const c=document.getElementById(id); const r=window.devicePixelRatio||1;
   const w=c.clientWidth, h=c.clientHeight; c.width=w*r; c.height=h*r; const g=c.getContext('2d'); g.setTransform(r,0,0,r,0,0); return {c,g,w,h}; }
 function message(id, text){ const {g,w,h}=setupCanvas(id); g.fillStyle=css('--muted'); g.font='12px system-ui'; g.textAlign='center'; g.fillText(text, w/2, h/2); }
-// spec: {xlog, ylog, x0, x1, xfmt, yfmt, xticks, series:[{kind:'bars'|'step'|'line', edges|x, y, color, colors, width, gap}], marks:[{x}], ylabel, empty}
+// spec: {xlog, ylog, x0, x1, xfmt, yfmt, xticks, series:[{kind:'bars'|'step'|'line', edges|x, y, color, colors, width, gap}], marks:[{x, color, label}], ylabel, empty}
 function plot(id, spec){
   const {g,w,h}=setupCanvas(id); const L=50,B=24,T=8,R=10;
   const own = spec.series.flatMap(s=>s.y).filter(v=>isFinite(v) && (spec.ylog ? v>0 : true));
@@ -216,7 +217,9 @@ function plot(id, spec){
       for(let i=0;i<s.x.length;i++){ const v=s.y[i]; if(!isFinite(v) || (spec.ylog && !(v>0))){ started=false; continue; }
         if(!started){ g.moveTo(X(s.x[i]),Y(v)); started=true; } else g.lineTo(X(s.x[i]),Y(v)); } g.stroke(); } }
   g.restore();
-  for(const m of (spec.marks||[])){ g.strokeStyle=m.color||css('--muted'); g.setLineDash([4,3]); g.lineWidth=1; g.beginPath(); g.moveTo(X(m.x),T); g.lineTo(X(m.x),h-B); g.stroke(); g.setLineDash([]); }
+  for(const m of (spec.marks||[])){ if(!(m.x>=x0 && m.x<=x1)) continue;
+    g.strokeStyle=m.color||css('--muted'); g.setLineDash([4,3]); g.lineWidth=1; g.beginPath(); g.moveTo(X(m.x),T); g.lineTo(X(m.x),h-B); g.stroke(); g.setLineDash([]);
+    if(m.label){ g.fillStyle=m.color||css('--muted'); g.textAlign='left'; g.fillText(m.label, X(m.x)+3, T+22); } }
   if(spec.ylabel){ g.fillStyle=css('--muted'); g.textAlign='left'; g.fillText(spec.ylabel, L+4, T+10); }
   return (PLOTS[id] = {X, Y, L, B, T, R, w, h, inv:invX(x0, x1, spec.xlog, L, w-R)});
 }
@@ -247,6 +250,7 @@ function plot2d(id, spec){
 function legend(id, items){ document.getElementById(id).innerHTML = items.map(it=>`<span><i style="background:${it.color}"></i>${it.name}</span>`).join(''); }
 const sw = c => `<i style="display:inline-block;width:9px;height:9px;background:${c};margin-right:5px"></i>`;
 const warn = t => `<span class="warn">${t}</span>`;
+const esc = t => String(t ?? '').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const store = { get(k,d){ try { const v=localStorage.getItem(k); return v===null?d:JSON.parse(v); } catch(e){ return d; } },
                 set(k,v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} } };
 
@@ -343,6 +347,11 @@ function banner(){
       out.push(['bad', `No analysis result for ${S.last_result_s.toFixed(0)} s (${S.in_flight} tasks out): the plots are not updating.`]);
     for(const h of S.health) out.push(['bad', h]);
     for(const p of S.problems) out.push(['bad', 'Setup: '+p]);
+    const ev = ((S.run_file||{}).led||{}).events||[];
+    const mayBeOn = ev.some(e=>e.what==='on' && e.switched!=='no');   // an "on" that may have reached the PLC (also one not answered yet)
+    for(const e of ev) if(e.ok===false)
+      out.push(['bad', `LED ${esc(e.what)} failed: ${esc(e.error)}` + (e.what!=='off' ? '' : mayBeOn ?
+        ' — the LED may still be on: switch it off with ros2 service call /plc/command (pion-ros README).' : ' (the LED was not switched on in this run)')]);
     if(S.warnings.length) out.push(['ph', `Placeholders (${S.warnings.length}): ` + S.warnings.join('; ') + ' — fill online/experiment.json.']);
     if(S.live_start) out.push(['', `Started while this run was going (${new Date(S.since_wall*1000).toLocaleTimeString()}): counts and histograms are from then on` +
       (S.early ? `; ${S.early.toLocaleString()} hits from before then reached the disk later (counted on the DAQ tab, not in the finder, not as late).` : '.')]);
@@ -412,7 +421,7 @@ function drawDaq(){
   const secs=D.seconds, ser=[];
   ser.push({kind:'line', x:secs.map(s=>s.t), y:secs.map(s=>s.boards.reduce((a,b)=>a+b,0)), color:css('--fg'), width:2});
   S.boards.forEach((bd,i)=>ser.push({kind:'line', x:secs.map(s=>s.t), y:secs.map(s=>s.boards[i]||0), color:BOARD_COLOR[i%BOARD_COLOR.length]}));
-  if(secs.length>1) plot('c_total', {x0:secs[0].t, x1:secs[secs.length-1].t, xfmt:v=>sinum(v)+' s', series:ser, ylabel:'Hz'}); else message('c_total','no data yet');
+  if(secs.length>1) plot('c_total', {x0:secs[0].t, x1:secs[secs.length-1].t, xfmt:v=>sinum(v)+' s', series:ser, marks:ledMarks(), ylabel:'Hz'}); else message('c_total','no data yet');
   legend('leg_total', [{name:'all channels', color:css('--fg')}].concat(S.boards.map((b,i)=>({name:'Digi-'+b.serial, color:BOARD_COLOR[i%BOARD_COLOR.length]}))));
   drawGrid();
   drawCompare();
@@ -438,7 +447,7 @@ function drawDaq(){
     if(refName) plot('c_dt', {x0:-200, x1:200, ylog:document.getElementById('dt_log').checked, series:[{kind:'bars', edges:CH.dt.edges, y:CH.dt.counts, color:'#2a9d8f', gap:0}],
                               empty:'no pairs within ±200 ns yet', ylabel:'pairs per 0.5 ns'});
     else message('c_dt', 'pick a timing reference channel above');
-    if(CH.rate.length>1) plot('c_crate', {x0:CH.rate[0][0], x1:CH.rate[CH.rate.length-1][0], xfmt:v=>sinum(v)+' s', series:[{kind:'line', x:CH.rate.map(r=>r[0]), y:CH.rate.map(r=>r[1]), color:'#1f77b4'}], ylabel:'Hz'});
+    if(CH.rate.length>1) plot('c_crate', {x0:CH.rate[0][0], x1:CH.rate[CH.rate.length-1][0], xfmt:v=>sinum(v)+' s', series:[{kind:'line', x:CH.rate.map(r=>r[0]), y:CH.rate.map(r=>r[1]), color:'#1f77b4'}], marks:ledMarks(), ylabel:'Hz'});
     else message('c_crate', 'no data yet');
   }
   const sp = document.getElementById('spec_which').value==='all' ? SPEC_ALL : CH;
@@ -457,12 +466,48 @@ function drawDaq(){
     row('analysis', (D.backpressure ? warn(S.status) : (D.lag_s>60 ? warn('more than a minute behind') : 'keeping up')) +
         ` · ${S.workers} workers (${S.kernels}), ${D.in_flight} tasks out` + (S.oldest_task_s!=null ? `, oldest ${S.oldest_task_s.toFixed(0)} s` : '') +
         (S.last_result_s!=null ? ` · last result ${S.last_result_s.toFixed(0)} s ago` : ''));
+  drawRun();
   const live = S.mode==='running' || S.mode==='paused';
   document.getElementById('t_boards').innerHTML = '<tr><th>board</th><th>files</th><th>MB</th><th>read</th><th>newest (s)</th><th>late hits</th><th></th></tr>' +
     S.boards.map((b,i)=>`<tr><td>${sw(BOARD_COLOR[i%BOARD_COLOR.length])}Digi-${b.serial}</td><td>${b.files}</td><td>${(b.bytes/1e6).toFixed(0)}</td>` +
       `<td>${b.bytes ? (100*b.indexed/b.bytes).toFixed(0)+' %' : '–'}</td><td>${b.newest_s==null?'–':b.newest_s.toFixed(2)}</td><td>${b.late?warn(b.late.toLocaleString()):0}</td>` +
       `<td class="l">${!b.has_data ? (live ? warn('no data') : 'no data') : b.quiet_alarm ? warn(`nothing written for ${b.quiet_s.toFixed(0)} s`) :
         (b.slow_couples.length ? 'slow pairs: ' + b.slow_couples.map(c=>`ch${2*c}/${2*c+1}`).join(', ') : '')}</td></tr>`).join('');
+}
+
+// ---------------------------------------------------------------- run file: start, stop, LED trigger (read-only: set in FSUDAQ)
+const LED_COLOR = '#e9a400';
+// the LED commands on the rate plots: run-clock ms placed on their axis (0 = the board-clock second of the first hit)
+function ledMarks(){
+  const R=S.run_file; if(!R || !R.led || S.t0_s==null) return [];
+  return R.led.events.filter(e=>e.run_ms!=null && e.run_ms>=0 && e.ok!==false)
+    .map(e=>({x:e.run_ms/1000 - S.t0_s, color:e.what==='on' ? LED_COLOR : css('--muted'), label:'LED '+e.what}));
+}
+function drawRun(){
+  const row=(k,v)=>`<tr><td>${k}</td><td class="l">${v}</td></tr>`, R=S.run_file;
+  const clock = t => t ? t.slice(11, 19) : '–';   // FSUDAQ's time of day, as in its log
+  const note = document.getElementById('note_run'), tab = document.getElementById('t_run');
+  if(!R){ tab.innerHTML = row('run file', S.folder ? 'none in this folder (a run from before FSUDAQ wrote one)' : '–'); note.textContent=''; return; }
+  if(R.error){ tab.innerHTML = row('run file', warn(`${esc(R.file)}: ${esc(R.error)}`)); note.textContent=''; return; }
+  const L=R.led, st=R.stop;
+  const plan = L.enabled ? `on ${L.delay_s} s after the start, for ${L.hold_s} s (off at ${+(L.delay_s+L.hold_s).toFixed(3)} s, or at the stop)` : 'not used in this run';
+  const cmds = L.events.map(e=>{
+    const at = `${esc(e.what)}: sent ${clock(e.sent)}` + (e.run_ms!=null && e.run_ms>=0 ? `, ${(e.run_ms/1000).toFixed(3)} s into the run` : '');
+    const res = e.ok===true ? ` · PLC "${esc(e.reply)}"` : e.ok===false ? ' · ' + warn(esc(e.error)) : ' · waiting for the answer';
+    return at + res; }).join('<br>');
+  const going = S.mode==='running' || S.mode==='paused';
+  tab.innerHTML =
+    row('run file', `${esc(R.file)} · run ${esc(R.run)} · ${R.boards} boards`) +
+    row('started', clock(R.start)) +
+    row('stopped', !st ? (going ? 'running' : 'no stop recorded (running, or FSUDAQ ended in the run)') :
+        `${clock(st.time)} after ${fmt((st.run_ms||0)/1000, 1)} s` + (st.comment ? ` · "${esc(st.comment)}"` : '') +
+        (st.problems && st.problems.length ? ' · ' + warn(esc([].concat(st.problems).join('; '))) : '')) +
+    row('LED trigger', plan) +
+    (L.enabled || L.events.length ? row('LED commands', cmds || (st ? 'none sent (the run ended before the delay)' : 'none sent yet')) : '') +
+    row('FSUDAQ', esc(R.source || 'source not known'));
+  note.innerHTML = 'Read-only: the LED trigger is set in FSUDAQ (main window, "LED trigger"). ' +
+    (L.events.length ? `The dashed lines on the rate plots are when FSUDAQ sent the commands (${sw(LED_COLOR)}on, grey off); the LED switches some tens of ms later. ` +
+      "They assume the boards' clocks start at 0 at Start; the LED's own hits give the exact time." : '');
 }
 
 // ---------------------------------------------------------------- channels side by side

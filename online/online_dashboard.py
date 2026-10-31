@@ -973,6 +973,10 @@ class Online:
                 proc_s=self.proc_s, steps=self.steps, health=health,
                 warnings=S.warnings, problems=S.problems,
                 boards=boards,
+                # FSUDAQ's run file; t0_s: the board-clock second the rate plots count from (their 0 s), so a
+                # run-clock time (LED run_ms) is at run_ms / 1000 - t0_s on them
+                run_file=read_run_file(self.folder),
+                t0_s=None if self.t_first is None else int(self.t_first // PS),
                 finder=dict(setting=tb.setting, setting_src=S.src.get("setting"), map=S.map_path, map_rows=tb.map_n,
                             calibrated=tb.calibrated, cabling=S.cabling,
                             installed=[c for c, i in zip(ff.COUNTERS, ch.installed) if i],
@@ -1172,6 +1176,44 @@ def folder_quiet(folder: str, quiet_s: float) -> bool:
         except OSError:
             pass
     return bool(times) and time.time() - max(times) > quiet_s
+
+
+_RUN_FILES = {}   # path -> ((mtime_ns, size), what read_run_file made of it)
+
+
+def read_run_file(folder):
+    """What the page shows of FSUDAQ's run file <folder>/<folder name>_run.json (README "Data folder"):
+    start and stop, the LED trigger's settings and commands, the source FSUDAQ ran from. Not the
+    registers. None when the folder has none (a run from before the run file). FSUDAQ writes it whole
+    (QSaveFile), so a file is never seen half written; it is read again only when it changed."""
+    if not folder:
+        return None
+    path = os.path.join(folder, os.path.basename(os.path.normpath(folder)) + "_run.json")
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (st.st_mtime_ns, st.st_size)
+    hit = _RUN_FILES.get(path)
+    if hit and hit[0] == key:
+        return hit[1]
+    try:
+        with open(path, encoding="utf-8") as fh:
+            d = json.load(fh)
+        led = d.get("led") or {}
+        stop = d.get("stop")
+        out = dict(file=os.path.basename(path), run=d.get("run"), start=(d.get("start") or {}).get("time"),
+                   stop=None if not stop else {k: stop.get(k) for k in ("time", "run_ms", "comment", "problems")},
+                   led=dict(enabled=bool(led.get("enabled")), delay_s=led.get("delay_s"), hold_s=led.get("hold_s"),
+                            relay=led.get("relay"),
+                            events=[{k: e.get(k) for k in ("what", "command", "sent", "run_ms", "reply", "ok", "switched", "error")}
+                                    for e in led.get("events") or []]),
+                   source=(d.get("fsudaq") or {}).get("source"), boards=len(d.get("boards") or []))
+    except (OSError, ValueError, AttributeError, TypeError) as ex:
+        out = dict(file=os.path.basename(path), error=f"cannot read it: {ex}")
+    _RUN_FILES.clear()                  # one run at a time
+    _RUN_FILES[path] = (key, out)
+    return out
 
 
 def newest_run_folder(data_path: str):

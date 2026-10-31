@@ -20,6 +20,14 @@ picked channel the pulse height (full 16-bit Qlong kept per count; linear or log
 zoom), a PSD map ((Qlong − Qshort)/Qlong against Qlong), time since the previous hit, time
 to a reference channel and a rate spectrum; plus every channel's pulse height side by side.
 
+The **Run and LED trigger** card shows FSUDAQ's run file (`<run folder>_run.json`, README
+"Data folder"), read-only: start, stop, the LED trigger's delay and hold, each LED command
+with the PLC's answer, and the FSUDAQ commit. The LED is set in FSUDAQ, not here. The rate
+plots mark when FSUDAQ sent the LED commands (dashed lines; placed assuming the boards'
+clocks start at 0 at Start, and good to tens of ms: the LED's own hits give the exact
+time). A failed LED command is shown at the top, an "off" with the warning that the LED may
+still be on.
+
 What the finder needs that is not in the data comes from `experiment.json` (copy
 `experiment.example.json`), read again for every run: `setting` (high|low, the T1/T2 position),
 `cabling` (CSV serial,channel,kind,plane,ch; kind trk/veto/cherenkov/lucite), `gains` (CSV
@@ -66,5 +74,5 @@ the history before Oct 2026.
 
 Tests: `python3 ../tests/test_online.py` runs the file following against simulated boards
 (late channels, pauses, roll-over, damage, counter gaps and wrap, a run recorded again, a start
-mid-run or after the run, the analysis falling behind, a killed worker) and checks every number,
+mid-run or after the run, the analysis falling behind, a killed worker, FSUDAQ's run file) and checks every number,
 and every rate shown, against the hits written.

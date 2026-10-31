@@ -19,6 +19,11 @@
 #include <QTimer>
 #include <QScrollArea>
 #include <QMap>
+#include <QTcpServer>
+#include <QTcpSocket>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
 #include <thread>
 
 #include <functional>
@@ -37,6 +42,40 @@ static int nFail = 0;
 static const int Serials[6] = {15880, 15879, 58918, 62839, 1443, 30508}; // port order on odin
 static QStringList dialogs;   // "title: text" of every dialog answered
 static QMap<QString, QString> answers;   // dialog title -> the button to press (else the default)
+
+// a stand-in for the pion-ros plc_command relay: answers each POST as the PLC does
+// ("SLOWTRONICS,DQ1,ON" -> "DQ1,ON", or its version string to a command it does not take)
+class FakeRelay {
+public:
+  QTcpServer server;
+  QStringList commands;
+  bool confirm = true;
+  bool Listen(){
+    if( !server.listen(QHostAddress::LocalHost, 0) ) return false;
+    QObject::connect(&server, &QTcpServer::newConnection, [this](){
+      while( QTcpSocket * s = server.nextPendingConnection() ){
+        QObject::connect(s, &QTcpSocket::readyRead, s, [this, s](){
+          QByteArray buf = s->property("buf").toByteArray() + s->readAll();
+          s->setProperty("buf", buf);
+          const int end = buf.indexOf("\r\n\r\n");
+          if( end < 0 ) return;
+          int length = 0;
+          for( const QByteArray & line : buf.left(end).split('\n') ) if( line.toLower().startsWith("content-length:") ) length = line.mid(15).trimmed().toInt();
+          if( buf.size() < end + 4 + length ) return;
+          const QString command = QString::fromUtf8(buf.mid(end + 4, length)).trimmed().toUpper();
+          commands << command;
+          const QString reply = confirm ? command.section(',', 1) : "SLOWTRONICS,ver:0.0.1";
+          const QByteArray body = QJsonDocument(QJsonObject{{"command", command}, {"plc_resp", reply}, {"confirmed", confirm}}).toJson(QJsonDocument::Compact);
+          s->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\n\r\n" + body);
+          s->disconnectFromHost();
+        });
+        QObject::connect(s, &QTcpSocket::disconnected, s, &QObject::deleteLater);
+      }
+    });
+    return true;
+  }
+  QString URL() const { return "http://127.0.0.1:" + QString::number(server.serverPort()) + "/command"; }
+};
 
 class FSUDAQTest {
 public:
@@ -1021,6 +1060,160 @@ public:
     if( nFail == 0 ) OK("one board, one channel, software start; switched channel; every register as saved after the stop");
     w->CloseDigitizers();
   }
+
+  QJsonObject RunFile(const QString & runDir, const QString & name){
+    QFile f(runDir + "/" + name);
+    if( !f.open(QIODevice::ReadOnly) ) return QJsonObject();
+    QJsonParseError err;
+    QJsonDocument doc = QJsonDocument::fromJson(f.readAll(), &err);
+    CHECK(err.error == QJsonParseError::NoError, "%s is not JSON: %s", qPrintable(name), qPrintable(err.errorString()));
+    return doc.object();
+  }
+
+  void LedTriggerAndRunFile(){
+    printf("== LED trigger: on after the delay, off after the hold or at the stop; everything in the run file\n");
+    int nFail0 = nFail;
+    NewWorkDir(); AddBoards(5, 2); NewFSUDAQ();
+    FakeRelay relay;
+    CHECK(relay.Listen(), "the fake relay cannot listen");
+    const QString relayURL = relay.URL();
+    w->ledRelayURL = relayURL;
+    w->chkLed->setChecked(true);
+    w->sbLedDelaySec->setValue(0.3);
+    w->sbLedHoldSec->setValue(0.5);
+    Open();
+    w->chkSaveData->setChecked(true);
+    dialogs.clear();
+
+    // a run longer than delay + hold: on at 0.3 s, off at 0.8 s, both answered
+    w->AutoRun();
+    CHECK(w->inDataRun, "the run did not start (%s)", qPrintable(dialogs.join(" | ")));
+    QString runDir = w->RunFolder();
+    CHECK(QFile::exists(runDir + "/temp_001_run.json"), "no run file at the start");
+    WaitFor([&](){ return w->ledEvents.size() == 2 && w->ledEvents[1].done; }, 3000);
+    CHECK(relay.commands == QStringList({"SLOWTRONICS,DQ1,ON", "SLOWTRONICS,DQ1,OFF"}), "relay got: %s", qPrintable(relay.commands.join(" | ")));
+    if( w->ledEvents.size() == 2 ){
+      CHECK(w->ledEvents[0].runMs >= 290 && w->ledEvents[0].runMs < 600, "on sent at %lld ms, expected 300", (long long) w->ledEvents[0].runMs);
+      CHECK(w->ledEvents[1].runMs >= 790 && w->ledEvents[1].runMs < 1100, "off sent at %lld ms, expected 800", (long long) w->ledEvents[1].runMs);
+      CHECK(w->ledEvents[0].ok && w->ledEvents[1].ok, "answers not ok: %s / %s", qPrintable(w->ledEvents[0].error), qPrintable(w->ledEvents[1].error));
+    }
+    QJsonObject live = RunFile(runDir, "temp_001_run.json");
+    CHECK(live["led"].toObject()["events"].toArray().size() == 2 && live["stop"].isNull(), "run file during the run: %d LED events, stop %s",
+          (int) live["led"].toObject()["events"].toArray().size(), live["stop"].isNull() ? "absent" : "present");
+    w->StopPressed();
+    CHECK(relay.commands.size() == 2, "a second off at the stop: %s", qPrintable(relay.commands.join(" | ")));
+    QJsonObject rf = RunFile(runDir, "temp_001_run.json");
+    QJsonObject led = rf["led"].toObject();
+    CHECK(rf["run"].toInt() == 1 && rf["prefix"].toString() == "temp" && !rf["start"].toObject()["time"].toString().isEmpty(), "run file head: run %d, prefix %s",
+          rf["run"].toInt(), qPrintable(rf["prefix"].toString()));
+    CHECK(rf["stop"].toObject()["run_ms"].toInteger() > 800 && rf["stop"].toObject().contains("bytes_saved"), "no stop in the run file");
+    CHECK(led["enabled"].toBool() && led["delay_s"].toDouble() == 0.3 && led["hold_s"].toDouble() == 0.5 && led["on_command"].toString() == "slowtronics,dq1,on",
+          "LED settings in the run file: %s", QJsonDocument(led).toJson(QJsonDocument::Compact).constData());
+    QJsonArray ev = led["events"].toArray();
+    CHECK(ev.size() == 2 && ev[0].toObject()["what"].toString() == "on" && ev[0].toObject()["reply"].toString() == "DQ1,ON" && ev[1].toObject()["ok"].toBool(),
+          "LED events in the run file: %s", QJsonDocument(ev).toJson(QJsonDocument::Compact).constData());
+    QJsonArray boards = rf["boards"].toArray();
+    CHECK(boards.size() == 6, "%d boards in the run file", (int) boards.size());
+    for( const QJsonValue & b : boards ){
+      QJsonObject o = b.toObject();
+      Digitizer * d = Digi(o["serial"].toInt());
+      if( !d ){ CHECK(false, "a board %d not open", o["serial"].toInt()); continue; }
+      QJsonObject regs = o["registers"].toObject();
+      const uint32_t cfg = d->GetSettingFromMemory(DPP::BoardConfiguration);
+      const uint32_t thr = d->GetSettingFromMemory(DPP::PSD::TriggerThreshold, 3);
+      QString cfgText = regs["0x8000 BoardConfiguration"].toString(), thrText = regs["0x1360 ch03 " + QString::fromStdString(DPP::PSD::TriggerThreshold.GetName())].toString();
+      CHECK(cfgText.section(' ', 1).toUInt() == cfg && thrText.section(' ', 1).toUInt() == thr && regs.size() > 200,   // 244 on an 8-channel board, 432 on a 16-channel one
+            "Digi-%d registers: %lld of them, BoardConfiguration \"%s\" (memory %u), ch3 threshold \"%s\" (memory %u)", o["serial"].toInt(),
+            (long long) regs.size(), qPrintable(cfgText), cfg, qPrintable(thrText), thr);
+      CHECK(QFile::exists(runDir + "/" + o["settings_snapshot"].toString()), "Digi-%d: no snapshot %s", o["serial"].toInt(), qPrintable(o["settings_snapshot"].toString()));
+    }
+    CHECK(QFileInfo(runDir + "/temp_001_run.json").size() < 400 * 1024, "run file of %lld bytes", (long long) QFileInfo(runDir + "/temp_001_run.json").size());
+    CHECK(rf["fsudaq"].toObject()["source"].toString().contains(' '), "no source commit: \"%s\"", qPrintable(rf["fsudaq"].toObject()["source"].toString()));
+
+    // a run that ends before the LED is due: nothing sent
+    relay.commands.clear();
+    w->sbLedDelaySec->setValue(2);
+    w->AutoRun();
+    Pump(300);
+    w->StopPressed();
+    Pump(200);
+    CHECK(relay.commands.isEmpty(), "sent in a run shorter than the delay: %s", qPrintable(relay.commands.join(" | ")));
+
+    // a run that ends while the LED is on: off at the stop, recorded in the run file once answered
+    w->sbLedDelaySec->setValue(0.2);
+    w->sbLedHoldSec->setValue(30);
+    w->AutoRun();
+    runDir = w->RunFolder();
+    WaitFor([&](){ return relay.commands.size() == 1; }, 2000);
+    w->StopPressed();
+    WaitFor([&](){ return w->ledPending == 0; }, 3000);
+    CHECK(relay.commands == QStringList({"SLOWTRONICS,DQ1,ON", "SLOWTRONICS,DQ1,OFF"}), "LED on through the stop: %s", qPrintable(relay.commands.join(" | ")));
+    ev = RunFile(runDir, "temp_003_run.json")["led"].toObject()["events"].toArray();
+    CHECK(ev.size() == 2 && ev[1].toObject()["ok"].toBool() && ev[1].toObject()["run_ms"].toInteger() < 2000, "off at the stop in the run file: %s",
+          QJsonDocument(ev).toJson(QJsonDocument::Compact).constData());
+
+    // the PLC does not take the command: an error in the log and the run file, the run goes on, no dialog
+    relay.commands.clear();
+    relay.confirm = false;
+    w->sbLedHoldSec->setValue(0.3);
+    w->AutoRun();
+    runDir = w->RunFolder();
+    WaitFor([&](){ return w->ledEvents.size() == 2 && w->ledEvents[1].done; }, 3000);
+    CHECK(w->inDataRun, "a refused LED command stopped the run");
+    CHECK(w->ledEvents.size() == 2 && !w->ledEvents[0].ok && w->ledEvents[0].error.contains("ver:0.0.1"), "refused command: %s",
+          w->ledEvents.isEmpty() ? "no event" : qPrintable(w->ledEvents[0].error));
+    CHECK(w->ledEvents.size() == 2 && w->ledEvents[0].switched == "no" && w->ledEvents[1].switched == "no", "refused: switched %s, %s",
+          w->ledEvents.isEmpty() ? "-" : qPrintable(w->ledEvents[0].switched), w->ledEvents.size() < 2 ? "-" : qPrintable(w->ledEvents[1].switched));
+    w->StopPressed();
+    relay.confirm = true;
+    CHECK(!w->logInfo->toPlainText().contains("may still be on"), "\"may still be on\" logged although no on was taken");
+
+    // on taken, then the relay goes away: the failed off warns that the LED may still be on
+    w->AutoRun();
+    runDir = w->RunFolder();
+    WaitFor([&](){ return !w->ledEvents.isEmpty() && w->ledEvents[0].done; }, 3000);
+    relay.server.close();
+    WaitFor([&](){ return w->ledEvents.size() == 2 && w->ledEvents[1].done; }, 8000);
+    CHECK(w->ledEvents.size() == 2 && w->ledEvents[0].switched == "yes" && w->ledEvents[1].switched == "no" && w->logInfo->toPlainText().contains("may still be on"),
+          "on taken, off failed: switched %s, %s; warned %d", w->ledEvents.isEmpty() ? "-" : qPrintable(w->ledEvents[0].switched),
+          w->ledEvents.size() < 2 ? "-" : qPrintable(w->ledEvents[1].switched), w->logInfo->toPlainText().contains("may still be on"));
+    w->StopPressed();
+    ev = RunFile(runDir, "temp_005_run.json")["led"].toObject()["events"].toArray();
+    CHECK(ev.size() == 2 && ev[0].toObject()["switched"].toString() == "yes" && ev[1].toObject()["switched"].toString() == "no",
+          "switched in the run file: %s", QJsonDocument(ev).toJson(QJsonDocument::Compact).constData());
+
+    // nobody listening: the same, with the reason
+    w->AutoRun();
+    WaitFor([&](){ return w->ledEvents.size() == 2 && w->ledEvents[1].done; }, 8000);
+    CHECK(w->inDataRun && w->ledEvents.size() == 2 && !w->ledEvents[0].ok && w->ledEvents[0].error.startsWith("no answer")
+          && w->ledEvents[0].error.contains("is pion-ros running") && w->ledEvents[0].switched == "no", "relay down: %s (switched %s)",
+          w->ledEvents.isEmpty() ? "no event" : qPrintable(w->ledEvents[0].error), w->ledEvents.isEmpty() ? "-" : qPrintable(w->ledEvents[0].switched));
+    CHECK(w->lbLedStatus->text().contains("failed"), "status shows \"%s\"", qPrintable(w->lbLedStatus->text()));
+    w->StopPressed();
+    CHECK(dialogs.isEmpty(), "dialogs: %s", qPrintable(dialogs.join(" | ")));
+
+    // off: nothing sent, the run file says so; the settings are kept for the next start
+    w->chkLed->setChecked(false);
+    CHECK(w->chkLed->text() == "disabled" && !w->sbLedDelaySec->isEnabled() && !w->sbLedHoldSec->isEnabled(),
+          "LED unticked: reads '%s', delay box %d, hold box %d", qPrintable(w->chkLed->text()), w->sbLedDelaySec->isEnabled(), w->sbLedHoldSec->isEnabled());
+    w->AutoRun();
+    runDir = w->RunFolder();
+    Pump(500);
+    w->StopPressed();
+    CHECK(w->ledEvents.isEmpty() && !RunFile(runDir, "temp_007_run.json")["led"].toObject()["enabled"].toBool(), "LED off, yet %lld events", (long long) w->ledEvents.size());
+    w->chkLed->setChecked(true);
+    CHECK(w->chkLed->text() == "enabled" && w->sbLedDelaySec->isEnabled() && w->sbLedHoldSec->isEnabled(),
+          "LED ticked: reads '%s', delay box %d, hold box %d", qPrintable(w->chkLed->text()), w->sbLedDelaySec->isEnabled(), w->sbLedHoldSec->isEnabled());
+    w->sbLedDelaySec->setValue(4.5);
+    w->sbLedHoldSec->setValue(12);
+    w->SaveProgramSettings();
+    w->CloseDigitizers();
+    NewFSUDAQ();
+    CHECK(w->chkLed->text() == "enabled", "after a restart the LED box reads '%s'", qPrintable(w->chkLed->text()));
+    CHECK(w->chkLed->isChecked() && w->sbLedDelaySec->value() == 4.5 && w->sbLedHoldSec->value() == 12 && w->ledRelayURL == relayURL,
+          "after a restart: LED %d, delay %g, hold %g, relay %s", w->chkLed->isChecked(), w->sbLedDelaySec->value(), w->sbLedHoldSec->value(), qPrintable(w->ledRelayURL));
+    if( nFail == nFail0 ) OK("on at 0.3 s and off at 0.8 s, or off at the stop, or nothing before the delay; refused and unanswered commands logged, the run goes on; run file with settings, LED events and %d boards' registers; settings kept", (int) boards.size());
+  }
 };
 
 int main(int argc, char ** argv){
@@ -1084,6 +1277,7 @@ int main(int argc, char ** argv){
   t.FailureInSeriesEndsSeries();
   t.DataFileCannotGrow();
   t.ReadLongerThanBuffer();
+  t.LedTriggerAndRunFile();
 
   delete t.w;
   QDir(t.work).removeRecursively();

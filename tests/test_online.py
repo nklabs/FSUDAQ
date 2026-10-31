@@ -807,6 +807,57 @@ def scenario_window(tmp):
         ok("bad values refused; 1000 ns used for every later slice (differs from 25 ns), counts restarted; kept in the config, --window overrides")
 
 
+def scenario_run_file(tmp):
+    print("== FSUDAQ's run file on the page: start, stop, LED settings and commands; read again only when it changes")
+    folder = os.path.join(tmp, "run_007"); os.makedirs(folder)
+    path = os.path.join(folder, "run_007_run.json")
+    clock = Clock(); boards = boards_for(folder, seed=11)
+    online = make_online(folder, SERIALS, EIGHT, clock)
+    drive(online, clock, boards, 0, 3)
+    st = online.state()
+    good = check(st["run_file"] is None, f"run file: {st['run_file']} without a file")
+    good &= check(isinstance(st["t0_s"], int), f"run file: t0_s is {st['t0_s']!r}")
+    led = {"enabled": True, "delay_s": 5.0, "hold_s": 10.0, "relay": "http://romulus:8770/command",
+           "on_command": "slowtronics,dq1,on", "off_command": "slowtronics,dq1,off", "note": "...", "events": []}
+    run = {"format": "FSUDAQ run file 1", "run": 7, "prefix": "run", "folder": folder,
+           "start": {"time": "2026-10-31T12:00:00.000+01:00", "comment": "<b>beam</b> on"}, "stop": None, "led": led,
+           "run_control": {}, "fsudaq": {"source": "feature/led-trigger 0123abc"},
+           "boards": [{"serial": s, "settings": {"0x8000 Config": "0x00000010 16"}} for s in SERIALS]}
+
+    def write():
+        with open(path, "w") as f:
+            json.dump(run, f, indent=2)
+    write()
+    r = online.state()["run_file"]
+    good &= check(r and r["run"] == 7 and r["boards"] == len(SERIALS) and r["stop"] is None and r["led"]["enabled"]
+                  and r["led"]["delay_s"] == 5.0 and r["led"]["events"] == [] and r["source"] == "feature/led-trigger 0123abc"
+                  and "settings" not in json.dumps(r), f"run file at the start: {r}")
+    led["events"].append({"what": "on", "command": "slowtronics,dq1,on", "sent": "2026-10-31T12:00:05.003+01:00", "run_ms": 5003,
+                          "answered": None})
+    write()
+    r = online.state()["run_file"]
+    good &= check(r["led"]["events"] == [{"what": "on", "command": "slowtronics,dq1,on", "sent": "2026-10-31T12:00:05.003+01:00",
+                                          "run_ms": 5003, "reply": None, "ok": None, "switched": None, "error": None}], f"run file: on sent: {r['led']}")
+    led["events"][0].update(answered="2026-10-31T12:00:05.020+01:00", reply="DQ1,ON", ok=True)
+    led["events"].append({"what": "off", "command": "slowtronics,dq1,off", "sent": "2026-10-31T12:00:09.000+01:00", "run_ms": 9000,
+                          "answered": "2026-10-31T12:00:12.000+01:00", "reply": "", "ok": False, "error": "no answer from http://romulus:8770/command"})
+    run["stop"] = {"time": "2026-10-31T12:00:09.000+01:00", "run_ms": 9000, "comment": "stop", "problems": [], "bytes_saved": {}}
+    write()
+    st = online.state()
+    r = st["run_file"]
+    good &= check(r["stop"] == {"time": "2026-10-31T12:00:09.000+01:00", "run_ms": 9000, "comment": "stop", "problems": []}
+                  and [e["ok"] for e in r["led"]["events"]] == [True, False] and "no answer" in r["led"]["events"][1]["error"],
+                  f"run file at the stop: {r}")
+    json.dumps(st, allow_nan=False)
+    with open(path, "w") as f:
+        f.write("{ not json")
+    r = online.state()["run_file"]
+    good &= check(r["file"] == "run_007_run.json" and "cannot read" in r.get("error", ""), f"run file damaged: {r}")
+    finish(online, clock, boards)
+    if good:
+        ok("none, at the start, an LED command waiting, answered and failed, the stop, a damaged file: shown as written")
+
+
 def scenario_x725(tmp):
     print("== an x725 board (4 ns time tags, like 1399) with x730 boards: its hits at their true times")
     folder = os.path.join(tmp, "x725"); os.makedirs(folder)
@@ -840,7 +891,7 @@ def main():
                    scenario_live_start, scenario_offsets, scenario_replay, scenario_short_hold, scenario_worker_killed,
                    scenario_idle_worker_killed, scenario_falling_behind, scenario_counters, scenario_finished_at_start,
                    scenario_long_pause, scenario_offsets_dense, scenario_missing_board, scenario_boundaries, scenario_x725,
-                   scenario_window):
+                   scenario_window, scenario_run_file):
             sc(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

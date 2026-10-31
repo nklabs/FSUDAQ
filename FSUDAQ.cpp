@@ -21,7 +21,14 @@
 #include <QNetworkReply>
 #include <QElapsedTimer>
 #include <QStorageInfo>
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QSaveFile>
 #include <memory>
+
+static QString Iso(const QDateTime & t){ // ISO 8601 with the offset from UTC, so a time in the run file means one thing anywhere
+  return t.toOffsetFromUtc(t.offsetFromUtc()).toString(Qt::ISODateWithMs);
+}
 #include <functional>
 #include <QEvent>
 #include <QScreen>
@@ -79,6 +86,17 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
   pauseTimer->setTimerType(Qt::PreciseTimer);
   pauseTimer->setSingleShot(true);
   connect(pauseTimer, &QTimer::timeout, this, &FSUDAQ::PauseOver);
+  ledOnTimer = new QTimer(this);
+  ledOnTimer->setTimerType(Qt::PreciseTimer);
+  ledOnTimer->setSingleShot(true);
+  connect(ledOnTimer, &QTimer::timeout, this, [=](){ LedCommand("on"); });
+  ledOffTimer = new QTimer(this);
+  ledOffTimer->setTimerType(Qt::PreciseTimer);
+  ledOffTimer->setSingleShot(true);
+  connect(ledOffTimer, &QTimer::timeout, this, [=](){ LedCommand("off"); });
+  ledRelayURL = "http://129.129.141.236:8770/command";   // romulus
+  ledOnCommand = "slowtronics,dq1,on";                  // PLC DQ1 = dq0 in /plc_status/status
+  ledOffCommand = "slowtronics,dq1,off";
   runClockTimer = new QTimer(this);
   runClockTimer->setInterval(100);
   connect(runClockTimer, &QTimer::timeout, this, [=](){
@@ -356,6 +374,36 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
 
     //------------------------------------------
     rowID ++;
+    QLabel * lbLed = new QLabel("LED trigger : ", this);
+    lbLed->setAlignment(Qt::AlignRight | Qt::AlignCenter);
+    chkLed = new QCheckBox("disabled", this);
+    chkLed->setToolTip("Enabled: in every run the LED is switched on through the PLC (pion-ros plc_command relay) a delay after the boards start, and off again after the hold; "
+                       "also off when the run stops. The commands and their answers go into the run file (<prefix>_<run>_run.json).");
+    connect(chkLed, &QCheckBox::toggled, this, [this](){ EnableLedControls(chkLed->isEnabled()); SaveProgramSettings(); });
+    sbLedDelaySec = new RSpinBox(this, 1);
+    sbLedDelaySec->setRange(0, 3600);
+    sbLedDelaySec->setSingleStep(1);
+    sbLedDelaySec->setValue(5);
+    sbLedDelaySec->setSuffix(" s delay");
+    sbLedDelaySec->setToolTip("The LED goes on this long after the boards started: time for every board to be running and writing.");
+    connect(sbLedDelaySec, &RSpinBox::editingFinished, this, &FSUDAQ::SaveProgramSettings);
+    sbLedHoldSec = new RSpinBox(this, 1);
+    sbLedHoldSec->setRange(0.1, 3600);
+    sbLedHoldSec->setSingleStep(1);
+    sbLedHoldSec->setValue(10);
+    sbLedHoldSec->setSuffix(" s on");
+    sbLedHoldSec->setToolTip("How long the LED stays on. A run that ends sooner switches it off at its stop.");
+    connect(sbLedHoldSec, &RSpinBox::editingFinished, this, &FSUDAQ::SaveProgramSettings);
+    lbLedStatus = new QLabel(this);
+
+    layout->addWidget(lbLed, rowID, 0);
+    layout->addWidget(chkLed, rowID, 1);
+    layout->addWidget(sbLedDelaySec, rowID, 2);
+    layout->addWidget(sbLedHoldSec, rowID, 3);
+    layout->addWidget(lbLedStatus, rowID, 4, 1, 4);
+
+    //------------------------------------------
+    rowID ++;
     QLabel * lbComment = new QLabel("Run Comment : ", this);
     lbComment->setAlignment(Qt::AlignRight | Qt::AlignCenter);
 
@@ -609,6 +657,12 @@ void FSUDAQ::LoadProgramSettings(){
         if( eq > 0 && key == "autoDashboard" ) { QSignalBlocker blocker(chkAutoDashboard); chkAutoDashboard->setChecked(value.toInt() != 0); }
         if( eq > 0 && key == "settingsPath" ) settingsPath = value;
         if( eq > 0 && key == "boardOrder" ) boardOrder = value.split(",", Qt::SkipEmptyParts);
+        if( eq > 0 && key == "ledTrigger" ) { { QSignalBlocker blocker(chkLed); chkLed->setChecked(value.toInt() != 0); } EnableLedControls(chkLed->isEnabled()); }
+        if( eq > 0 && key == "ledDelaySec" ) sbLedDelaySec->setValue(value.toDouble());
+        if( eq > 0 && key == "ledHoldSec" ) sbLedHoldSec->setValue(value.toDouble());
+        if( eq > 0 && key == "ledRelayURL" && !value.isEmpty() ) ledRelayURL = value;
+        if( eq > 0 && key == "ledOnCommand" && !value.isEmpty() ) ledOnCommand = value;
+        if( eq > 0 && key == "ledOffCommand" && !value.isEmpty() ) ledOffCommand = value;
       }
 
       count ++;
@@ -676,6 +730,12 @@ void FSUDAQ::SaveProgramSettings(){
   file.write(("settingsPath=" + settingsPath + "\n").toStdString().c_str());
   file.write(("autoDashboard=" + QString::number(chkAutoDashboard->isChecked() ? 1 : 0) + "\n").toStdString().c_str());
   file.write(("boardOrder=" + boardOrder.join(",") + "\n").toStdString().c_str());
+  file.write(("ledTrigger=" + QString::number(chkLed->isChecked() ? 1 : 0) + "\n").toStdString().c_str());
+  file.write(("ledDelaySec=" + QString::number(sbLedDelaySec->value()) + "\n").toStdString().c_str());
+  file.write(("ledHoldSec=" + QString::number(sbLedHoldSec->value()) + "\n").toStdString().c_str());
+  file.write(("ledRelayURL=" + ledRelayURL + "\n").toStdString().c_str());
+  file.write(("ledOnCommand=" + ledOnCommand + "\n").toStdString().c_str());
+  file.write(("ledOffCommand=" + ledOffCommand + "\n").toStdString().c_str());
   file.write("//------------end of file.\n");
   
   file.close();
@@ -1972,6 +2032,10 @@ void FSUDAQ::StartACQ(){
 
   StartRunClock(save ? "Run " + QString::number(runID) : "Run (not saved)");
 
+  runFilePath.clear();
+  StartLedCycle();   // its times count from here, the run clock's start
+  if( save ) StartRunFile(runDir, runIDStr);
+
 }
 
 void FSUDAQ::StopACQ(){
@@ -2029,7 +2093,9 @@ void FSUDAQ::StopACQ(){
     LogMsg("Digi-" + QString::number(digi[i]->GetSerialNumber()) + " ACQ is stopped." );
   }
   inDataRun = false;
+  const qint64 runMs = runClock.isValid() ? runClock.elapsed() : -1;
   StopRunClock();   // the acquisition time ends here, not after the comment dialog
+  EndLedCycle();
   if( save ) TellDashboard("stopped", RunFolder());
 
   // everything that went wrong in this run, before it is recorded
@@ -2071,6 +2137,19 @@ void FSUDAQ::StopACQ(){
     if( !unsaid.isEmpty() ) stopComment += " | Problems: " + unsaid.join(" ");
     LogMsg("===================== Stop Run-" + QString::number(runID));
     WriteRunTimestamp(false, stopTime);
+    QJsonObject files;
+    for( unsigned int i = 0; i < nDigi; i++ ){
+      if( digi[i]->IsBoardDisabled() ) continue;
+      files[QString::number(digi[i]->GetSerialNumber())] = (qint64) digi[i]->GetData()->GetTotalFileSize();
+    }
+    runFileStop = QJsonObject{
+      {"time", Iso(QDateTime::fromString(stopTime, "yyyy.MM.dd hh:mm:ss"))},
+      {"run_ms", runMs},
+      {"comment", stopComment},
+      {"problems", QJsonArray::fromStringList(failures)},
+      {"bytes_saved", files},
+    };
+    SaveRunFile();
   }else{
     LogMsg("===================== Stop a non-save Run");
   }
@@ -2169,6 +2248,7 @@ void FSUDAQ::UpdateRunControls(){
   lePrefix->setReadOnly(busy);
   bnSetDataPath->setEnabled(!busy);
   EnableRunLengthControls(open && !busy);
+  EnableLedControls(!busy);
   sbFileSizeMB->setEnabled(!busy);
   if( digiSettings && !scopeShown ) digiSettings->EnableButtons(!busy);
 }
@@ -2270,6 +2350,7 @@ void FSUDAQ::ShutdownOnSignal(int sig){
   closingBySignal = true;
   LogMsg("<font style=\"color: red;\">Signal " + QString::number(sig) + " (" + QString(strsignal(sig)) + "): stopping and closing FSUDAQ.</font>");
   StopEverything("signal " + QString(strsignal(sig)));
+  WaitForLed(3000);         // the LED's "off" is answered before the event loop ends
   QCoreApplication::quit(); // the main window's destructor closes the digitizers
 }
 
@@ -3121,4 +3202,252 @@ void FSUDAQ::LogMsg(QString msg){
   v->setValue(v->maximum());
   //qDebug() << outputStr;
   logInfo->repaint();
+}
+
+//***************************************************************
+//*************** LED trigger
+void FSUDAQ::EnableLedControls(bool enable){   // enable: no run going; the delay and hold only matter when the LED is enabled
+  chkLed->setEnabled(enable);
+  chkLed->setText(chkLed->isChecked() ? "enabled" : "disabled");
+  sbLedDelaySec->setEnabled(enable && chkLed->isChecked());
+  sbLedHoldSec->setEnabled(enable && chkLed->isChecked());
+}
+
+void FSUDAQ::StartLedCycle(){
+  ledRun ++;
+  ledEvents.clear();
+  ledOnSent = false;
+  ledOnTimer->stop();
+  ledOffTimer->stop();
+  if( !chkLed->isChecked() ){
+    lbLedStatus->setText("");
+    return;
+  }
+  const qint64 delayMs = qRound64(sbLedDelaySec->value() * 1000.);
+  const qint64 holdMs = qRound64(sbLedHoldSec->value() * 1000.);
+  ledOnTimer->start(delayMs);
+  ledOffTimer->start(delayMs + holdMs);
+  lbLedStatus->setText("on at " + QString::number(delayMs / 1000.) + " s, off at " + QString::number((delayMs + holdMs) / 1000.) + " s");
+  lbLedStatus->setStyleSheet("");
+  LogMsg("LED trigger: on " + QString::number(delayMs / 1000.) + " s after the start, off " + QString::number(holdMs / 1000.) + " s later.");
+}
+
+void FSUDAQ::EndLedCycle(){
+  if( ledOnTimer->isActive() ) LogMsg("LED trigger: the run ended before the LED was due on.");
+  ledOnTimer->stop();
+  const bool offDue = ledOffTimer->isActive();
+  ledOffTimer->stop();
+  if( ledOnSent && offDue ) LedCommand("off");   // asked on, not yet off: never left on after a run
+}
+
+void FSUDAQ::LedCommand(const QString & what){
+  // HTTP only, answered asynchronously: nothing is spawned and nothing waits during a run
+  const QString command = (what == "on") ? ledOnCommand : ledOffCommand;
+  if( what == "on" ) ledOnSent = true;
+  LedEvent e;
+  e.what = what;
+  e.command = command;
+  e.sent = Iso(QDateTime::currentDateTime());
+  e.runMs = runClock.isValid() ? runClock.elapsed() : -1;
+  const int index = ledEvents.size();
+  const int run = ledRun;
+  ledEvents << e;
+
+  QNetworkRequest request{QUrl(ledRelayURL)};
+  request.setHeader(QNetworkRequest::ContentTypeHeader, "text/plain");
+  request.setTransferTimeout(3000);
+  ledPending ++;
+  QNetworkReply * r = net->post(request, command.toUtf8());
+  connect(r, &QNetworkReply::finished, this, [=](){
+    ledPending --;
+    const int status = r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QByteArray body = r->readAll();
+    const QJsonObject answer = QJsonDocument::fromJson(body).object();
+    QString error;
+    if( status == 0 ) error = "no answer from " + ledRelayURL + " (" + r->errorString() + ")" +
+                              (r->error() == QNetworkReply::ConnectionRefusedError ? ": is pion-ros running with the HTTP relay (plc_command http_port)?" : "");
+    else if( status != 200 ) error = "HTTP " + QString::number(status) + ": " + (answer.contains("error") ? answer["error"].toString() : QString::fromUtf8(body.left(200)));
+    else if( !answer["confirmed"].toBool() ) error = "the PLC answered \"" + answer["plc_resp"].toString() + "\", not the command";
+    // the command certainly did not switch: nothing listening, no such host, the relay refused it, or the PLC did not take it
+    const bool notSwitched = r->error() == QNetworkReply::ConnectionRefusedError || r->error() == QNetworkReply::HostNotFoundError ||
+                             status == 403 || status == 404 || (status == 200 && !answer["confirmed"].toBool());
+    r->deleteLater();
+    if( run != ledRun ){   // the previous run's last answer, after this run started
+      LogMsg("LED " + what + " of the previous run answered late: " + (error.isEmpty() ? "done" : error));
+      return;
+    }
+    LedEvent & ev = ledEvents[index];
+    ev.answered = Iso(QDateTime::currentDateTime());
+    ev.reply = answer["plc_resp"].toString();
+    ev.error = error;
+    ev.done = true;
+    ev.ok = error.isEmpty();
+    ev.switched = ev.ok ? "yes" : notSwitched ? "no" : "unknown";
+    bool mayBeOn = false;   // an "on" of this run that may have reached the PLC
+    for( const LedEvent & o : ledEvents ) if( o.what == "on" && (!o.done || o.switched != "no") ) mayBeOn = true;
+    if( ev.ok ){
+      LogMsg("LED " + what + " (" + ev.command + " -> " + ev.reply + ").");
+      lbLedStatus->setText("LED " + what + " since " + QDateTime::currentDateTime().toString("hh:mm:ss"));
+      lbLedStatus->setStyleSheet(what == "on" ? "color: green;" : "");
+    }else{
+      LogMsg("<font style=\"color: red;\">LED " + what + " failed: " + error.toHtmlEscaped() + "." +
+             (what == "off" && mayBeOn ? " <b>The LED may still be on</b>: switch it off with ros2 service call /plc/command (pion-ros README)." : "") +
+             (what == "off" && !mayBeOn ? " The LED was not switched on in this run." : "") + "</font>");
+      lbLedStatus->setText("LED " + what + " failed (see the log)");
+      lbLedStatus->setStyleSheet("color: red;");
+    }
+    SaveRunFile();
+  });
+}
+
+void FSUDAQ::WaitForLed(int ms){
+  QElapsedTimer t; t.start();
+  while( ledPending > 0 && t.elapsed() < ms ){ QCoreApplication::processEvents(QEventLoop::AllEvents, 5); usleep(2000); }
+}
+
+//***************************************************************
+//*************** run file
+QString FSUDAQ::SourceCommit(){
+  // read from .git itself: nothing is spawned (and git may not be on the path); the repository is
+  // the binary's folder or one above it (tests/)
+  QDir dir(QCoreApplication::applicationDirPath());
+  while( !dir.exists(".git") ) if( !dir.cdUp() ) return "";
+  QString git = dir.absoluteFilePath(".git");
+  QFile head(git + "/HEAD");
+  if( !head.open(QIODevice::ReadOnly | QIODevice::Text) ) return "";
+  QString ref = QString(head.readAll()).trimmed();
+  if( !ref.startsWith("ref: ") ) return ref;       // a detached head is the commit itself
+  ref = ref.mid(5);
+  QFile loose(git + "/" + ref);
+  if( loose.open(QIODevice::ReadOnly | QIODevice::Text) ) return ref.section('/', 2) + " " + QString(loose.readAll()).trimmed();
+  QFile packed(git + "/packed-refs");
+  if( packed.open(QIODevice::ReadOnly | QIODevice::Text) ){
+    for( const QString & line : QString(packed.readAll()).split("\n") ) if( line.endsWith(" " + ref) ) return ref.section('/', 2) + " " + line.section(' ', 0, 0);
+  }
+  return ref.section('/', 2);
+}
+
+QJsonObject FSUDAQ::BoardSettingsJson(Digitizer * d){
+  // "<address> [chNN] <name>": "0x<hex> <decimal>", one line each in the file, sorted by address
+  QJsonObject regs;
+  auto add = [&](Reg r, int ch){
+    if( r.GetRWType() == RW::WriteONLY ) return;
+    const uint32_t v = d->GetSettingFromMemory(r, ch < 0 ? 0 : ch);
+    QString key = "0x" + QString::number(r.ActualAddress(ch), 16).toUpper().rightJustified(4, '0');
+    if( ch >= 0 ) key += " ch" + QString::number(ch).rightJustified(2, '0');
+    key += " " + QString::fromStdString(r.GetName());
+    regs[key] = "0x" + QString::number(v, 16).toUpper().rightJustified(8, '0') + " " + QString::number(v);
+  };
+  const int dpp = d->GetDPPType();
+  if( dpp == DPPTypeCode::DPP_PHA_CODE || dpp == DPPTypeCode::DPP_PSD_CODE ){
+    for( const Reg & r : RegisterBoardList_PHAPSD ) add(r, -1);
+    const std::vector<Reg> & chRegs = (dpp == V1730_DPP_PHA_CODE) ? RegisterChannelList_PHA : RegisterChannelList_PSD;
+    for( int ch = 0; ch < d->GetNumInputCh(); ch++ ){
+      for( const Reg & r : chRegs ){
+        if( r.IsCoupled() && !r.IsPerChannel() && ch % 2 ) continue;   // the pair's register is the even channel's
+        add(r, ch);
+      }
+    }
+  }else{
+    for( const Reg & r : RegisterBoardList_QDC ) add(r, -1);
+    for( int g = 0; g < d->GetNumRegChannels(); g++ ) for( const Reg & r : RegisterChannelList_QDC ) add(r, g);
+  }
+  return QJsonObject{
+    {"serial", d->GetSerialNumber()},
+    {"model", QString::fromStdString(d->GetModelName())},
+    {"dpp", QString::fromStdString(d->GetData()->DPPTypeStr)},
+    {"channels", d->GetNumInputCh()},
+    {"registers", regs},
+  };
+}
+
+void FSUDAQ::StartRunFile(const QString & runDir, const QString & runIDStr){
+  runFilePath = runDir + "/" + prefix + "_" + runIDStr + "_run.json";
+  QJsonArray boards;
+  for( unsigned int i : RackOrder() ){
+    if( digi[i]->IsBoardDisabled() ) continue;
+    QJsonObject b = BoardSettingsJson(digi[i]);
+    b["settings_snapshot"] = prefix + "_" + runIDStr + "_" + QString::number(digi[i]->GetSerialNumber()) + "_" + QString::fromStdString(digi[i]->GetData()->DPPTypeStr) + ".bin";
+    boards.append(b);
+  }
+  const QFileInfo binary(QCoreApplication::applicationFilePath());
+  runFileHead = QJsonObject{
+    {"run", (qint64) runID},
+    {"prefix", prefix},
+    {"folder", runDir},
+    {"start", QJsonObject{{"time", Iso(QDateTime::currentDateTime())}, {"comment", startComment}}},
+    {"led", QJsonObject{
+      {"enabled", chkLed->isChecked()},
+      {"delay_s", sbLedDelaySec->value()},
+      {"hold_s", sbLedHoldSec->value()},
+      {"relay", ledRelayURL},
+      {"on_command", ledOnCommand},
+      {"off_command", ledOffCommand},
+      {"note", "run_ms counts from the run clock's start, just after the last (master) board started; sent/answered are when FSUDAQ sent the command and the PLC's answer came back"},
+    }},
+    {"run_control", QJsonObject{
+      {"run_length_min", series.active ? series.runMs / 60000. : 0.},
+      {"repeat", series.repeat},
+      {"pause_s", series.repeat ? series.pauseMs / 1000. : 0.},
+      {"file_size_mb", sbFileSizeMB->value()},
+      {"opened_with_settings", openedWithSettings},
+      {"settings_path", settingsPath},
+      {"board_order", QJsonArray::fromStringList(boardOrder)},
+      {"elog", chkElog->isChecked() && elogID > 0 ? elogName : QString()},
+    }},
+    {"fsudaq", QJsonObject{
+      {"source", SourceCommit()},
+      {"binary", binary.absoluteFilePath()},
+      {"binary_built", Iso(binary.lastModified())},
+    }},
+    {"boards", boards},
+  };
+  runFileStop = QJsonObject();
+  SaveRunFile();
+}
+
+void FSUDAQ::SaveRunFile(){
+  if( runFilePath.isEmpty() ) return;
+  QJsonObject led = runFileHead["led"].toObject();
+  QJsonArray events;
+  for( const LedEvent & e : ledEvents ){
+    QJsonObject o{{"what", e.what}, {"command", e.command}, {"sent", e.sent}, {"run_ms", e.runMs}};
+    if( e.done ){
+      o["answered"] = e.answered;
+      o["reply"] = e.reply;
+      o["ok"] = e.ok;
+      o["switched"] = e.switched;
+      if( !e.ok ) o["error"] = e.error;
+    }else{
+      o["answered"] = QJsonValue();   // not (yet) answered
+    }
+    events.append(o);
+  }
+  led["events"] = events;
+
+  // the top level in reading order (a QJsonObject sorts its keys), the boards' registers last
+  QList<QPair<QString, QJsonValue>> items = {
+    {"format", "FSUDAQ run file 1"},
+    {"run", runFileHead["run"]},
+    {"prefix", runFileHead["prefix"]},
+    {"folder", runFileHead["folder"]},
+    {"start", runFileHead["start"]},
+    {"stop", runFileStop.isEmpty() ? QJsonValue() : QJsonValue(runFileStop)},
+    {"led", led},
+    {"run_control", runFileHead["run_control"]},
+    {"fsudaq", runFileHead["fsudaq"]},
+    {"boards", runFileHead["boards"]},
+  };
+  QByteArray text = "{\n";
+  for( int i = 0; i < items.size(); i++ ){
+    QByteArray v = QJsonDocument(QJsonArray{items[i].second}).toJson(QJsonDocument::Indented);
+    v = v.mid(v.indexOf('[') + 1, v.lastIndexOf(']') - v.indexOf('[') - 1).trimmed();  // the value alone, indented as one level down
+    text += "    \"" + items[i].first.toUtf8() + "\": " + v + (i + 1 < items.size() ? ",\n" : "\n");
+  }
+  text += "}\n";
+
+  QSaveFile f(runFilePath);   // whole or not at all: a reader never sees half a file
+  if( !f.open(QIODevice::WriteOnly) || f.write(text) != text.size() || !f.commit() ){
+    LogMsg("<font style=\"color: red;\">Cannot write the run file " + runFilePath + ".</font>");
+  }
 }
