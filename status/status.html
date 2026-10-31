@@ -43,7 +43,7 @@
   #summary .counts { font-size:11px; font-weight:600; white-space:nowrap; opacity:.85; }
   #summary.ok, #summary.info, #summary.idle { color:#8dff8a; text-shadow:0 0 6px rgba(141,255,138,.4); }
   #summary.warn { color:#ffc23a; text-shadow:0 0 6px rgba(255,194,58,.45); }
-  #summary.bad, #summary.critical { color:#ff5a4d; text-shadow:0 0 7px rgba(255,90,77,.55); animation:pulse 1s infinite; }
+  #summary.bad, #summary.critical { color:#ff5a4d; text-shadow:0 0 7px rgba(255,90,77,.55); animation:pulse 2s ease-in-out infinite; }
   #summary.critical { background:#2a0705; }
   #summary.stale { color:#9aa3ad; text-shadow:none; }
   /* the pilot lamps */
@@ -58,7 +58,7 @@
                               radial-gradient(circle at 50% 60%, var(--lamp) 0 55%, color-mix(in srgb, var(--lamp) 60%, #000) 100%);
                    box-shadow:inset 0 -3px 6px rgba(0,0,0,.45), 0 0 16px 2px color-mix(in srgb, var(--lamp) 70%, transparent); }
   #overview .big.ok { --lamp:#36d158; } #overview .big.idle { --lamp:#3d8cf0; } #overview .big.warn { --lamp:#ffb81f; }
-  #overview .big.bad, #overview .big.critical { --lamp:#ff3b2f; animation:blink 1s infinite; }
+  #overview .big.bad, #overview .big.critical { --lamp:#ff3b2f; animation:blink 2s ease-in-out infinite; }
   #overview .big.info, #overview .big.nodata { --lamp:#5d636b; box-shadow:inset 0 -3px 6px rgba(0,0,0,.5); }   /* unlit */
   #overview .bezel:has(.critical) { box-shadow:0 0 0 4px rgba(255,59,47,.45), 0 2px 4px rgba(0,0,0,.55); }
   #overview span { font-size:10px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; line-height:1.25; color:#eef1f4;
@@ -84,11 +84,11 @@
   body.retro .trend { color:#3e8f86; }
   .dot { width:10px; height:10px; border-radius:50%; margin-top:4px; background:var(--nodata); }
   .dot.ok { background:var(--ok); } .dot.info { background:var(--info); } .dot.idle { background:var(--idle); } .dot.warn { background:var(--warn); }
-  .dot.bad { background:var(--bad); animation:pulse 1s infinite; } .dot.critical { background:var(--crit); animation:pulse 1s infinite; box-shadow:0 0 0 3px color-mix(in srgb, var(--crit) 30%, transparent); }
+  .dot.bad { background:var(--bad); animation:pulse 2s ease-in-out infinite; } .dot.critical { background:var(--crit); animation:pulse 2s ease-in-out infinite; box-shadow:0 0 0 3px color-mix(in srgb, var(--crit) 30%, transparent); }
   .row .dot.warn ~ .text, .row .dot.bad ~ .text, .row .dot.critical ~ .text { color:var(--fg); }
   .bar { grid-column:3 / -1; position:relative; height:6px; border-radius:3px; background:var(--line); overflow:hidden; margin-top:2px; }
   .bar i { position:absolute; left:0; top:0; bottom:0; border-radius:3px; background:var(--ok); }
-  .bar i.warn { background:var(--warn); } .bar i.bad { background:var(--bad); animation:pulse 1s infinite; }
+  .bar i.warn { background:var(--warn); } .bar i.bad { background:var(--bad); animation:pulse 2s ease-in-out infinite; }
   .bar b { position:absolute; top:0; bottom:0; width:2px; background:var(--card); }
   .details { grid-column:2 / -1; font:11px/1.4 ui-monospace, monospace; color:var(--muted); background:color-mix(in srgb, var(--line) 50%, transparent);
              border-radius:6px; padding:8px 10px; white-space:pre-wrap; overflow-wrap:anywhere; max-height:320px; overflow:auto; cursor:text; }
