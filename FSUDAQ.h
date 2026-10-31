@@ -102,8 +102,9 @@ private slots:
 
   void OpenDigiSettings();
 
-  void OpenDashboard();         // button: start the dashboard (asks during a run) and open the browser
-  bool StartDashboardProcess(); // start online/online_dashboard.py if it is not running; true if it runs
+  void OpenDashboard();         // button: show the dashboard; start it first if none answers (asks during a run)
+  bool StartDashboardProcess(); // start online/online_dashboard.py in its own session (it outlives FSUDAQ); true if started
+  bool DashboardUp();           // something answers on the dashboard's port (localhost:8050)
   void AskDashboardToOpenPage(); // HTTP GET /open on the running dashboard: it opens the browser from its own process
   void TellDashboard(const QString & what, const QString & folder, int attempt = 0); // HTTP GET /run at the start of a saving run, /stopped at its end
 

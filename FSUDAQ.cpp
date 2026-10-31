@@ -1,4 +1,5 @@
 #include "FSUDAQ.h"
+#include <QTcpSocket>
 
 #include <QWidget>
 #include <QVBoxLayout>
@@ -507,10 +508,8 @@ FSUDAQ::~FSUDAQ(){
   if( digi ) CloseDigitizers();
   SaveProgramSettings();
 
-  if( dashboardProc && dashboardProc->state() != QProcess::NotRunning ){
-    dashboardProc->terminate();
-    if( !dashboardProc->waitForFinished(3000) ) dashboardProc->kill();
-  }
+  // the online dashboard is left running: it lives on its own (StartDashboardProcess) and the next
+  // FSUDAQ finds it on its port
 
   if( scope ) delete scope;
 
@@ -2316,7 +2315,7 @@ void FSUDAQ::AutoRun(){
   // (a dashboard already running is left as it is: asking it to open the page made a new browser
   // tab at every Start)
   if( chkAutoDashboard->isChecked() && !rawDataPath.isEmpty() && digi != nullptr ){
-    if( !dashboardProc || dashboardProc->state() == QProcess::NotRunning ) StartDashboardProcess();   // it opens the browser itself once its server is up
+    if( !DashboardUp() ) StartDashboardProcess();   // it opens the browser itself once its server is up
   }
 
   needManualComment = true;
@@ -2788,8 +2787,8 @@ void FSUDAQ::WriteRunTimestamp(bool isStartRun, const QString & timeStamp){
 void FSUDAQ::OpenDashboard(){
   DebugPrint("%s", "FSUDAQ");
 
-  if( dashboardProc && dashboardProc->state() != QProcess::NotRunning ){
-    AskDashboardToOpenPage();   // already running: it shows the page; FSUDAQ spawns nothing
+  if( DashboardUp() ){
+    AskDashboardToOpenPage();   // already running (also one an earlier FSUDAQ started): it shows the page; FSUDAQ spawns nothing
     return;
   }
   if( isACQStarted ){
@@ -2807,10 +2806,20 @@ void FSUDAQ::OpenDashboard(){
   StartDashboardProcess();     // it opens the browser itself once its server is up
 }
 
+bool FSUDAQ::DashboardUp(){
+  // a connection only (no process, no request): is a dashboard listening, ours or one left by an earlier FSUDAQ?
+  QTcpSocket s;
+  s.connectToHost("127.0.0.1", 8050);
+  bool up = s.waitForConnected(300);
+  s.abort();
+  return up;
+}
+
 void FSUDAQ::AskDashboardToOpenPage(){
   // Starting any child process from FSUDAQ while the boards stream breaks the board reads
-  // (29 Sep 2026), so the browser is opened by the dashboard process on request.
-  QNetworkReply * r = net->get(QNetworkRequest(QUrl("http://localhost:8050/open")));
+  // (29 Sep 2026), so the browser is opened by the dashboard process on request, on this FSUDAQ's
+  // display (the dashboard may have been started by an earlier FSUDAQ, on another one).
+  QNetworkReply * r = net->get(QNetworkRequest(QUrl("http://localhost:8050/open?display=" + QString::fromLatin1(QUrl::toPercentEncoding(QString::fromLocal8Bit(qgetenv("DISPLAY")))))));
   connect(r, &QNetworkReply::finished, r, &QNetworkReply::deleteLater);
 }
 
@@ -2823,7 +2832,7 @@ void FSUDAQ::TellDashboard(const QString & what, const QString & folder, int att
   connect(r, &QNetworkReply::finished, this, [=](){
     // a dashboard started just before this run may not be listening yet, or the request may be lost:
     // retry for a few seconds (it would otherwise keep showing the previous run)
-    if( r->error() != QNetworkReply::NoError && attempt < 10 && dashboardProc && dashboardProc->state() != QProcess::NotRunning ){
+    if( r->error() != QNetworkReply::NoError && attempt < 10 ){
       QTimer::singleShot(1000, this, [=](){ TellDashboard(what, folder, attempt + 1); });
     }
     r->deleteLater();
@@ -2831,7 +2840,6 @@ void FSUDAQ::TellDashboard(const QString & what, const QString & folder, int att
 }
 
 bool FSUDAQ::StartDashboardProcess(){
-  if( dashboardProc && dashboardProc->state() != QProcess::NotRunning ) return true;
   if( rawDataPath.isEmpty() ){
     LogMsg("<font style=\"color: red;\">Set the data path first; the dashboard follows the newest run folder in it.</font>");
     return false;
@@ -2858,18 +2866,14 @@ bool FSUDAQ::StartDashboardProcess(){
     // CAEN device descriptors (stdin/out/err are already in place when this runs)
     dashboardProc->setChildProcessModifier([](){ for( int fd = 3; fd < 4096; fd++ ) ::close(fd); });
 #endif
-    connect(dashboardProc, &QProcess::readyReadStandardOutput, this, [=](){
-      for( const QByteArray & line : dashboardProc->readAllStandardOutput().split('\n') ){
-        if( !line.trimmed().isEmpty() ) LogMsg("[dashboard] " + QString::fromUtf8(line.trimmed()));
-      }
-    });
     connect(dashboardProc, &QProcess::finished, this, [=](int code, QProcess::ExitStatus){
-      LogMsg("[dashboard] stopped (exit code " + QString::number(code) + ").");
+      if( code != 0 ) LogMsg("<font style=\"color: red;\">[dashboard] could not be started (setsid exit code " + QString::number(code) + "); see online/dashboard.log.</font>");
     });
   }
   dashboardProc->setWorkingDirectory(dir);
-  // --exit-with-parent: if FSUDAQ dies, the dashboard leaves and frees the port for the next FSUDAQ's one
-  QStringList args = QStringList() << script << "--data-path" << rawDataPath << "--port" << "8050" << "--open-browser" << "--exit-with-parent";
+  // its output goes to online/dashboard.log: it outlives this FSUDAQ, so it cannot write to our log
+  dashboardProc->setStandardOutputFile(dir + "/dashboard.log", QIODevice::Append);
+  QStringList args = QStringList() << script << "--data-path" << rawDataPath << "--port" << "8050" << "--open-browser";
   // the run being recorded; a run that starts later is sent with GET /run (and a finished run is
   // not given: the dashboard would work through all of it before the next run's data)
   if( inDataRun && chkSaveData->isChecked() ) args << "--follow" << RunFolder();
@@ -2883,12 +2887,14 @@ bool FSUDAQ::StartDashboardProcess(){
     }
     args << "--boards" << serials.join(",") << "--eight-channel-boards" << eightCh.join(",");
   }
-  dashboardProc->start(python, args);
+  // setsid -f: the dashboard runs in its own session, so it stays when FSUDAQ closes or dies (it is
+  // then found on its port, and FSUDAQ only talks to it over HTTP); setsid itself returns at once
+  dashboardProc->start("setsid", QStringList() << "-f" << python << args);
   if( !dashboardProc->waitForStarted(3000) ){
     LogMsg("<font style=\"color: red;\">Cannot start " + python + " " + script + ".</font>");
     return false;
   }
-  LogMsg("[dashboard] started with " + python + " on " + rawDataPath + " (http://localhost:8050/)");
+  LogMsg("[dashboard] started with " + python + " on " + rawDataPath + " (http://localhost:8050/; it keeps running when FSUDAQ closes; its log: online/dashboard.log)");
   return true;
 }
 

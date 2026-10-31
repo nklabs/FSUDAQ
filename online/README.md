@@ -2,8 +2,18 @@
 
 `online_dashboard.py` follows the run FSUDAQ is writing, merges the boards' `.fsu`
 streams in time, builds bunches, runs the pion-spectrometer track finder on every bunch
-and serves a dashboard at http://localhost:8050/. The **Online Dashboard** button in
-FSUDAQ starts it on the current data path and opens the browser.
+and serves a dashboard at http://localhost:8050/ (http://129.129.141.162:8050/ for anyone
+on the network; the controls answer odin and ssh tunnels only). The **Online Dashboard**
+button in FSUDAQ shows it, and starts it on the current data path first if nothing answers
+on port 8050. It runs in its own session, so it keeps running when FSUDAQ closes; the next
+FSUDAQ finds it on its port. Its output goes to `online/dashboard.log`; to stop it,
+`pkill -f online_dashboard.py`.
+
+**runs ▾** on the page lists the recorded runs in the data path (newest first, with their
+start, comment and size) and loads one for a look, or any run folder given by its path: it
+is read whole, and **back to live** returns to the run being taken. A run FSUDAQ starts
+takes the dashboard back to live by itself. The **size** slider scales text and plots
+(kept in the browser; `?size=1.5` in the link sets it).
 
 The track finder is the handoff in `finder/` (`online_finder.py`, `INTERFACE.md`, the
 momentum map, channel table, one-track light and constants), kept unchanged as the

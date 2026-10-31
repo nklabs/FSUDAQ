@@ -11,6 +11,10 @@ start-up), else the newest run folder in the data path; a run recorded again und
 (GET /stopped?folder=...). Started mid-run, the dashboard reads from then on; started after the run
 ended, it reads the whole run. Serves http://localhost:<port>/ (the page) and /state (JSON).
 
+It keeps running when FSUDAQ closes (FSUDAQ starts it detached and finds it again on its port). A
+recorded run can be loaded for a look (GET /runs lists them, /load?folder=... reads one whole, /live
+goes back); a run FSUDAQ starts takes the dashboard back to live.
+
 How the data are read. A board writes a couple's (channel pair's) events when that couple's buffer
 is full, so a quiet channel's hits reach the disk long after a busy channel's newer ones. Every
 board file is indexed as it grows (fsu_fast.FileScan: only the new bytes, at most INDEX_WORDS per
@@ -479,6 +483,7 @@ class Online:
         self.setup = None
         self.ref_slot = a.ref_slot
         self.follow = a.follow                  # run folder FSUDAQ named (--follow or GET /run); None = newest in the data path
+        self.inspect = None                     # a recorded run loaded from the page (GET /load); None = live
         self.restart = False                    # set by GET /run: a new run starts, even in the same folder
         self.stop_notice = False                # FSUDAQ stopped this run and closed its files
         self.stopped_folder = None              # the folder GET /stopped named (it may come before we follow it)
@@ -599,8 +604,10 @@ class Online:
         return replaced or any(b.replaced() for b in self.boards.values())
 
     def run_started(self, folder):
-        """GET /run: FSUDAQ starts a saving run in this folder (also the same folder again)."""
+        """GET /run: FSUDAQ starts a saving run in this folder (also the same folder again). A run
+        loaded for a look gives way: the data being taken come first."""
         self.follow = folder
+        self.inspect = None
         self.stopped_folder = None
         self.restart = True
         self.wake.set()
@@ -609,6 +616,45 @@ class Online:
         """GET /stopped: FSUDAQ stopped the run in this folder and closed its files."""
         self.stopped_folder = os.path.abspath(folder)
         self.wake.set()
+
+    def load(self, folder: str) -> str:
+        """GET /load: read a recorded run folder whole, for a look. Returns why not, if not."""
+        folder = os.path.abspath(os.path.expanduser(folder or ""))
+        if not os.path.isdir(folder):
+            return f"{folder} is not a folder"
+        if not glob.glob(os.path.join(folder, "*.fsu")):
+            return f"no .fsu files in {folder}"
+        with self.lock:
+            self.inspect = folder
+            self.restart = True                 # read from its start, also when it is the run shown now
+        self.wake.set()
+        return ""
+
+    def live(self):
+        """GET /live: back to the run FSUDAQ named, or the newest in the data path."""
+        with self.lock:
+            if self.inspect is not None:
+                self.inspect = None
+        self.wake.set()
+
+    def runs(self) -> list:
+        """GET /runs: the run folders in the data path (and beside the run FSUDAQ named), newest first."""
+        roots = {os.path.abspath(r) for r in (self.a.data_path, self.follow and os.path.dirname(os.path.abspath(self.follow))) if r}
+        out = []
+        for root in roots:
+            for d in glob.glob(os.path.join(root, "*")):
+                files = glob.glob(os.path.join(d, "*.fsu")) if os.path.isdir(d) else []
+                if not files:
+                    continue
+                try:
+                    st = [os.stat(f) for f in files]
+                except OSError:
+                    continue
+                rf = read_run_file(d, cache=False) or {}
+                out.append(dict(folder=d, name=os.path.basename(d), files=len(files), bytes=sum(x.st_size for x in st),
+                                written=max(x.st_mtime for x in st), start=rf.get("start"),
+                                comment=((rf.get("stop") or {}).get("comment") or rf.get("start_comment"))))
+        return sorted(out, key=lambda r: -r["written"])[:300]
 
     def margin_ps(self):
         return self.window_ps + 2 * self.setup.max_offset_ps + 1_000_000   # + 1 us
@@ -647,14 +693,15 @@ class Online:
 
     def _begin(self):
         a = self.a
-        folder = a.run or self.follow or newest_run_folder(a.data_path)
+        folder = a.run or self.inspect or self.follow or newest_run_folder(a.data_path)
         if folder != self.folder or self.restart or (folder and self._run_replaced(folder)):
             # a run that starts while we watch is read from its start; the one running when the
             # dashboard started only from then on (unless --from-start); a run already finished then
             # is read whole
             from_start = bool(a.replay or a.from_start or self.restart or self.folder is not None)
-            finished = (not from_start and folder is not None and self.folder is None
-                        and folder_quiet(folder, a.stall_s))
+            finished = (folder is not None and (folder == self.inspect or not from_start and self.folder is None)
+                        and folder_quiet(folder, a.stall_s))     # a run loaded for a look: read whole
+            from_start = from_start or folder == self.inspect
             self.restart = False
             self.reset(folder, from_start or finished)
             if finished:
@@ -799,7 +846,8 @@ class Online:
             else:
                 self.status = "running"
         elif mode == "stopped":
-            what = "last run (finished before the dashboard started)" if self.finished_at_start else "run stopped"
+            what = ("recorded run, loaded for a look" if self.inspect and self.folder == self.inspect else
+                    "last run (finished before the dashboard started)" if self.finished_at_start else "run stopped")
             self.status = f"{what}: " + ("everything processed" if all_done else "processing what is on disk")
         elif mode == "paused":
             self.status = (f"no new data for {self.quiet_s:.0f} s (a pause?): the finder waits up to {a.hold_s:.0f} s "
@@ -958,7 +1006,7 @@ class Online:
                 self.late_log.popleft()
             n_late = int(late.sum())
             return dict(
-                server_time=now, folder=self.folder, status=self.status, mode=self.mode, kernels="numba" if FAST else "numpy",
+                server_time=now, folder=self.folder, inspect=self.inspect, status=self.status, mode=self.mode, kernels="numba" if FAST else "numpy",
                 workers=self.a.workers, in_flight=len(self.pending), oldest_task_s=max(ages) if ages else None,
                 last_result_s=None if self.last_fold_wall is None else now - self.last_fold_wall,
                 replay=bool(self.a.replay), window_ns=self.window_ps / 1000, window_src=self.window_src,
@@ -1182,7 +1230,7 @@ def folder_quiet(folder: str, quiet_s: float) -> bool:
 _RUN_FILES = {}   # path -> ((mtime_ns, size), what read_run_file made of it)
 
 
-def read_run_file(folder):
+def read_run_file(folder, cache=True):
     """What the page shows of FSUDAQ's run file <folder>/<folder name>_run.json (README "Data folder"):
     start and stop, the LED trigger's settings and commands, the source FSUDAQ ran from. Not the
     registers. None when the folder has none (a run from before the run file). FSUDAQ writes it whole
@@ -1204,6 +1252,7 @@ def read_run_file(folder):
         led = d.get("led") or {}
         stop = d.get("stop")
         out = dict(file=os.path.basename(path), run=d.get("run"), start=(d.get("start") or {}).get("time"),
+                   start_comment=(d.get("start") or {}).get("comment"),
                    stop=None if not stop else {k: stop.get(k) for k in ("time", "run_ms", "comment", "problems")},
                    led=dict(enabled=bool(led.get("enabled")), delay_s=led.get("delay_s"), hold_s=led.get("hold_s"),
                             relay=led.get("relay"),
@@ -1213,8 +1262,9 @@ def read_run_file(folder):
                    clock=dict(start=(d.get("clock") or {}).get("start") or None, stop=(stop or {}).get("clock") or None))
     except (OSError, ValueError, AttributeError, TypeError) as ex:
         out = dict(file=os.path.basename(path), error=f"cannot read it: {ex}")
-    _RUN_FILES.clear()                  # one run at a time
-    _RUN_FILES[path] = (key, out)
+    if cache:
+        _RUN_FILES.clear()              # one run at a time
+        _RUN_FILES[path] = (key, out)
     return out
 
 
@@ -1225,8 +1275,26 @@ def newest_run_folder(data_path: str):
     return max(cands, key=os.path.getmtime)
 
 
+def open_page(url, display=""):
+    """Show the page in a browser on that X display (FSUDAQ's, which may be another than ours: the
+    dashboard outlives the FSUDAQ that started it). xdg-open, else Python's webbrowser."""
+    env = dict(os.environ)
+    if display:
+        env["DISPLAY"] = display
+
+    def run():
+        import subprocess
+        try:
+            subprocess.Popen(["xdg-open", url], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+        except OSError:
+            import webbrowser
+            webbrowser.open(url)
+    threading.Thread(target=run, daemon=True).start()
+
+
 # ---------------------------------------------------------------- HTTP
-CONTROLS = ("/open", "/run", "/stopped", "/clear", "/window", "/set")   # FSUDAQ's calls and the page's shared controls
+CONTROLS = ("/open", "/run", "/stopped", "/clear", "/window", "/set", "/load", "/live")   # FSUDAQ's calls, the page's shared controls
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1236,18 +1304,35 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):          # keep the console for the analysis
         pass
 
+    def reply(self, code, d):
+        body = json.dumps(d, allow_nan=False).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body)))
+        self.end_headers(); self.wfile.write(body)
+
     def local(self):                       # FSUDAQ, or a browser on odin (or through an ssh tunnel)
         return self.client_address[0] in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
 
     def do_GET(self):
-        if self.path.startswith(CONTROLS) and not self.local():     # others may look, not steer what everyone sees
+        if urllib.parse.urlparse(self.path).path in CONTROLS and not self.local():   # others may look, not steer what everyone sees
             body = json.dumps(dict(note="view only: changed on odin or through the ssh tunnel")).encode()
             self.send_response(403)
             self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body)))
             self.end_headers(); self.wfile.write(body); return
         if self.path.startswith("/open"):        # FSUDAQ asks us to show the page (it must not spawn anything itself)
-            import webbrowser
-            threading.Thread(target=lambda: webbrowser.open(f"http://localhost:{self.server.server_address[1]}/"), daemon=True).start()
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            open_page(f"http://localhost:{self.server.server_address[1]}/", q.get("display", [""])[0])
+            self.send_response(204); self.end_headers(); return
+        if self.path.startswith("/runs"):        # the recorded runs, for the page's run list
+            return self.reply(200, dict(runs=self.online.runs(), inspect=self.online.inspect))
+        if self.path.startswith("/load"):        # the page loads a recorded run for a look
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            why = self.online.load(q.get("folder", [""])[0])
+            if not why:
+                say(f"{time.strftime('%H:%M:%S')} loaded for a look: {self.online.inspect}")
+            return self.reply(400 if why else 200, dict(note=why or "loaded"))
+        if self.path.startswith("/live"):        # back to the data being taken
+            self.online.live()
             self.send_response(204); self.end_headers(); return
         if self.path.startswith("/run"):         # FSUDAQ starts a saving run: follow its folder from now on
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -1306,7 +1391,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(404); self.end_headers(); return
             body = json.dumps(d, allow_nan=False).encode()
             ctype = "application/json"
-        elif self.path == "/" or self.path.startswith("/index"):
+        elif urllib.parse.urlparse(self.path).path in ("/", "/index.html") or self.path.startswith("/index"):
             try:                                   # re-read so a page update needs no restart
                 with open(os.path.join(HERE, "dashboard.html"), "rb") as fh:
                     body = fh.read()
@@ -1373,8 +1458,7 @@ def main(argv=None):
     srv = ThreadingHTTPServer((a.bind, a.port), Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     if a.open_browser:
-        import webbrowser
-        threading.Thread(target=lambda: webbrowser.open(f"http://localhost:{a.port}/"), daemon=True).start()
+        open_page(f"http://localhost:{a.port}/")
     say(f"online dashboard: http://{socket.gethostname()}:{a.port}/   kernels={'numba' if FAST else 'numpy (slow)'}  "
         f"{'replay of ' + a.run if a.replay else ('run ' + a.run if a.run else 'following ' + (a.follow or a.data_path))}")
     for w in online.setup.warnings + online.setup.problems:

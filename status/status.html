@@ -69,22 +69,23 @@
   /* the cards */
   .grid { column-width:460px; column-gap:12px; }   /* cards stacked in columns, top to bottom then left to right */
   @media (max-width: 480px) { .grid { grid-template-columns:1fr; } }
-  .card { break-inside:avoid; display:inline-block; width:100%; margin:0 0 12px; background:var(--card); border-radius:10px; padding:9px 12px 5px; min-width:0; box-shadow:0 1px 2px rgba(0,0,0,.06), 0 0 0 1px var(--line); }
+  .card { container-type:inline-size; break-inside:avoid; display:inline-block; width:100%; margin:0 0 12px; background:var(--card); border-radius:10px; padding:9px 12px 5px; min-width:0; box-shadow:0 1px 2px rgba(0,0,0,.06), 0 0 0 1px var(--line); }
   .card.dragging { opacity:.4; } .card.drop { outline:2px dashed var(--soft); outline-offset:2px; }
   .card.flash { outline:3px solid var(--idle); outline-offset:2px; }
   .card h2 { font-size:12px; font-weight:650; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:0 0 6px;
              display:flex; gap:8px; align-items:center; user-select:none; }
   .card h2 .grip { margin-left:auto; color:var(--soft); letter-spacing:-2px; opacity:0; transition:opacity .15s; }
   .card:hover h2 .grip { opacity:1; }
-  .row { display:grid; grid-template-columns:10px minmax(0, 170px) minmax(0, 1fr) auto; gap:8px; align-items:start; padding:2px 2px; border-top:1px solid var(--line); cursor:pointer; border-radius:4px; }
+  .row { display:grid; grid-template-columns:10px minmax(0, 170px) minmax(0, 1fr) auto auto; gap:8px; align-items:start; padding:2px 2px; border-top:1px solid var(--line); cursor:pointer; border-radius:4px; }
   .rows .row:first-child { border-top:none; }
   .row.dragging { opacity:.35; }
   .row:hover { background:color-mix(in srgb, var(--line) 55%, transparent); }
   .name { font-weight:550; overflow-wrap:anywhere; min-width:0; } .text { color:var(--muted); overflow-wrap:anywhere; min-width:0; }
   .text .main { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }   /* long texts: two lines; all of it when opened */
   .row.open .text .main { display:block; -webkit-line-clamp:unset; }
-  .age { color:var(--soft); font-size:11px; white-space:nowrap; }
-  .trend { grid-column:2 / -1; display:grid; grid-template-columns:repeat(3, 4.5ch 9ch); justify-content:start; column-gap:4px; font-size:12px; color:var(--muted); margin-top:-2px; font-variant-numeric:tabular-nums; }
+  .age { grid-column:5; grid-row:1; color:var(--soft); font-size:11px; white-space:nowrap; }
+  .trend { grid-column:4; grid-row:1; display:grid; grid-template-columns:repeat(3, 4.5ch 8ch); justify-content:start; column-gap:4px; font-size:12px; color:var(--muted); line-height:inherit; padding-top:1px; font-variant-numeric:tabular-nums; }
+  @container (max-width: 640px) { .trend { grid-column:2 / -1; grid-row:auto; margin-top:-2px; padding-top:0; } }   /* a narrow card: the changes on their own line */
   .trend i { font-style:normal; } .trend b { font-weight:500; text-align:left; }   /* each value right after its label */
   body.retro .trend { color:#62b3a8; }
   .dot { width:10px; height:10px; border-radius:50%; margin-top:4px; background:var(--nodata); }

@@ -9,61 +9,61 @@
           --heavy:#d1495b; --good:#2a9d8f; }
   @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#101418; --fg:#e6e9ee; --muted:#9aa4b1; --line:#2a323c; --card:#171c22; --sel:#e6e9ee; color-scheme:dark; } }
   :root[data-theme="dark"] { --bg:#101418; --fg:#e6e9ee; --muted:#9aa4b1; --line:#2a323c; --card:#171c22; --sel:#e6e9ee; color-scheme:dark; }
-  body { margin:0; padding:12px 16px; background:var(--bg); color:var(--fg); font:13px/1.35 system-ui, sans-serif; }
-  h1 { font-size:16px; margin:0 0 6px; display:flex; gap:14px; align-items:baseline; flex-wrap:wrap; }
+  body { margin:0; padding:12px 16px; background:var(--bg); color:var(--fg); font:calc(13px * var(--k, 1))/1.35 system-ui, sans-serif; }
+  h1 { font-size:calc(16px * var(--k, 1)); margin:0 0 6px; display:flex; gap:14px; align-items:baseline; flex-wrap:wrap; }
   h1 .st { font-weight:normal; color:var(--muted); }
   .tabs { display:flex; gap:4px; margin:4px 0 10px; }
-  .tabs button { font:600 13px system-ui, sans-serif; padding:4px 14px; border:1px solid var(--line); border-radius:6px 6px 0 0;
+  .tabs button { font:600 calc(13px * var(--k, 1)) system-ui, sans-serif; padding:4px 14px; border:1px solid var(--line); border-radius:6px 6px 0 0;
                  background:transparent; color:var(--muted); cursor:pointer; }
   .tabs button.on { color:var(--fg); background:var(--card); border-bottom-color:var(--card); }
   .toolbar { display:flex; gap:14px; align-items:center; flex-wrap:wrap; margin:0 0 10px; color:var(--muted); }
-  .toolbar select, .toolbar button, .card select, .card label { font:12px system-ui, sans-serif; }
+  .toolbar select, .toolbar button, .card select, .card label { font:calc(12px * var(--k, 1)) system-ui, sans-serif; }
   .toolbar select, .card select { background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:4px; padding:1px 4px; }
   .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(340px, 1fr)); gap:10px; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:8px 10px; min-width:0; overflow-x:auto; }
-  .card h2 { font-size:12px; margin:0 0 4px; color:var(--muted); font-weight:600; letter-spacing:.02em; }
+  .card h2 { font-size:calc(12px * var(--k, 1)); margin:0 0 4px; color:var(--muted); font-weight:600; letter-spacing:.02em; }
   .card h2 b { color:var(--fg); font-weight:600; }
-  .ctl { display:flex; gap:10px; align-items:center; color:var(--muted); font-size:12px; margin:0 0 4px; flex-wrap:wrap; }
-  canvas { width:100%; height:190px; display:block; }
+  .ctl { display:flex; gap:10px; align-items:center; color:var(--muted); font-size:calc(12px * var(--k, 1)); margin:0 0 4px; flex-wrap:wrap; }
+  canvas { width:100%; height:calc(190px * var(--k, 1)); display:block; }
   table { border-collapse:collapse; width:100%; font-variant-numeric:tabular-nums; }
   th, td { text-align:right; padding:2px 6px; border-bottom:1px solid var(--line); white-space:nowrap; }
   th:first-child, td:first-child { text-align:left; }
   td.l { text-align:left; white-space:normal; }       /* text cells wrap: a warning at the end of a row stays visible */
   th { color:var(--muted); font-weight:600; }
-  .big { font-size:22px; font-weight:600; font-variant-numeric:tabular-nums; }
+  .big { font-size:calc(22px * var(--k, 1)); font-weight:600; font-variant-numeric:tabular-nums; }
   .tiles { display:flex; gap:22px; flex-wrap:wrap; margin-bottom:10px; }
   .tile small { display:block; color:var(--muted); }
   .warn { color:var(--heavy); font-weight:600; }
   .warnbox { border:1px solid var(--heavy); border-radius:6px; padding:6px 10px; margin:0 0 10px; background:var(--card); }
-  .note { color:var(--muted); font-size:11px; margin-top:2px; }
+  .note { color:var(--muted); font-size:calc(11px * var(--k, 1)); margin-top:2px; }
   .legend span { display:inline-block; margin-right:10px; }
   .legend i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:4px; vertical-align:-1px; }
   /* cards: drag by the title, widen, heighten, collapse; the layout is kept in this browser */
   .bar { display:flex; align-items:center; gap:4px; margin:0 0 4px; }
   .bar h2 { flex:1; margin:0; cursor:grab; user-select:none; }
-  .toolbar input[type=number] { width:64px; font:12px system-ui, sans-serif; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:4px; padding:0 3px; }
-  .ctl input[type=number] { width:64px; font:12px system-ui, sans-serif; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:4px; padding:0 3px; }
+  .toolbar input[type=number] { width:64px; font:calc(12px * var(--k, 1)) system-ui, sans-serif; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:4px; padding:0 3px; }
+  .ctl input[type=number] { width:64px; font:calc(12px * var(--k, 1)) system-ui, sans-serif; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:4px; padding:0 3px; }
   #c_q, #c_psd, .cmpgrid canvas.zoomable { cursor:crosshair; }
   /* channels side by side: one panel each, as many per row as fit */
   .cmpgrid { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:8px; }
   .cmpgrid .p { border:1px solid var(--line); border-radius:4px; padding:4px 6px; min-width:0; }
-  .cmpgrid .ph { display:flex; align-items:center; gap:6px; font-size:12px; }
+  .cmpgrid .ph { display:flex; align-items:center; gap:6px; font-size:calc(12px * var(--k, 1)); }
   .cmpgrid .ph b { flex:1; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .cmpgrid .ph span { color:var(--muted); font-variant-numeric:tabular-nums; }
-  .cmpgrid .ph button { font:11px/16px system-ui, sans-serif; padding:0 5px; border:1px solid var(--line); background:transparent; color:var(--muted); border-radius:4px; cursor:pointer; }
+  .cmpgrid .ph button { font:calc(11px * var(--k, 1))/calc(16px * var(--k, 1)) system-ui, sans-serif; padding:0 5px; border:1px solid var(--line); background:transparent; color:var(--muted); border-radius:4px; cursor:pointer; }
   .cmpgrid .ph i { display:inline-block; width:9px; height:9px; border-radius:2px; }
   .cmpgrid .empty { color:var(--muted); padding:16px 0; }
-  #c_grid { height:430px; cursor:pointer; }
-  .card.tall1 #c_grid { height:620px; }
-  .card.tall2 #c_grid { height:840px; }
+  #c_grid { height:calc(430px * var(--k, 1)); cursor:pointer; }
+  .card.tall1 #c_grid { height:calc(620px * var(--k, 1)); }
+  .card.tall2 #c_grid { height:calc(840px * var(--k, 1)); }
   .zoomsel { position:fixed; pointer-events:none; background:color-mix(in srgb, var(--muted) 20%, transparent); border:1px solid var(--muted); z-index:5; }
-  .bar button, h1 button, .toolbar button, .ctl button { font:11px/18px system-ui, sans-serif; padding:0 6px; border:1px solid var(--line);
+  .bar button, h1 button, .toolbar button, .ctl button { font:calc(11px * var(--k, 1))/calc(18px * var(--k, 1)) system-ui, sans-serif; padding:0 6px; border:1px solid var(--line);
                            background:transparent; color:var(--muted); border-radius:4px; cursor:pointer; }
   .bar button:hover, h1 button:hover, .toolbar button:hover, .ctl button:hover { color:var(--fg); border-color:var(--muted); }
   .card.w2 { grid-column:span 2; }
   .card.wfull { grid-column:1 / -1; }
-  .card.tall1 canvas { height:330px; }
-  .card.tall2 canvas { height:520px; }
+  .card.tall1 canvas { height:calc(330px * var(--k, 1)); }
+  .card.tall2 canvas { height:calc(520px * var(--k, 1)); }
   .card.collapsed > :not(.bar) { display:none; }
   .card.collapsed .bar { margin:0; }
   .card.dragging { opacity:.4; }
@@ -75,11 +75,30 @@
   .banner .bad { border-color:var(--heavy); color:var(--heavy); font-weight:600; }
   .banner .ph { border-color:#c77700; }
   body.stale .tiles, body.stale section, body.stale h1 .st { opacity:.45; filter:grayscale(1); }
+  .sizer { display:inline-flex; align-items:center; gap:6px; font:calc(12px * var(--k, 1)) system-ui, sans-serif; color:var(--muted); font-weight:normal; }
+  .sizer input { width:110px; cursor:pointer; }
+  .runs { position:absolute; z-index:30; left:16px; right:16px; max-width:900px; max-height:70vh; overflow:auto; padding:10px 12px;
+          background:var(--card); border:1px solid var(--line); border-radius:6px; box-shadow:0 8px 24px rgba(0,0,0,.25); }
+  .runs .row { display:flex; gap:8px; align-items:center; margin:0 0 8px; flex-wrap:wrap; }
+  .runs .row input { flex:1; min-width:200px; font:inherit; background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:4px; padding:2px 6px; }
+  .runs td:nth-child(3) { white-space:normal; text-align:left; color:var(--muted); }
+  .runs tr.shown td { font-weight:600; }
+  #inspect { color:var(--heavy); font-weight:600; }
+  body.viewonly [data-load], body.viewonly #runs_go, body.viewonly #live_btn { opacity:.45; pointer-events:none; }
 </style>
 </head>
 <body>
-<h1>FSUDAQ Online <span class="st" id="folder">–</span> <span class="st" id="status">connecting…</span>
-  <button id="layout_reset" title="Put every card back to its original place and size">reset layout</button></h1>
+<h1>FSUDAQ Online <span class="st" id="folder">–</span> <span id="inspect" hidden>a recorded run, for a look</span> <span class="st" id="status">connecting…</span>
+  <button id="runs_btn" title="Load a recorded run for a look (the run being taken is not analysed meanwhile)">runs ▾</button>
+  <button id="live_btn" hidden title="Back to the run being taken">back to live</button>
+  <button id="layout_reset" title="Put every card back to its original place and size">reset layout</button>
+  <label class="sizer" title="Text and plot size (kept in this browser)">size <input type="range" id="size" min="0.7" max="2" step="0.05"><output id="sizeval"></output></label></h1>
+<div class="runs" id="runs_panel" hidden>
+  <div class="row"><b>Recorded runs</b><span class="note">newest first; loading one reads it whole, and a run FSUDAQ starts takes the dashboard back to live</span></div>
+  <div class="row"><input id="runs_path" placeholder="or any run folder on odin, e.g. /home/beamtime/FSUDAQ_data/.../test_042"><button id="runs_go">load</button><button id="runs_close">close</button></div>
+  <div class="note" id="runs_note"></div>
+  <div id="runs_list">–</div>
+</div>
 <div class="banner" id="banner"></div>
 <div class="tiles">
   <div class="tile"><span class="big" id="t_hits">–</span><small id="t_hits_note">hits / s, all channels</small></div>
@@ -181,10 +200,10 @@ function niceTicks(a, b, n=5){ const span=b-a; if(!(span>0)) return [a]; const r
 function logTicks(a, b){ const out=[]; for(let e=Math.floor(Math.log10(a)); e<=Math.ceil(Math.log10(b)); e++){ const v=Math.pow(10,e); if(v>=a*0.999 && v<=b*1.001) out.push(v); } return out; }
 function setupCanvas(id){ const c=document.getElementById(id); const r=window.devicePixelRatio||1;
   const w=c.clientWidth, h=c.clientHeight; c.width=w*r; c.height=h*r; const g=c.getContext('2d'); g.setTransform(r,0,0,r,0,0); return {c,g,w,h}; }
-function message(id, text){ const {g,w,h}=setupCanvas(id); g.fillStyle=css('--muted'); g.font='12px system-ui'; g.textAlign='center'; g.fillText(text, w/2, h/2); }
+function message(id, text){ const {g,w,h}=setupCanvas(id); g.fillStyle=css('--muted'); g.font=cfont(12); g.textAlign='center'; g.fillText(text, w/2, h/2); }
 // spec: {xlog, ylog, x0, x1, xfmt, yfmt, xticks, series:[{kind:'bars'|'step'|'line', edges|x, y, color, colors, width, gap}], marks:[{x, color, label}], ylabel, empty}
 function plot(id, spec){
-  const {g,w,h}=setupCanvas(id); const L=50,B=24,T=8,R=10;
+  const {g,w,h}=setupCanvas(id); const L=Math.round(50*K),B=Math.round(24*K),T=8,R=10;   // room for the labels at this size
   const own = spec.series.flatMap(s=>s.y).filter(v=>isFinite(v) && (spec.ylog ? v>0 : true));
   if(!own.length || (!spec.ylog && !own.some(v=>v>0))){ message(id, spec.empty || 'no entries yet'); PLOTS[id]=null; return null; }
   // spec.yall: the values of several plots that share one y scale
@@ -196,7 +215,7 @@ function plot(id, spec){
   const tx = spec.xlog ? (v=>Math.log10(v)) : (v=>v), ty = spec.ylog ? (v=>Math.log10(v)) : (v=>v);
   const X = v => L + (tx(v)-tx(x0))/(tx(x1)-tx(x0)) * (w-L-R);
   const Y = v => h-B - (ty(spec.ylog ? Math.max(v, y0) : v)-ty(y0))/(ty(y1)-ty(y0)) * (h-B-T);
-  g.font='10px system-ui'; g.lineWidth=1;
+  g.font=cfont(10); g.lineWidth=1;
   const yt = spec.ylog ? logTicks(y0,y1) : niceTicks(y0,y1,4);
   for(const v of yt){ g.strokeStyle=css('--line'); g.globalAlpha=.6; g.beginPath(); g.moveTo(L,Y(v)); g.lineTo(w-R,Y(v)); g.stroke(); g.globalAlpha=1;
     g.fillStyle=css('--muted'); g.textAlign='right'; g.fillText((spec.yfmt||sinum)(v), L-4, Y(v)+3); }
@@ -228,12 +247,12 @@ function invX(x0, x1, xlog, pa, pb){ return px => { const f=Math.min(1, Math.max
   return xlog ? Math.pow(10, Math.log10(x0) + f*(Math.log10(x1)-Math.log10(x0))) : x0 + f*(x1-x0); }; }
 // 2-D histogram: spec {x0, x1, xlog, xedges, ny (y bins over 0..1), counts[ix][iy], color, xfmt}; shade = log of the count
 function plot2d(id, spec){
-  const {g,w,h}=setupCanvas(id); const L=50,B=24,T=8,R=10;
+  const {g,w,h}=setupCanvas(id); const L=Math.round(50*K),B=Math.round(24*K),T=8,R=10;   // room for the labels at this size
   let mx=0; for(const col of spec.counts) for(const v of col) if(v>mx) mx=v;
   if(!mx){ message(id, spec.empty || 'no entries yet'); PLOTS[id]=null; return null; }
   const x0=spec.x0, x1=spec.x1, tx = spec.xlog ? (v=>Math.log10(v)) : (v=>v);
   const X = v => L + (tx(v)-tx(x0))/(tx(x1)-tx(x0)) * (w-L-R), Y = v => h-B - v*(h-B-T);
-  g.font='10px system-ui'; g.lineWidth=1;
+  g.font=cfont(10); g.lineWidth=1;
   for(const v of [0,0.2,0.4,0.6,0.8,1]){ g.strokeStyle=css('--line'); g.globalAlpha=.6; g.beginPath(); g.moveTo(L,Y(v)); g.lineTo(w-R,Y(v)); g.stroke(); g.globalAlpha=1;
     g.fillStyle=css('--muted'); g.textAlign='right'; g.fillText(String(v), L-4, Y(v)+3); }
   const xt = spec.xlog ? logTicks(x0,x1) : niceTicks(x0,x1,6);
@@ -251,6 +270,19 @@ function legend(id, items){ document.getElementById(id).innerHTML = items.map(it
 const sw = c => `<i style="display:inline-block;width:9px;height:9px;background:${c};margin-right:5px"></i>`;
 const warn = t => `<span class="warn">${t}</span>`;
 const esc = t => String(t ?? '').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+// text and plot size: the slider in the header (kept in this browser; ?size=1.5 in the link sets it)
+let K = 1;
+try { K = Math.min(2, Math.max(0.7, +localStorage.getItem('fsudaq-size') || 1)); } catch(e){}
+{ const q = +new URLSearchParams(location.search).get('size'); if(q) K = Math.min(2, Math.max(0.7, q)); }
+const cfont = px => `${Math.round(px * K * 10) / 10}px system-ui`;
+function setTextSize(k, keep){
+  K = k; document.getElementById('size').value = k; document.getElementById('sizeval').textContent = Math.round(k * 100) + '%';
+  document.documentElement.style.setProperty('--k', k);
+  if(keep){ try { localStorage.setItem('fsudaq-size', k); } catch(e){} }
+}
+setTextSize(K, false);
+document.getElementById('size').oninput = e=>setTextSize(+e.target.value, false);
+document.getElementById('size').onchange = e=>{ setTextSize(+e.target.value, true); draw(); };
 const store = { get(k,d){ try { const v=localStorage.getItem(k); return v===null?d:JSON.parse(v); } catch(e){ return d; } },
                 set(k,v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} } };
 
@@ -386,6 +418,7 @@ function draw(){
   if(!winIn.dataset.edited && document.activeElement!==winIn) winIn.value = S.window_ns;
   if(S.window_note && !winNote.textContent) winNote.textContent = S.window_note;
   document.getElementById('folder').textContent = S.folder ? S.folder.split('/').slice(-1)[0] : '';
+  document.getElementById('inspect').hidden = document.getElementById('live_btn').hidden = !S.inspect;
   document.getElementById('status').textContent = `${S.status} · ${S.workers} workers · ${S.kernels}${S.replay?' · REPLAY':''}`;
   document.getElementById('t_hits').textContent = fmt(D.total_rate);
   const slowN = D.total_rate==null ? 0 : D.slots.filter(s=>s.rate==null && s.written).length;
@@ -410,7 +443,7 @@ function drawDaq(){
   const A = plot('c_chan', {x0:0, x1:slots.length, ylog, xticks:false, series:[{kind:'bars', edges, y:vals, colors, gap:1}],
                             empty: mode==='rate' && D.total_rate==null ? (S.mode==='running' ? 'no complete second yet' : 'no rate: no data are being written now (show "hits since Clear" for the counts)') : 'no hits yet',
                             ylabel: mode==='rate'?'Hz':'hits'});
-  if(A){ const g=document.getElementById('c_chan').getContext('2d'); g.fillStyle=css('--muted'); g.font='10px system-ui'; g.textAlign='center';
+  if(A){ const g=document.getElementById('c_chan').getContext('2d'); g.fillStyle=css('--muted'); g.font=cfont(10); g.textAlign='center';
     let start=0; for(let i=1;i<=slots.length;i++){ if(i===slots.length || slots[i].board!==slots[start].board){
         g.fillText(`Digi-${slots[start].board} ch0–${slots[i-1].ch}`, (A.X(start)+A.X(i))/2, A.h-7); start=i; } } }
   document.getElementById('c_chan').onclick = ev=>{ if(!A) return; const r=ev.target.getBoundingClientRect(); const x=ev.clientX-r.left;
@@ -596,10 +629,10 @@ function drawGrid(){
   const gc = document.getElementById('c_grid'); if(gc.closest('.card').classList.contains('collapsed')) return;
   if(!GRID){ message('c_grid','loading…'); return; }
   const {g,w,h}=setupCanvas('c_grid'), ylog=document.getElementById('grid_log').checked;
-  const boards = S.boards.map(b=>b.serial), L=84, T=2, ncol=16, rowH=(h-T)/Math.max(1,boards.length), cw=(w-L)/ncol;
+  const boards = S.boards.map(b=>b.serial), L=Math.round(84*K), T=2, ncol=16, rowH=(h-T)/Math.max(1,boards.length), cw=(w-L)/ncol;
   const e=GRID.edges, tx = GRID.log ? (v=>Math.log10(Math.max(v,1))) : (v=>v), xa=tx(e[0]), xb=tx(e[e.length-1]);
   GRID_BOXES = [];
-  g.font='10px system-ui';
+  g.font=cfont(10);
   boards.forEach((sn,i)=>{ const y=T+i*rowH, col=BOARD_COLOR[i%BOARD_COLOR.length];
     g.fillStyle=col; g.fillRect(2, y+rowH/2-5, 9, 9); g.fillStyle=css('--fg'); g.textAlign='left'; g.fillText('Digi-'+sn, 15, y+rowH/2+3); });
   for(const sl of GRID.slots){ const i=boards.indexOf(sl.board); if(i<0) continue;
@@ -654,7 +687,7 @@ function drawTrk(){
   const gap=3, ys=[], cs=[], starts=[];
   S.occupancy.forEach((o,p)=>{ starts.push(ys.length); o.slice(1).forEach(v=>{ ys.push(v); cs.push(PLANE_COLOR[p]); }); if(p<2) for(let k=0;k<gap;k++){ ys.push(0); cs.push(null); } });
   const A = plot('c_occ', {x0:0, x1:ys.length, ylog:true, xticks:false, series:[{kind:'bars', edges:[...Array(ys.length+1).keys()], y:ys, colors:cs, gap:0.5}], empty:'no hits yet', ylabel:'hits'});
-  if(A){ const g=document.getElementById('c_occ').getContext('2d'); g.fillStyle=css('--muted'); g.font='10px system-ui'; g.textAlign='center';
+  if(A){ const g=document.getElementById('c_occ').getContext('2d'); g.fillStyle=css('--muted'); g.font=cfont(10); g.textAlign='center';
     S.occupancy.forEach((o,p)=>{ const n=o.length-1; g.fillText(`T${p}  ch 1–${n}`, A.X(starts[p]+n/2), A.h-7); }); }
   legend('leg_occ', [0,1,2].map(p=>({name:'T'+p, color:PLANE_COLOR[p]})));
   const cedges=[...Array(7).keys()].map(v=>v+0.5);
@@ -727,6 +760,36 @@ for(const c of cards){
 document.getElementById('layout_reset').onclick = ()=>{ try { localStorage.removeItem(LAYOUT_KEY); } catch(e){} applyLayout({}); draw(); };
 applyLayout(store.get(LAYOUT_KEY, {}));
 window.addEventListener('resize', draw);
+// recorded runs: list them, load one for a look, go back to live
+const runsPanel = document.getElementById('runs_panel');
+const gb = b => (b / 1e9).toFixed(b < 1e8 ? 3 : 2) + ' GB';
+async function listRuns(){
+  const box = document.getElementById('runs_list'); box.textContent = 'reading…';
+  try {
+    const d = await (await fetch('/runs', {cache:'no-store'})).json();
+    const shown = S ? S.folder : null;
+    box.innerHTML = '<table><tr><th>run</th><th>started</th><th>comment</th><th>files</th><th>data</th><th></th></tr>' +
+      d.runs.map(r=>`<tr class="${r.folder===shown?'shown':''}"><td>${esc(r.name)}</td><td>${esc((r.start||'').replace('T',' ').slice(0,19)) || new Date(r.written*1000).toLocaleString()}</td>` +
+        `<td>${esc((r.comment||'').replace(/^(Start|Stop) Comment: ?/,''))}</td><td>${r.files}</td><td>${gb(r.bytes)}</td>` +
+        `<td><button data-load="${esc(r.folder)}">${r.folder===shown?'reload':'load'}</button></td></tr>`).join('') + '</table>';
+  } catch(e){ box.textContent = 'no answer from the dashboard'; }
+}
+async function loadRun(folder){
+  const note = document.getElementById('runs_note');
+  if(!folder){ note.textContent = 'give a folder'; return; }
+  note.textContent = 'loading…';
+  let r = null, d = {};
+  try { r = await fetch('/load?folder=' + encodeURIComponent(folder)); d = await r.json(); } catch(e){}
+  if(r && r.ok){ note.textContent = ''; runsPanel.hidden = true; await tick(); fetchChannel(); }
+  else note.textContent = 'not loaded: ' + (d.note || (r ? 'answer ' + r.status : 'no answer'));
+}
+document.getElementById('runs_btn').onclick = ()=>{ runsPanel.hidden = !runsPanel.hidden; if(!runsPanel.hidden) listRuns(); };
+document.getElementById('runs_close').onclick = ()=>{ runsPanel.hidden = true; };
+document.getElementById('runs_go').onclick = ()=>loadRun(document.getElementById('runs_path').value.trim());
+document.getElementById('runs_path').onkeydown = e=>{ if(e.key === 'Enter') loadRun(e.target.value.trim()); };
+runsPanel.addEventListener('click', e=>{ if(e.target.dataset.load) loadRun(e.target.dataset.load); });
+document.addEventListener('keydown', e=>{ if(e.key === 'Escape') runsPanel.hidden = true; });
+document.getElementById('live_btn').onclick = async ()=>{ await fetch('/live'); await tick(); fetchChannel(); };
 
 viewControls();
 showTab(location.hash==='#trk' ? 'trk' : location.hash==='#daq' ? 'daq' : tab);
