@@ -48,6 +48,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import sys
 import threading
 import time
@@ -1225,6 +1226,9 @@ def newest_run_folder(data_path: str):
 
 
 # ---------------------------------------------------------------- HTTP
+CONTROLS = ("/open", "/run", "/stopped", "/clear", "/window", "/set")   # FSUDAQ's calls and the page's shared controls
+
+
 class Handler(BaseHTTPRequestHandler):
     online: Online = None
     page: bytes = b""
@@ -1232,7 +1236,15 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):          # keep the console for the analysis
         pass
 
+    def local(self):                       # FSUDAQ, or a browser on odin (or through an ssh tunnel)
+        return self.client_address[0] in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+
     def do_GET(self):
+        if self.path.startswith(CONTROLS) and not self.local():     # others may look, not steer what everyone sees
+            body = json.dumps(dict(note="view only: changed on odin or through the ssh tunnel")).encode()
+            self.send_response(403)
+            self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body)))
+            self.end_headers(); self.wfile.write(body); return
         if self.path.startswith("/open"):        # FSUDAQ asks us to show the page (it must not spawn anything itself)
             import webbrowser
             threading.Thread(target=lambda: webbrowser.open(f"http://localhost:{self.server.server_address[1]}/"), daemon=True).start()
@@ -1274,7 +1286,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(400); self.end_headers(); return
             self.send_response(204); self.end_headers(); return
         if self.path.startswith("/state"):
-            body = json.dumps(self.online.state(), allow_nan=False).encode()   # Infinity/NaN are not JSON
+            body = json.dumps(dict(self.online.state(), can_control=self.local()), allow_nan=False).encode()   # Infinity/NaN are not JSON
             ctype = "application/json"
         elif self.path.startswith("/channel") or self.path.startswith("/grid") or self.path.startswith("/compare"):
             try:
@@ -1341,6 +1353,8 @@ def parse_args(argv=None):
     p.add_argument("--interval", type=float, default=1.0, help="seconds between processing steps")
     p.add_argument("--from-start", action="store_true", help="read the run already running at start-up from its beginning")
     p.add_argument("--port", type=int, default=8050)
+    p.add_argument("--bind", default="0.0.0.0", help="address to listen on (127.0.0.1: odin and ssh tunnels only); "
+                   "others may view, only odin may use the controls")
     p.add_argument("--workers", type=int, default=8, help="worker processes (0 = in the main loop)")
     p.add_argument("--open-browser", action="store_true", help="open the page in the default browser once the server is up")
     p.add_argument("--exit-with-parent", action="store_true", help="stop when the process that started us (FSUDAQ) is gone")
@@ -1356,12 +1370,12 @@ def main(argv=None):
     Handler.online = online
     with open(os.path.join(HERE, "dashboard.html"), "rb") as fh:
         Handler.page = fh.read()
-    srv = ThreadingHTTPServer(("127.0.0.1", a.port), Handler)
+    srv = ThreadingHTTPServer((a.bind, a.port), Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     if a.open_browser:
         import webbrowser
         threading.Thread(target=lambda: webbrowser.open(f"http://localhost:{a.port}/"), daemon=True).start()
-    say(f"online dashboard: http://localhost:{a.port}/   kernels={'numba' if FAST else 'numpy (slow)'}  "
+    say(f"online dashboard: http://{socket.gethostname()}:{a.port}/   kernels={'numba' if FAST else 'numpy (slow)'}  "
         f"{'replay of ' + a.run if a.replay else ('run ' + a.run if a.run else 'following ' + (a.follow or a.data_path))}")
     for w in online.setup.warnings + online.setup.problems:
         say("  setup: " + w)

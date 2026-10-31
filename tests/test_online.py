@@ -26,7 +26,10 @@ import signal
 import struct
 import sys
 import tempfile
+import threading
 import time
+import urllib.error
+import urllib.request
 
 import numpy as np
 
@@ -888,6 +891,45 @@ def scenario_x725(tmp):
         ok(f"{tot:,} hits: DAQ exact, all in the finder, finder identical to all hits at their true times; 1399's newest hit at {newest[1399]:.3f} s")
 
 
+def scenario_view_only(tmp):
+    print("== the page from another machine: everything to look at, none of the controls or FSUDAQ's calls")
+    folder = os.path.join(tmp, "view"); os.makedirs(folder)
+    clock = Clock(); boards = boards_for(folder)
+    online = make_online(folder, SERIALS, EIGHT, clock)
+    drive(online, clock, boards, 0, 5)
+    od.Handler.online = online
+
+    class Remote(od.Handler):
+        def local(self):
+            return False
+    servers = [od.ThreadingHTTPServer(("127.0.0.1", 0), h) for h in (od.Handler, Remote)]
+    for srv in servers:
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+    here, there = (f"http://127.0.0.1:{srv.server_address[1]}" for srv in servers)
+
+    def get(url):
+        try:
+            with urllib.request.urlopen(url) as r:
+                return r.status, r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read()
+    hits = online.state()["hits"]
+    good = check(hits > 0, "view: no hits to look at")
+    code, body = get(there + "/state")
+    good &= check(code == 200 and json.loads(body)["can_control"] is False, f"view: remote /state {code}")
+    good &= check(json.loads(get(here + "/state")[1])["can_control"] is True, "view: local /state not allowed to control")
+    for path in ("/", f"/channel?slot={online.slots[0]}", "/grid"):
+        good &= check(get(there + path)[0] == 200, f"view: remote {path} not served")
+    for path in ("/clear", "/window?ns=50", f"/set?ref={online.slots[0]}", "/run?folder=/tmp", "/stopped?folder=" + folder, "/open"):
+        good &= check(get(there + path)[0] == 403, f"view: remote {path} not refused")
+    good &= check(online.state()["hits"] == hits and online.state()["daq"]["ref"] is None, "view: a refused call changed something")
+    good &= check(get(here + "/clear")[0] == 204 and online.state()["hits"] == 0, "view: local Clear refused")
+    for srv in servers:
+        srv.shutdown()
+    if good:
+        ok("another machine sees the page, state and histograms; Clear, window, reference, /run, /stopped and /open are refused; odin keeps them")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="fsudaq_test_online_")
     try:
@@ -895,7 +937,7 @@ def main():
                    scenario_live_start, scenario_offsets, scenario_replay, scenario_short_hold, scenario_worker_killed,
                    scenario_idle_worker_killed, scenario_falling_behind, scenario_counters, scenario_finished_at_start,
                    scenario_long_pause, scenario_offsets_dense, scenario_missing_board, scenario_boundaries, scenario_x725,
-                   scenario_window, scenario_run_file):
+                   scenario_window, scenario_run_file, scenario_view_only):
             sc(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

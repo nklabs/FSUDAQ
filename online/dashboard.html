@@ -329,6 +329,9 @@ async function tick(){
   try { const res = await fetch('/state', {cache:'no-store', signal:AbortSignal.timeout(5000)}); if(res.ok) r = await res.json(); } catch(e){ r = null; }
   if(!r){ document.body.classList.add('stale'); banner(); return; }
   document.body.classList.remove('stale');
+  if(r.can_control===false && !document.body.classList.contains('viewonly')){   // another machine: look, not steer
+    document.body.classList.add('viewonly');
+    ['sel_ref','btn_clear','win_ns','win_apply'].forEach(id=>{ const e=document.getElementById(id); e.disabled=true; e.title='view only: changed on odin or through the ssh tunnel'; }); }
   if(S && r.folder!==S.folder) document.getElementById('clear_note').textContent = '';   // a new run: nothing cleared in it yet
   if(S && r.folder===S.folder && r.server_time>S.server_time){
     const db = r.daq.run_bytes - S.daq.run_bytes, dt = r.server_time - S.server_time;
