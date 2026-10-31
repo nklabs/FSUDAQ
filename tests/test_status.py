@@ -335,8 +335,8 @@ def scenario_limits_api(tmp):
     srv = ss.ThreadingHTTPServer(("127.0.0.1", 0), ss.Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{srv.server_address[1]}"
-    def post(L):
-        req = urllib.request.Request(base + "/api/limits", data=json.dumps(L).encode(), method="POST", headers={"Content-Type": "application/json"})
+    def post(L, at=None):
+        req = urllib.request.Request((at or base) + "/api/limits", data=json.dumps(L).encode(), method="POST", headers={"Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(req) as r:
                 return r.status, json.loads(r.read())
@@ -360,15 +360,26 @@ def scenario_limits_api(tmp):
     good &= check(st["modes"]["cherenkov"]["value"] == "full of isobutane" and st["summary"]["level"] in ("bad", "critical"), f"status api: {st['summary']}")
     with urllib.request.urlopen(base + "/api/limits") as r:
         li = json.loads(r.read())
-    good &= check(li["inputs"]["ai0"] == 12 and "plc.tc7" in li["sources"], f"limits api: {li['inputs']}")
+    good &= check(li["inputs"]["ai0"] == 12 and "plc.tc7" in li["sources"] and li["can_save"] is True, f"limits api: {li['inputs']}")
     for page in ("/", "/limits"):
         with urllib.request.urlopen(base + page) as r:
             good &= check(r.status == 200 and b"<title>" in r.read(), f"{page} not served")
+    class Remote(ss.Handler):           # a viewer on another machine: may look, may not save
+        def local(self):
+            return False
+    rsrv = ss.ThreadingHTTPServer(("127.0.0.1", 0), Remote)
+    threading.Thread(target=rsrv.serve_forever, daemon=True).start()
+    rbase = f"http://127.0.0.1:{rsrv.server_address[1]}"
+    with urllib.request.urlopen(rbase + "/api/limits") as r:
+        good &= check(json.loads(r.read())["can_save"] is False, "a remote viewer is offered Save")
+    code, d = post(ss.DEFAULT_LIMITS, rbase)
+    good &= check(code == 403 and m.limits == L, f"a remote save was not refused: {code} {d}")
+    rsrv.shutdown()
     again = make(tmp, Clock(), src)
     good &= check(again.limits == L, "limits not kept for the next start")
     srv.shutdown()
     if good:
-        ok("five kinds of wrong limits refused, nothing written; good ones saved, logged, used at once and kept; pages and API served")
+        ok("five kinds of wrong limits refused, nothing written; good ones saved, logged, used at once and kept; pages and API served; a remote viewer may look, not save")
 
 
 def main():

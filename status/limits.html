@@ -172,6 +172,8 @@ window.addEventListener('beforeunload', ev=>{ if(dirty){ ev.preventDefault(); ev
 async function load(){
   const d = await (await fetch('/api/limits', {cache:'no-store'})).json();
   L = d.limits; INPUTS = d.inputs; SOURCES = d.sources; LEVELS = d.levels; dirty = false; msg(''); draw();
+  if(d.can_save === false){ document.getElementById('save').disabled = true;
+    msg('view only: limits are changed on odin or through the ssh tunnel (http://localhost:8060/limits)'); }
 }
 async function live(){   // the raw values beside each input, without touching what is being edited
   try { INPUTS = (await (await fetch('/api/limits', {cache:'no-store'})).json()).inputs;

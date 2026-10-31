@@ -27,6 +27,7 @@ import json
 import math
 import os
 import shutil
+import socket
 import threading
 import time
 import urllib.error
@@ -642,13 +643,16 @@ class Handler(BaseHTTPRequestHandler):
             m = self.mon
             plc = (m.plc or {}).get("plc") or {}
             return self.send(200, dict(limits=m.limits, inputs={k: plc.get(k) for k in PLC_INPUTS}, levels=list(RULE_LEVELS),
-                                       sources=[f"plc.{s}" for s in PLC_INPUTS]))
+                                       sources=[f"plc.{s}" for s in PLC_INPUTS], can_save=self.local()))
         self.send(404, {"error": "not here"})
+
+    def local(self):
+        return self.client_address[0] in ("127.0.0.1", "::1", "::ffff:127.0.0.1")     # on odin, or through the ssh tunnel
 
     def do_POST(self):
         if self.path.split("?")[0] != "/api/limits":
             return self.send(404, {"error": "not here"})
-        if self.client_address[0] not in ("127.0.0.1", "::1"):      # through the ssh tunnel, or on odin
+        if not self.local():
             return self.send(403, {"error": "limits are changed from odin or through the ssh tunnel only"})
         try:
             L = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 1_000_000)))
@@ -673,6 +677,7 @@ class Handler(BaseHTTPRequestHandler):
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--port", type=int, default=8060)
+    p.add_argument("--bind", default="0.0.0.0", help="address to listen on (127.0.0.1: odin and ssh tunnels only)")
     p.add_argument("--interval", type=float, default=2.0, help="seconds between gatherings")
     p.add_argument("--online", default="http://localhost:8050/state", help="the online dashboard's state")
     p.add_argument("--online-interval", type=float, default=5.0, help="seconds between reads of the online state (it is large)")
@@ -688,9 +693,9 @@ def main(argv=None):
     if not os.path.exists(a.limits):
         save_limits(a.limits, mon.limits, "first start (defaults)")
     Handler.mon = mon
-    srv = ThreadingHTTPServer(("127.0.0.1", a.port), Handler)   # local only: view it through the ssh tunnel
+    srv = ThreadingHTTPServer((a.bind, a.port), Handler)    # anyone may look; only odin (or a tunnel) may save limits
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    print(f"experiment status on http://localhost:{a.port}/ (limits: /limits)", flush=True)
+    print(f"experiment status on http://{socket.gethostname()}:{a.port}/ (listening on {a.bind}; limits: /limits)", flush=True)
     while True:
         t0 = time.time()
         try:
