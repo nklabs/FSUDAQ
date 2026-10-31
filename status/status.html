@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Experiment Status</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --fg:#1d232b; --muted:#6b7480; --line:#dfe3e8;
+          --ok:#2e9e4f; --info:#9aa3ad; --nodata:#c4cad1; --warn:#e0a100; --bad:#d6342c; --crit:#a3001b; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#14171b; --card:#1d2127; --fg:#e4e8ec; --muted:#98a1ab; --line:#30363e;
+          --info:#7c858f; --nodata:#4a525b; } }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:12px 16px 30px; background:var(--bg); color:var(--fg); font:13px/1.4 system-ui, sans-serif; }
+  h1 { font-size:17px; margin:0 0 8px; display:flex; gap:12px; align-items:baseline; flex-wrap:wrap; }
+  h1 small { color:var(--muted); font-weight:normal; font-size:12px; }
+  h1 a { font-size:12px; font-weight:normal; color:var(--muted); }
+  #summary { border-radius:8px; padding:10px 14px; margin-bottom:12px; font-size:14px; font-weight:600; color:#fff; background:var(--nodata); }
+  #summary.ok { background:var(--ok); } #summary.warn { background:var(--warn); color:#1d232b; } #summary.bad { background:var(--bad); }
+  #summary.critical { background:var(--crit); animation:pulse 1s infinite; } #summary.stale { background:#555; }
+  #summary .counts { font-weight:normal; font-size:12px; opacity:.9; margin-left:8px; }
+  @keyframes pulse { 50% { opacity:.55; } }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(420px, 1fr)); gap:12px; }
+  @media (max-width: 480px) { .grid { grid-template-columns:1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:8px 10px; min-width:0; }
+  .card h2 { font-size:13px; margin:2px 0 6px; display:flex; gap:8px; align-items:center; }
+  .row { display:grid; grid-template-columns:14px 150px 1fr auto; gap:8px; align-items:start; padding:4px 2px; border-top:1px solid var(--line); cursor:pointer; }
+  .row:first-of-type { border-top:none; }
+  .row:hover { background:color-mix(in srgb, var(--line) 35%, transparent); }
+  .name { font-weight:600; overflow-wrap:anywhere; } .text { overflow-wrap:anywhere; } .age { color:var(--muted); font-size:11px; white-space:nowrap; }
+  .dot { width:12px; height:12px; border-radius:50%; margin-top:2px; background:var(--nodata); }
+  .dot.ok { background:var(--ok); } .dot.info { background:var(--info); } .dot.warn { background:var(--warn); }
+  .dot.bad { background:var(--bad); } .dot.critical { background:var(--crit); animation:pulse 1s infinite; box-shadow:0 0 0 3px color-mix(in srgb, var(--crit) 35%, transparent); }
+  .dot.nodata { background:transparent; border:2px solid var(--nodata); }
+  .details { grid-column:2 / -1; font:11px/1.35 ui-monospace, monospace; color:var(--muted); background:color-mix(in srgb, var(--line) 25%, transparent);
+             border-radius:4px; padding:6px 8px; white-space:pre-wrap; overflow-wrap:anywhere; max-height:320px; overflow:auto; }
+  .mode { font-size:11px; font-weight:normal; border:1px solid var(--line); border-radius:10px; padding:0 8px; color:var(--muted); }
+  footer { margin-top:14px; color:var(--muted); font-size:11px; }
+</style>
+</head>
+<body>
+<h1>Experiment status <small id="updated">connecting…</small> <a href="/limits" target="_blank">limits and names</a></h1>
+<div id="summary">connecting…</div>
+<div class="grid" id="grid"></div>
+<footer>Green: as it should be · grey: a plain fact · hollow: no data · yellow: look at it · red: wrong · flashing: act now.
+Click a line for what is behind it. Read-only: FSUDAQ, the online dashboard and pion-ros are not changed from here.</footer>
+<script>
+const ORDER = ['DAQ', 'Online analysis', 'LED trigger', 'PLC', 'Cherenkov', 'Temperatures', 'Trumeters', 'ROS'];
+const RANK = {info:0, ok:1, nodata:2, warn:3, bad:4, critical:5};
+const esc = t => String(t ?? '').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const open = new Set();   // the lines whose details are shown, by group/name
+let last = null, lastOK = null;
+function ago(s){ if(s==null) return ''; if(s<90) return s.toFixed(0)+' s'; if(s<5400) return (s/60).toFixed(0)+' min'; return (s/3600).toFixed(1)+' h'; }
+function detailText(d){ return Object.entries(d||{}).map(([k,v]) => k + ': ' + (typeof v==='object' && v!==null ? JSON.stringify(v, null, 1) : v)).join('\n'); }
+function render(S){
+  const sm = document.getElementById('summary');
+  const stale = lastOK && (Date.now()-lastOK > 8000);
+  sm.className = stale ? 'stale' : S.summary.level;
+  const c = S.summary.counts || {};
+  sm.innerHTML = (stale ? `NO CONNECTION to the status server since ${new Date(lastOK).toLocaleTimeString()} — shown as it was then. ` : '') +
+    esc(S.summary.text) + `<span class="counts">${['critical','bad','warn'].filter(k=>c[k]).map(k=>c[k]+' '+k).join(' · ')}</span>`;
+  document.getElementById('updated').textContent = S.updated ? 'updated ' + new Date(S.updated*1000).toLocaleTimeString() : '';
+  const groups = {};
+  for(const it of S.items) (groups[it.group] = groups[it.group] || []).push(it);
+  const names = Object.keys(groups).sort((a,b)=>{ const ia=ORDER.indexOf(a), ib=ORDER.indexOf(b); return (ia<0?99:ia)-(ib<0?99:ib) || a.localeCompare(b); });
+  const modes = S.modes || {};
+  document.getElementById('grid').innerHTML = names.map(g=>{
+    const its = groups[g], worst = its.reduce((w,i)=>RANK[i.level]>RANK[w]?i.level:w, 'info');
+    const mode = g==='Cherenkov' && modes.cherenkov ? `<span class="mode">mode: ${esc(modes.cherenkov.value)}</span>` : '';
+    return `<div class="card"><h2><span class="dot ${worst}"></span>${esc(g)} ${mode}</h2>` + its.map(it=>{
+      const key = g + '/' + it.name;
+      return `<div class="row" data-key="${esc(key)}"><span class="dot ${it.level}" title="${it.level}"></span><span class="name">${esc(it.name)}</span>` +
+             `<span class="text">${esc(it.text)}</span><span class="age">${it.age_s!=null && it.age_s>5 ? ago(it.age_s)+' old' : ''}</span>` +
+             (open.has(key) ? `<div class="details">${esc(detailText(it.details)) || '(nothing more)'}</div>` : '') + '</div>'; }).join('') + '</div>';
+  }).join('');
+}
+document.getElementById('grid').addEventListener('click', ev=>{
+  const r = ev.target.closest('.row'); if(!r || ev.target.closest('.details')) return;
+  const k = r.dataset.key; open.has(k) ? open.delete(k) : open.add(k); if(last) render(last);
+});
+async function tick(){
+  try { const r = await fetch('/api/status', {cache:'no-store', signal:AbortSignal.timeout(5000)}); if(r.ok){ last = await r.json(); lastOK = Date.now(); } } catch(e){}
+  if(last) render(last);
+}
+tick(); setInterval(tick, 2000);
+</script>
+</body>
+</html>

@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Status Limits</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --fg:#1d232b; --muted:#6b7480; --line:#dfe3e8; --acc:#1f6feb; --bad:#d6342c; --ok:#2e9e4f;
+          --warn:#e0a100; --crit:#a3001b; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#14171b; --card:#1d2127; --fg:#e4e8ec; --muted:#98a1ab; --line:#30363e; } }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:12px 16px 80px; background:var(--bg); color:var(--fg); font:13px/1.4 system-ui, sans-serif; }
+  h1 { font-size:17px; margin:0 0 4px; } h2 { font-size:14px; margin:16px 0 6px; }
+  p.lead { color:var(--muted); margin:0 0 10px; max-width:900px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-bottom:10px; }
+  .fields { display:flex; flex-wrap:wrap; gap:8px 14px; align-items:end; }
+  label { display:flex; flex-direction:column; gap:2px; font-size:11px; color:var(--muted); }
+  input, select { font:13px system-ui, sans-serif; padding:3px 6px; border:1px solid var(--line); border-radius:4px; background:var(--bg); color:var(--fg); }
+  input[type=number] { width:90px; } input.wide { width:220px; } input.mid { width:120px; }
+  .live { font:12px ui-monospace, monospace; color:var(--muted); padding-bottom:4px; }
+  table { border-collapse:collapse; margin-top:8px; } td { padding:3px 6px 3px 0; vertical-align:middle; }
+  button { font:12px system-ui, sans-serif; padding:3px 10px; border:1px solid var(--line); border-radius:4px; background:var(--card); color:var(--fg); cursor:pointer; }
+  button:hover { border-color:var(--muted); } button.primary { background:var(--acc); color:#fff; border-color:var(--acc); }
+  button.x { color:var(--muted); padding:1px 7px; }
+  .bar { position:fixed; left:0; right:0; bottom:0; background:var(--card); border-top:1px solid var(--line); padding:8px 16px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  #msg { font-size:12px; } #msg.err { color:var(--bad); } #msg.ok { color:var(--ok); }
+  .lv-warn { border-left:4px solid var(--warn); } .lv-bad { border-left:4px solid var(--bad); } .lv-critical { border-left:4px solid var(--crit); }
+</style>
+</head>
+<body>
+<h1>Limits and names</h1>
+<p class="lead">What the <a href="/" target="_blank">status page</a> judges by. Each PLC input can be named, scaled
+(value = raw × scale + offset) and given rules; a rule raises its level when the value is at or above, above or below a number,
+or changes by at least an amount within a time. A rule can apply in one mode only. Saving writes <code>status/limits.json</code> on odin and
+appends the whole set, with the time, to <code>status/limits_log.jsonl</code>: what was in force when stays on record.
+Levels: <b>warn</b> = little warning (yellow), <b>bad</b> = big warning (red), <b>critical</b> = massive warning (flashing).</p>
+
+<h2>Modes</h2>
+<div class="card"><div class="fields" id="modes"></div></div>
+
+<h2>Inputs</h2>
+<div id="channels"></div>
+<button id="add">+ add an input</button>
+
+<h2>Unused inputs</h2>
+<div class="card"><div class="fields" id="unused"></div>
+  <div class="live" style="margin-top:6px">Ticked: not listed under "PLC inputs (not named)" on the status page.</div></div>
+
+<h2>DAQ and connections</h2>
+<div class="card"><div class="fields" id="daq"></div></div>
+
+<div class="bar"><button class="primary" id="save">Save</button><button id="revert">Discard changes</button><span id="msg"></span></div>
+<script>
+let L = null, INPUTS = {}, SOURCES = [], LEVELS = [], dirty = false;
+const KINDS = {at_or_above:'at or above', above:'above', below:'below', change:'changes by at least'};
+const DAQ = {disk_warn_gb:'disk: warn below (GB)', disk_bad_gb:'disk: bad below (GB)', plc_stale_s:'PLC status stale after (s)', analysis_lag_warn_s:'analysis behind: warn after (s of data)'};
+const esc = t => String(t ?? '').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const msg = (t, cls='') => { const m=document.getElementById('msg'); m.textContent=t; m.className=cls; };
+function touch(){ dirty = true; msg('unsaved changes'); }
+const opt = (v, cur, label) => `<option value="${esc(v)}"${v===cur?' selected':''}>${esc(label ?? v)}</option>`;
+
+function kindOf(r){ return Object.keys(KINDS).find(k=>k in r) || 'above'; }
+function whenOf(r){ const w=r.when||{}; const k=Object.keys(w)[0]; return k ? k+'='+w[k] : ''; }
+function preview(c){
+  const raw = c.source ? INPUTS[c.source.replace('plc.','')] : null;
+  if(!c.source) return 'not assigned';
+  if(raw==null) return 'raw: no PLC value now';
+  if(c.source.startsWith('plc.tc') && raw>=3276) return `raw ${raw} = not connected`;
+  return `raw ${(+raw).toPrecision(5)} → ${(raw*(+c.scale||0)+(+c.offset||0)).toFixed(+c.digits||2)} ${c.unit||''}`;
+}
+function drawModes(){
+  document.getElementById('modes').innerHTML = Object.entries(L.modes||{}).map(([k,m]) =>
+    `<label>${esc(m.name||k)}<select data-mode="${esc(k)}">${m.choices.map(ch=>opt(ch, m.value)).join('')}</select></label>`).join('') || '<span>none</span>';
+}
+function drawDaq(){
+  L.daq = L.daq || {};
+  document.getElementById('daq').innerHTML = Object.entries(DAQ).map(([k,label]) =>
+    `<label>${esc(label)}<input type="number" step="any" data-daq="${k}" value="${esc(L.daq[k])}"></label>`).join('');
+}
+function whenOptions(cur){
+  let o = opt('', cur, 'always');
+  for(const [k,m] of Object.entries(L.modes||{})) for(const ch of m.choices) o += opt(k+'='+ch, cur, `only when ${m.name||k}: ${ch}`);
+  return o;
+}
+function drawChannels(){
+  document.getElementById('channels').innerHTML = L.channels.map((c,i) => `
+  <div class="card" data-ch="${i}">
+    <div class="fields">
+      <label>name<input class="wide" data-f="name" value="${esc(c.name)}"></label>
+      <label>group (card on the status page)<input class="mid" data-f="group" value="${esc(c.group)}"></label>
+      <label>PLC input<select data-f="source">${opt('', c.source||'', '(not assigned)')}${SOURCES.map(s=>opt(s, c.source, s.replace('plc.',''))).join('')}</select></label>
+      <label>scale<input type="number" step="any" data-f="scale" value="${esc(c.scale)}"></label>
+      <label>offset<input type="number" step="any" data-f="offset" value="${esc(c.offset)}"></label>
+      <label>unit<input class="mid" style="width:70px" data-f="unit" value="${esc(c.unit)}"></label>
+      <label>decimals<input type="number" min="0" max="6" style="width:60px" data-f="digits" value="${esc(c.digits)}"></label>
+      <label title="what the sensor can read; a value outside means wiring or scaling, not a reading">sensor range (blank: none)<span>
+        <input type="number" step="any" style="width:75px" data-f="range0" value="${esc((c.range||[])[0])}"> to
+        <input type="number" step="any" style="width:75px" data-f="range1" value="${esc((c.range||[])[1])}"></span></label>
+      <span class="live" data-live="${i}">${esc(preview(c))}</span>
+      <span style="flex:1"></span><button class="x" data-delch="${i}" title="remove this input">remove</button>
+    </div>
+    <table>${(c.rules||[]).map((r,j)=>{ const k=kindOf(r); return `
+      <tr class="lv-${esc(r.level)}" data-rule="${j}">
+        <td><select data-r="kind">${Object.entries(KINDS).map(([v,l])=>opt(v,k,l)).join('')}</select></td>
+        <td><input type="number" step="any" data-r="value" value="${esc(r[k])}"> ${esc(c.unit||'')}</td>
+        <td>${k==='change' ? `within <input type="number" step="any" min="0" style="width:70px" data-r="within" value="${esc((r.within_s||3600)/60)}"> min` : ''}</td>
+        <td>→ <select data-r="level">${LEVELS.map(l=>opt(l, r.level)).join('')}</select></td>
+        <td><select data-r="when">${whenOptions(whenOf(r))}</select></td>
+        <td><button class="x" data-delrule="${j}" title="remove this rule">×</button></td></tr>`; }).join('')}
+    </table>
+    <button data-addrule="${i}" style="margin-top:6px">+ rule</button>
+  </div>`).join('');
+}
+function drawUnused(){
+  L.unused = L.unused || [];
+  const named = new Set(L.channels.map(c=>c.source).filter(Boolean));
+  const free = SOURCES.filter(s=>!named.has(s));
+  document.getElementById('unused').innerHTML = free.map(s=>
+    `<label style="flex-direction:row;gap:4px;align-items:center;font-size:13px;color:inherit"><input type="checkbox" data-unused="${esc(s)}"${L.unused.includes(s)?' checked':''}>${esc(s.replace('plc.',''))}</label>`).join('')
+    || '<span>every input is named</span>';
+}
+function draw(){ drawModes(); drawChannels(); drawUnused(); drawDaq(); }
+
+document.body.addEventListener('input', ev=>{
+  const t = ev.target;
+  if(t.dataset.mode){ L.modes[t.dataset.mode].value = t.value; touch(); return; }
+  if(t.dataset.unused){ L.unused = L.unused.filter(u=>u!==t.dataset.unused).concat(t.checked ? [t.dataset.unused] : []); touch(); return; }
+  if(t.dataset.daq){ L.daq[t.dataset.daq] = t.value==='' ? null : +t.value; touch(); return; }
+  const card = t.closest('[data-ch]'); if(!card) return;
+  const c = L.channels[+card.dataset.ch];
+  if(t.dataset.f==='range0' || t.dataset.f==='range1'){
+    const [a, b] = [...card.querySelectorAll('[data-f=range0],[data-f=range1]')].map(x=>x.value);
+    if(a==='' && b==='') delete c.range; else c.range = [+a, +b];
+    touch(); return;
+  }
+  if(t.dataset.f){
+    const f = t.dataset.f;
+    c[f] = ['scale','offset','digits'].includes(f) ? (t.value==='' ? 0 : +t.value) : (f==='source' && !t.value ? null : t.value);
+    card.querySelector('[data-live]').textContent = preview(c); if(f==='source') drawUnused(); touch(); return;
+  }
+  const tr = t.closest('[data-rule]'); if(!tr) return;
+  const r = c.rules[+tr.dataset.rule], k = kindOf(r);
+  if(t.dataset.r==='value') r[k] = t.value==='' ? null : +t.value;
+  if(t.dataset.r==='within') r.within_s = (+t.value||0) * 60;
+  if(t.dataset.r==='level'){ r.level = t.value; tr.className = 'lv-'+t.value; }
+  if(t.dataset.r==='when'){ if(t.value){ const [mk, ...mv] = t.value.split('='); r.when = {[mk]: mv.join('=')}; } else delete r.when; }
+  if(t.dataset.r==='kind'){ const v = r[k]; delete r[k]; r[t.value] = v; if(t.value==='change') r.within_s = r.within_s || 3600; else delete r.within_s; drawChannels(); }
+  touch();
+});
+document.body.addEventListener('click', ev=>{
+  const t = ev.target, card = t.closest('[data-ch]');
+  if(t.id==='add'){ L.channels.push({id:'input_'+Date.now(), name:'new input', group:'Inputs', source:null, scale:1, offset:0, unit:'', digits:2, rules:[]}); drawChannels(); touch(); }
+  else if(t.dataset.delch!=null){ if(confirm(`Remove "${L.channels[+t.dataset.delch].name}"?`)){ L.channels.splice(+t.dataset.delch,1); drawChannels(); touch(); } }
+  else if(t.dataset.addrule!=null){ L.channels[+t.dataset.addrule].rules = (L.channels[+t.dataset.addrule].rules||[]).concat([{above:0, level:'warn'}]); drawChannels(); touch(); }
+  else if(t.dataset.delrule!=null && card){ L.channels[+card.dataset.ch].rules.splice(+t.dataset.delrule,1); drawChannels(); touch(); }
+});
+document.getElementById('save').onclick = async ()=>{
+  try {
+    const r = await fetch('/api/limits', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(L)});
+    const d = await r.json();
+    if(r.ok){ dirty = false; msg('saved ' + d.saved + ' (and appended to limits_log.jsonl)', 'ok'); }
+    else msg('not saved: ' + (d.errors||[d.error]).join('; '), 'err');
+  } catch(e){ msg('not saved: no answer from the status server', 'err'); }
+};
+document.getElementById('revert').onclick = ()=>{ if(!dirty || confirm('Discard the unsaved changes?')) load(); };
+window.addEventListener('beforeunload', ev=>{ if(dirty){ ev.preventDefault(); ev.returnValue=''; } });
+async function load(){
+  const d = await (await fetch('/api/limits', {cache:'no-store'})).json();
+  L = d.limits; INPUTS = d.inputs; SOURCES = d.sources; LEVELS = d.levels; dirty = false; msg(''); draw();
+}
+async function live(){   // the raw values beside each input, without touching what is being edited
+  try { INPUTS = (await (await fetch('/api/limits', {cache:'no-store'})).json()).inputs;
+        document.querySelectorAll('[data-live]').forEach(s=>{ s.textContent = preview(L.channels[+s.dataset.live]); }); } catch(e){}
+}
+load(); setInterval(live, 3000);
+</script>
+</body>
+</html>
