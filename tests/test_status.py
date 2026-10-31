@@ -160,6 +160,30 @@ def scenario_rules(tmp):
            "unassigned, unused and open inputs; out of range warns, past full scale stays critical")
 
 
+def scenario_changes(tmp):
+    print("== change over 10 s, 1 min and 10 min, from moving averages: a ramp under noise, and none until the history is long enough")
+    clock, src = Clock(), Sources()
+    m = make(tmp, clock, src, limits=copy.deepcopy(ss.DEFAULT_LIMITS))
+    good, t0 = True, clock.t
+    def step(k):                    # 0.01 psig/s, with +-0.05 psig noise that alternates every reading
+        src.plc["ai0"] = 1.0 + 0.01 * (clock.t - t0) + (0.05 if k % 2 else -0.05)
+        clock.t += 2; m.step()
+    for k in range(20):             # 40 s
+        step(k)
+    ch = find(m, "Cherenkov", NAME["cherenkov_pressure"])["details"]["change"]
+    good &= check(ch["10s"] is not None and ch["1m"] is None and ch["10m"] is None, f"after 40 s: {ch}")
+    for k in range(20, 330):        # 11 min in all
+        step(k)
+    it = find(m, "Cherenkov", NAME["cherenkov_pressure"])
+    ch = it["details"]["change"]
+    for label, want in (("10s", 0.1), ("1m", 0.6), ("10m", 6.0)):
+        good &= check(ch[label] is not None and abs(ch[label] - want) < 0.01 * want, f"change over {label}: {ch[label]}, expected {want}")
+    good &= check(it["trend"].startswith("Δ10s +0.100 · Δ1m +0.600 · Δ10m +6.000"), f"trend line: {it.get('trend')}")
+    good &= check("trend" not in find(m, "Trackers", NAME["tc0"]), "a trend on an input marked not connected")
+    if good:
+        ok("0.1 / 0.6 / 6.0 psig over 10 s / 1 min / 10 min from a 0.01 psig/s ramp under noise; '–' until each interval is covered")
+
+
 def scenario_plc(tmp):
     print("== the PLC: heartbeat stuck, status stale, pion-ros not answering, nodes missing")
     clock, src = Clock(), Sources()
@@ -321,7 +345,7 @@ def scenario_limits_api(tmp):
 
 
 def main():
-    for sc in (scenario_rules, scenario_plc, scenario_run_file, scenario_limits_api):
+    for sc in (scenario_rules, scenario_changes, scenario_plc, scenario_run_file, scenario_limits_api):
         tmp = tempfile.mkdtemp(prefix="fsudaq_test_status_")
         try:
             sc(tmp)

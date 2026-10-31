@@ -80,6 +80,8 @@
   .row:hover { background:color-mix(in srgb, var(--line) 55%, transparent); }
   .name { font-weight:550; overflow-wrap:anywhere; } .text { color:var(--muted); overflow-wrap:anywhere; }
   .age { color:var(--soft); font-size:11px; white-space:nowrap; }
+  .trend { display:block; font-size:10.5px; color:var(--soft); letter-spacing:.01em; margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  body.retro .trend { color:#3e8f86; }
   .dot { width:10px; height:10px; border-radius:50%; margin-top:4px; background:var(--nodata); }
   .dot.ok { background:var(--ok); } .dot.info { background:var(--info); } .dot.idle { background:var(--idle); } .dot.warn { background:var(--warn); }
   .dot.bad { background:var(--bad); animation:pulse 1s infinite; } .dot.critical { background:var(--crit); animation:pulse 1s infinite; box-shadow:0 0 0 3px color-mix(in srgb, var(--crit) 30%, transparent); }
@@ -192,7 +194,7 @@ function rowHTML(g, it){
     bar = `<div class="bar" title="${(100*u).toFixed(1)} % used"><i class="${it.level}" style="width:${(100*u).toFixed(2)}%"></i>` +
           (it.bar.marks||[]).filter(m=>m>0 && m<1).map(m=>`<b style="left:${(100*m).toFixed(2)}%"></b>`).join('') + '</div>'; }
   return `<div class="row" draggable="true" data-key="${esc(key)}" data-name="${esc(it.name)}"><span class="dot ${it.level}" title="${it.level}"></span><span class="name">${esc(it.name)}</span>` +
-         `<span class="text">${esc(it.text)}</span><span class="age">${it.age_s!=null && it.age_s>5 ? ago(it.age_s)+' old' : ''}</span>` + bar +
+         `<span class="text">${esc(it.text)}${it.trend ? `<small class="trend">${esc(it.trend)}</small>` : ''}</span><span class="age">${it.age_s!=null && it.age_s>5 ? ago(it.age_s)+' old' : ''}</span>` + bar +
          (open.has(key) ? `<div class="details">${esc(detailText(it.details)) || '(nothing more)'}</div>` : '') + '</div>';
 }
 function render(S){

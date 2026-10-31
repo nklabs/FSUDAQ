@@ -156,6 +156,20 @@ def rule_text(r: dict) -> str:
     return f"change >= {r['change']} within {r['within_s'] / 60:g} min{when}"
 
 
+# change over each interval: the mean of the latest `avg` seconds against the mean of the same span one interval earlier,
+# so one noisy reading does not swing it; None until the history reaches back that far
+CHANGE_INTERVALS = (("10s", 10, 4), ("1m", 60, 12), ("10m", 600, 60))   # (label, interval s, averaging window s)
+
+
+def changes(history, now):
+    out = {}
+    for label, w, avg in CHANGE_INTERVALS:
+        recent = [v for t, v in history if t > now - avg]
+        past = [v for t, v in history if now - w - avg < t <= now - w]
+        out[label] = (sum(recent) / len(recent) - sum(past) / len(past)) if recent and past else None
+    return out
+
+
 def evaluate(channel: dict, value, history, modes: dict, now: float):
     """(level, reasons) of one channel's value against its rules; history: [(t, value)], oldest first."""
     if value is None:
@@ -474,11 +488,18 @@ class Monitor:
                 txt = fmt(value) + ("  —  " + "; ".join(why) if why else "")
             span = (now - h[0][0]) if h else 0
             rng = (min(v for _, v in h), max(v for _, v in h)) if h else None
-            out.append(item(c.get("group") or "Inputs", c["name"], level, txt,
-                            dict(source=c.get("source"), raw=raw, scale=c.get("scale"), offset=c.get("offset"), range=c.get("range"), note=c.get("note"),
-                                 rules=[rule_text(r) + f" [{r['level']}]" for r in c.get("rules", [])],
-                                 history=f"{len(h)} values over {span / 60:.0f} min" + (f", {fmt(rng[0])} to {fmt(rng[1])}" if rng else ""),
-                                 modes={k: m.get("value") for k, m in modes.items()})))
+            ch = changes(h, now) if value is not None else {}
+            it = item(c.get("group") or "Inputs", c["name"], level, txt,
+                      dict(source=c.get("source"), raw=raw, scale=c.get("scale"), offset=c.get("offset"), range=c.get("range"), note=c.get("note"),
+                           rules=[rule_text(r) + f" [{r['level']}]" for r in c.get("rules", [])],
+                           history=f"{len(h)} values over {span / 60:.0f} min" + (f", {fmt(rng[0])} to {fmt(rng[1])}" if rng else ""),
+                           change={k: v for k, v in ch.items()},
+                           modes={k: m.get("value") for k, m in modes.items()}))
+            if ch:   # the page shows it under the value: change over 10 s, 1 min, 10 min (moving averages)
+                d = int(c.get("digits", 2))
+                sig = lambda v: "–" if v is None else (f"{0:.{d}f}" if round(v, d) == 0 else f"{v:+.{d}f}")   # no "-0.0"
+                it["trend"] = " · ".join(f"Δ{k} {sig(v)}" for k, v in ch.items())
+            out.append(it)
         for src in PLC_INPUTS:
             if src in used or f"plc.{src}" in L.get("unused", []):
                 continue

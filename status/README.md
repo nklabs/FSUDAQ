@@ -48,4 +48,8 @@ Saving writes `status/limits.json` and appends the whole set with the time to
 values for an hour (more if a rule looks further back) in memory: after a restart, a change rule
 sees only what came since. A change of an input's source or scaling starts its history again.
 
+Each named input also shows its change over 10 s, 1 min and 10 min (Δ10s, Δ1m, Δ10m), each the mean of the
+latest 4 / 12 / 60 s against the mean of the same span one interval earlier, so a noisy reading does not
+swing it; "–" until the history reaches back far enough (after a restart: 14 s, 72 s, 11 min).
+
 Tests: `python3 tests/test_status.py`.
