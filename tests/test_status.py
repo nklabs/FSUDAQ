@@ -199,7 +199,7 @@ def scenario_changes(tmp):
     ch = it["details"]["change"]
     for label, want in (("10s", 0.1), ("1m", 0.6), ("10m", 6.0)):
         good &= check(ch[label] is not None and abs(ch[label] - want) < 0.01 * want, f"change over {label}: {ch[label]}, expected {want}")
-    good &= check(it["trend"].startswith("Δ10s +0.100 · Δ1m +0.600 · Δ10m +6.000"), f"trend line: {it.get('trend')}")
+    good &= check(it["trend"] == [["Δ10s", "+0.100"], ["Δ1m", "+0.600"], ["Δ10m", "+6.000"]], f"trend: {it.get('trend')}")
     good &= check("trend" not in find(m, "Trackers", "Tracker temperatures"), "a trend on the collapsed tracker temperatures")
     if good:
         ok("0.1 / 0.6 / 6.0 psig over 10 s / 1 min / 10 min from a 0.01 psig/s ramp under noise; '–' until each interval is covered")

@@ -12,12 +12,12 @@
   @media (prefers-color-scheme: dark) { :root { --bg:#121519; --card:#1b1f25; --fg:#e4e8ec; --muted:#98a1ab; --soft:#7c858f; --line:#2a3038;
           --info:#7c858f; --idle:#4b95e8; } }
   * { box-sizing:border-box; }
-  body { margin:0; padding:16px 20px 32px; background:var(--bg); color:var(--fg); font:12.5px/1.5 "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace; }
+  body { margin:0; padding:10px 16px 12px; background:var(--bg); color:var(--fg); font:12px/1.4 "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace; }
   button { font-family:inherit; }
   @keyframes pulse { 50% { opacity:.55; } }
   @keyframes blink { 50% { filter:brightness(.4) saturate(.6); box-shadow:inset 0 2px 6px rgba(0,0,0,.6); } }
   /* ------------------------------------------------ the control panel header: steel plate, readouts, pilot lamps */
-  .panel { position:relative; margin-bottom:16px; padding:14px 22px 18px; border-radius:10px; color:#e3e7eb;
+  .panel { position:relative; margin-bottom:12px; padding:10px 20px 12px; border-radius:10px; color:#e3e7eb;
            background:linear-gradient(180deg, #474d55 0%, #353a41 45%, #2b2f35 100%);
            border:1px solid #1a1d21; box-shadow:inset 0 1px 0 rgba(255,255,255,.12), inset 0 -2px 0 rgba(0,0,0,.25), 0 3px 8px rgba(0,0,0,.25); }
   .panel .screw { position:absolute; width:9px; height:9px; border-radius:50%; background:radial-gradient(circle at 35% 35%, #c9ced4, #6d737b 70%);
@@ -49,9 +49,9 @@
   #summary.critical { background:#2a0705; }
   #summary.stale { color:#9aa3ad; text-shadow:none; }
   /* the pilot lamps */
-  #overview { display:flex; flex-wrap:wrap; gap:16px 22px; justify-content:center; margin-top:16px; }
+  #overview { display:flex; flex-wrap:wrap; gap:10px 26px; justify-content:center; margin-top:10px; }
   #overview a { display:flex; flex-direction:column; align-items:center; gap:9px; text-decoration:none; width:104px; text-align:center; }
-  #overview .bezel { width:70px; height:70px; border-radius:50%; padding:6px;
+  #overview .bezel { width:46px; height:46px; border-radius:50%; padding:4px;
                      background:conic-gradient(from 210deg, #f2f4f6, #8e959d, #e1e4e8, #6c737b, #f2f4f6);
                      box-shadow:0 2px 4px rgba(0,0,0,.55), inset 0 0 0 1px rgba(0,0,0,.35); transition:transform .12s; }
   #overview a:hover .bezel { transform:scale(1.05); }
@@ -67,22 +67,25 @@
                    padding:3px 7px; border-radius:2px; background:#1c1f23; border:1px solid #0f1113; box-shadow:inset 0 1px 2px rgba(0,0,0,.6), 0 1px 0 rgba(255,255,255,.07); }
   @media (max-width: 480px) { #overview .bezel { width:54px; height:54px; padding:5px; } #overview a { width:80px; } .panel { padding:12px 14px 16px; } }
   /* the cards */
-  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(400px, 1fr)); gap:14px; align-items:start; }
+  .grid { column-width:460px; column-gap:12px; }   /* cards stacked in columns, top to bottom then left to right */
   @media (max-width: 480px) { .grid { grid-template-columns:1fr; } }
-  .card { background:var(--card); border-radius:10px; padding:12px 14px 8px; min-width:0; box-shadow:0 1px 2px rgba(0,0,0,.06), 0 0 0 1px var(--line); }
+  .card { break-inside:avoid; display:inline-block; width:100%; margin:0 0 12px; background:var(--card); border-radius:10px; padding:9px 12px 5px; min-width:0; box-shadow:0 1px 2px rgba(0,0,0,.06), 0 0 0 1px var(--line); }
   .card.dragging { opacity:.4; } .card.drop { outline:2px dashed var(--soft); outline-offset:2px; }
   .card.flash { outline:3px solid var(--idle); outline-offset:2px; }
   .card h2 { font-size:12px; font-weight:650; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:0 0 6px;
              display:flex; gap:8px; align-items:center; user-select:none; }
   .card h2 .grip { margin-left:auto; color:var(--soft); letter-spacing:-2px; opacity:0; transition:opacity .15s; }
   .card:hover h2 .grip { opacity:1; }
-  .row { display:grid; grid-template-columns:12px 160px 1fr auto; gap:10px; align-items:start; padding:6px 4px; border-top:1px solid var(--line); cursor:pointer; border-radius:4px; }
+  .row { display:grid; grid-template-columns:10px minmax(0, 170px) minmax(0, 1fr) auto; gap:8px; align-items:start; padding:2px 2px; border-top:1px solid var(--line); cursor:pointer; border-radius:4px; }
   .rows .row:first-child { border-top:none; }
   .row.dragging { opacity:.35; }
   .row:hover { background:color-mix(in srgb, var(--line) 55%, transparent); }
-  .name { font-weight:550; overflow-wrap:anywhere; } .text { color:var(--muted); overflow-wrap:anywhere; }
+  .name { font-weight:550; overflow-wrap:anywhere; min-width:0; } .text { color:var(--muted); overflow-wrap:anywhere; min-width:0; }
+  .text .main { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }   /* long texts: two lines; all of it when opened */
+  .row.open .text .main { display:block; -webkit-line-clamp:unset; }
   .age { color:var(--soft); font-size:11px; white-space:nowrap; }
-  .trend { display:block; font-size:10.5px; color:var(--soft); letter-spacing:.01em; margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .trend { grid-column:2 / -1; display:grid; grid-template-columns:repeat(3, 4.5ch 9ch); justify-content:start; column-gap:4px; font-size:10.5px; color:var(--soft); margin-top:-2px; font-variant-numeric:tabular-nums; }
+  .trend i { font-style:normal; } .trend b { font-weight:500; text-align:left; }   /* each value right after its label */
   body.retro .trend { color:#3e8f86; }
   .dot { width:10px; height:10px; border-radius:50%; margin-top:4px; background:var(--nodata); }
   .dot.ok { background:var(--ok); } .dot.info { background:var(--info); } .dot.idle { background:var(--info); } .dot.notice { background:var(--idle); } .dot.problem { background:var(--problem); } .dot.warn { background:var(--warn); }
@@ -95,7 +98,7 @@
   .details { grid-column:2 / -1; font:11px/1.4 ui-monospace, monospace; color:var(--muted); background:color-mix(in srgb, var(--line) 50%, transparent);
              border-radius:6px; padding:8px 10px; white-space:pre-wrap; overflow-wrap:anywhere; max-height:320px; overflow:auto; cursor:text; }
   .mode { font-size:10px; font-weight:600; text-transform:none; letter-spacing:0; border-radius:10px; padding:1px 8px; color:var(--muted); background:var(--line); }
-  footer { margin-top:18px; color:var(--soft); font-size:11px; line-height:1.6; }
+  footer { margin-top:4px; color:var(--soft); font-size:10.5px; line-height:1.5; }
   footer i { display:inline-block; width:8px; height:8px; border-radius:50%; margin:0 4px 0 10px; vertical-align:0; }
   /* ------------------------------------------------ the skin selector: a three-position panel switch */
   .skins { display:inline-flex; margin-right:6px; padding:2px; border-radius:5px; background:#0d0f11; border:1px solid #000;
@@ -127,7 +130,7 @@
   body.retro #summary { background:#071512; border-radius:14px; border:2px solid #2b2116; box-shadow:inset 0 0 18px rgba(57,255,136,.12), inset 0 2px 6px rgba(0,0,0,.9); }
   body.retro #overview .bezel { background:conic-gradient(from 210deg, #fff1cf, #a88a55, #f0dcae, #7a6238, #fff1cf); }
   body.retro #overview span { background:#2b2116; color:#ffd27a; border-color:#120d08; border-radius:8px; }
-  body.retro .card { border-radius:22px; padding:16px 18px 10px; background:radial-gradient(ellipse at 50% 40%, #10262b 0%, #0a1619 80%);
+  body.retro .card { border-radius:22px; padding:12px 16px 8px; background:radial-gradient(ellipse at 50% 40%, #10262b 0%, #0a1619 80%);
                      box-shadow:inset 0 0 40px rgba(0,0,0,.75), inset 0 0 0 2px #1d4a4a, 0 0 0 5px #2b2116, 0 0 0 7px #6b5a3c, 0 8px 18px rgba(0,0,0,.6); }
   body.retro .card h2 { color:#ffb000; text-shadow:0 0 8px rgba(255,176,0,.55); letter-spacing:.14em; }
   body.retro .name { color:#b8fff0; text-shadow:0 0 6px rgba(120,255,220,.35); }
@@ -142,7 +145,7 @@
   body.retro .mode { background:#123a3d; color:#ffb000; }
   body.retro .bar { background:#123a3d; } body.retro .bar b { background:#0c1a1f; }
   body.retro footer { color:#3e8f86; }
-  body.retro .grid { gap:26px; padding:0 7px; } body.retro .panel { margin:0 7px 26px; }
+  body.retro .grid { column-gap:24px; padding:0 7px; } body.retro .card { margin-bottom:22px; } body.retro .panel { margin:0 7px 20px; }
   /* ------------------------------------------------ the minimal skin: just the facts */
   body.minimal { --bg:#fff; --card:#fff; --fg:#111; --muted:#555; --soft:#999; --line:#eee; background:#fff; }
   @media (prefers-color-scheme: dark) { body.minimal { --bg:#000; --card:#000; --fg:#eee; --muted:#aaa; --soft:#666; --line:#1a1a1a; background:#000; } }
@@ -167,7 +170,7 @@
   body.minimal #overview .big.info, body.minimal #overview .big.idle, body.minimal #overview .big.nodata { --lamp:var(--info); } body.minimal #overview .big.notice { --lamp:var(--idle); } body.minimal #overview .big.problem { --lamp:var(--problem); }
   body.minimal #overview .bezel:has(.critical) { box-shadow:0 0 0 2px var(--bad); border-radius:50%; }
   body.minimal #overview span { background:none; border:none; box-shadow:none; padding:0; color:var(--muted); font-weight:500; letter-spacing:0; text-transform:none; font-size:12px; }
-  body.minimal .grid { gap:0 32px; }
+  body.minimal .grid { column-gap:32px; } body.minimal .card { margin-bottom:0; }
   body.minimal .card { background:none; box-shadow:none; border-radius:0; padding:14px 0 6px; }
   body.minimal .card h2 { letter-spacing:.05em; }
   body.minimal .row { border-top:none; padding:2px 0; }
@@ -187,7 +190,7 @@
 </section>
 <div class="grid" id="grid"></div>
 <footer><i style="background:var(--ok);margin-left:0"></i>as it should be<i style="background:var(--info)"></i>a plain fact, not running, or no data<i style="background:var(--idle)"></i>to read<i style="background:var(--problem)"></i>data problem (not safety)<i style="background:var(--warn)"></i>safety warning<i style="background:var(--bad)"></i>safety alarm (flashing; a ring: act now)<br>
-Click a line for what is behind it. The cards follow the lamps; drag a line within its card to rearrange (kept in this browser; "reset lines" undoes it). Read-only: FSUDAQ, the online dashboard and pion-ros are not changed from here.</footer>
+Click a line for the rest of it; drag a line within its card to move it. Read-only.</footer>
 <script>
 const ORDER = ['Cherenkov', 'DAQ', 'Online analysis', 'Trackers', 'PLC', 'ROS'];   // the lamps and the cards, always in this order
 const RANK = {info:0, idle:0, ok:1, nodata:2, notice:3, problem:4, warn:5, bad:6, critical:7};   // yellow, red: safety only; pink: a data problem; blue: to read
@@ -209,14 +212,16 @@ function cardFor(g){
   c.innerHTML = '<h2><span class="dot"></span><span class="title"></span><span class="m"></span></h2><div class="rows"></div>';   // cards stay in the lamps' order
   return (cards[g] = c);
 }
+// change over 10 s, 1 min, 10 min in fixed columns, so they line up from line to line
+const trendHTML = t => Array.isArray(t) && t.length ? `<small class="trend">${t.map(([k, v])=>`<i>${esc(k)}</i><b>${esc(v)}</b>`).join('')}</small>` : '';
 function rowHTML(g, it){
   const key = g + '/' + it.name;
   let bar = '';
   if(it.bar){ const u = Math.max(0, Math.min(1, it.bar.used));
     bar = `<div class="bar" title="${(100*u).toFixed(1)} % used"><i class="${it.level}" style="width:${(100*u).toFixed(2)}%"></i>` +
           (it.bar.marks||[]).filter(m=>m>0 && m<1).map(m=>`<b style="left:${(100*m).toFixed(2)}%"></b>`).join('') + '</div>'; }
-  return `<div class="row" draggable="true" data-key="${esc(key)}" data-name="${esc(it.name)}"><span class="dot ${it.level}" title="${it.level}"></span><span class="name">${esc(it.name)}</span>` +
-         `<span class="text">${esc(it.text)}${it.trend ? `<small class="trend">${esc(it.trend)}</small>` : ''}</span><span class="age">${it.age_s!=null && it.age_s>5 ? ago(it.age_s)+' old' : ''}</span>` + bar +
+  return `<div class="row${open.has(key) ? ' open' : ''}" draggable="true" data-key="${esc(key)}" data-name="${esc(it.name)}"><span class="dot ${it.level}" title="${it.level}"></span><span class="name">${esc(it.name)}</span>` +
+         `<span class="text"><span class="main" title="${esc(it.text)}">${esc(it.text)}</span></span><span class="age">${it.age_s!=null && it.age_s>5 ? ago(it.age_s)+' old' : ''}</span>` + trendHTML(it.trend) + bar +
          (open.has(key) ? `<div class="details">${esc(detailText(it.details)) || '(nothing more)'}</div>` : '') + '</div>';
 }
 function render(S){

@@ -491,7 +491,7 @@ class Monitor:
             if ch:   # the page shows it under the value: change over 10 s, 1 min, 10 min (moving averages)
                 d = int(c.get("digits", 2))
                 sig = lambda v: "–" if v is None else (f"{0:.{d}f}" if round(v, d) == 0 else f"{v:+.{d}f}")   # no "-0.0"
-                it["trend"] = " · ".join(f"Δ{k} {sig(v)}" for k, v in ch.items())
+                it["trend"] = [[f"Δ{k}", sig(v)] for k, v in ch.items()]   # the page lines these up in columns
             out.append(it)
         for src in PLC_INPUTS:
             if src in used or f"plc.{src}" in L.get("unused", []):
