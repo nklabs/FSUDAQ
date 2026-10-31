@@ -79,7 +79,7 @@
 <footer><i style="background:var(--ok);margin-left:0"></i>as it should be<i style="background:var(--idle)"></i>not running<i style="background:var(--info)"></i>a plain fact<i style="background:var(--nodata)"></i>no data<i style="background:var(--warn)"></i>look at it<i style="background:var(--bad)"></i>wrong<i style="background:var(--crit)"></i>flashing: act now<br>
 Click a line for what is behind it. Drag a card by its title, or a line within its card, to rearrange (kept in this browser; "reset layout" undoes it). Read-only: FSUDAQ, the online dashboard and pion-ros are not changed from here.</footer>
 <script>
-const ORDER = ['DAQ', 'Boards', 'Online analysis', 'LED trigger', 'PLC', 'Cherenkov', 'Trackers', 'ROS'];
+const ORDER = ['Cherenkov', 'DAQ', 'Online analysis', 'Trackers', 'Boards', 'LED trigger', 'PLC', 'ROS'];   // the big circles always; the cards until dragged
 const RANK = {info:0, idle:0, ok:1, nodata:2, warn:3, bad:4, critical:5};
 const KEY = 'status-card-order', ROWKEY = 'status-row-order';   // ROWKEY: group -> line names in the order dragged to
 const esc = t => String(t ?? '').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -132,8 +132,9 @@ function render(S){
   for(const it of S.items) (groups[it.group] = groups[it.group] || []).push(it);
   const names = order(Object.keys(groups)), modes = S.modes || {};
   const worstOf = g => groups[g].reduce((w,x)=>RANK[x.level]>RANK[w]?x.level:w, groups[g][0].level);
-  // the big picture: one big circle per card, in the cards' order
-  document.getElementById('overview').innerHTML = names.map(g =>
+  // the big picture: one big circle per card, always in the fixed ORDER (dragging the cards does not move them)
+  const fixed = Object.keys(groups).sort((a,b)=>{ const ia=ORDER.indexOf(a), ib=ORDER.indexOf(b); return (ia<0?99:ia)-(ib<0?99:ib) || a.localeCompare(b); });
+  document.getElementById('overview').innerHTML = fixed.map(g =>
     `<a href="#" data-go="${esc(g)}" title="${esc(g)}: ${worstOf(g)}"><div class="big ${worstOf(g)}"></div><span>${esc(g)}</span></a>`).join('');
   for(const g of Object.keys(cards)) if(!groups[g]){ cards[g].remove(); delete cards[g]; }
   names.forEach((g, i)=>{
