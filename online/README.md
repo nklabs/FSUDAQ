@@ -21,7 +21,8 @@ zoom), a PSD map ((Qlong − Qshort)/Qlong against Qlong), time since the previo
 to a reference channel and a rate spectrum; plus every channel's pulse height side by side.
 
 The **Run and LED trigger** card shows FSUDAQ's run file (`<run folder>_run.json`, README
-"Data folder"), read-only: start, stop, the LED trigger's delay and hold, each LED command
+"Data folder"), read-only: start, stop, the boards' clock (PLL) lock at both (a loss shown at
+the top too), the LED trigger's delay and hold, each LED command
 with the PLC's answer, and the FSUDAQ commit. The LED is set in FSUDAQ, not here. The rate
 plots mark when FSUDAQ sent the LED commands (dashed lines; placed assuming the boards'
 clocks start at 0 at Start, and good to tens of ms: the LED's own hits give the exact

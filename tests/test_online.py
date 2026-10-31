@@ -822,6 +822,7 @@ def scenario_run_file(tmp):
     run = {"format": "FSUDAQ run file 1", "run": 7, "prefix": "run", "folder": folder,
            "start": {"time": "2026-10-31T12:00:00.000+01:00", "comment": "<b>beam</b> on"}, "stop": None, "led": led,
            "run_control": {}, "fsudaq": {"source": "feature/led-trigger 0123abc"},
+           "clock": {"start": {"checked": "2026-10-31T12:00:00.000+01:00", "unlocked": [], "lost_since_last_check": []}, "note": "..."},
            "boards": [{"serial": s, "settings": {"0x8000 Config": "0x00000010 16"}} for s in SERIALS]}
 
     def write():
@@ -831,7 +832,8 @@ def scenario_run_file(tmp):
     r = online.state()["run_file"]
     good &= check(r and r["run"] == 7 and r["boards"] == len(SERIALS) and r["stop"] is None and r["led"]["enabled"]
                   and r["led"]["delay_s"] == 5.0 and r["led"]["events"] == [] and r["source"] == "feature/led-trigger 0123abc"
-                  and "settings" not in json.dumps(r), f"run file at the start: {r}")
+                  and "settings" not in json.dumps(r) and r["clock"]["start"]["lost_since_last_check"] == [] and r["clock"]["stop"] is None,
+                  f"run file at the start: {r}")
     led["events"].append({"what": "on", "command": "slowtronics,dq1,on", "sent": "2026-10-31T12:00:05.003+01:00", "run_ms": 5003,
                           "answered": None})
     write()
@@ -841,12 +843,14 @@ def scenario_run_file(tmp):
     led["events"][0].update(answered="2026-10-31T12:00:05.020+01:00", reply="DQ1,ON", ok=True)
     led["events"].append({"what": "off", "command": "slowtronics,dq1,off", "sent": "2026-10-31T12:00:09.000+01:00", "run_ms": 9000,
                           "answered": "2026-10-31T12:00:12.000+01:00", "reply": "", "ok": False, "error": "no answer from http://romulus:8770/command"})
-    run["stop"] = {"time": "2026-10-31T12:00:09.000+01:00", "run_ms": 9000, "comment": "stop", "problems": [], "bytes_saved": {}}
+    run["stop"] = {"time": "2026-10-31T12:00:09.000+01:00", "run_ms": 9000, "comment": "stop", "problems": [], "bytes_saved": {},
+                   "clock": {"checked": "2026-10-31T12:00:09.100+01:00", "unlocked": [], "lost_since_last_check": ["Digi-1443"]}}
     write()
     st = online.state()
     r = st["run_file"]
     good &= check(r["stop"] == {"time": "2026-10-31T12:00:09.000+01:00", "run_ms": 9000, "comment": "stop", "problems": []}
-                  and [e["ok"] for e in r["led"]["events"]] == [True, False] and "no answer" in r["led"]["events"][1]["error"],
+                  and [e["ok"] for e in r["led"]["events"]] == [True, False] and "no answer" in r["led"]["events"][1]["error"]
+                  and r["clock"]["stop"]["lost_since_last_check"] == ["Digi-1443"],
                   f"run file at the stop: {r}")
     json.dumps(st, allow_nan=False)
     with open(path, "w") as f:

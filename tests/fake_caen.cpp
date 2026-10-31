@@ -43,6 +43,8 @@ struct Board {
   std::chrono::steady_clock::time_point flushAt{};
   int readDelayUs = 0;                   // time a ReadData with data takes
   uint32_t dropWrite = 0;                // a write to this address is lost
+  bool pllLocked = true;                 // 0x8104 bit 7
+  bool pllLost = false;                  // 0x8178 bit 4: the lock was lost since the register was last read (cleared by the read)
   std::shared_ptr<std::atomic<bool>> hang = std::make_shared<std::atomic<bool>>(false);  // ReadData blocks (set from the test thread)
   std::shared_ptr<std::atomic<bool>> readFail = std::make_shared<std::atomic<bool>>(false);
   std::shared_ptr<std::atomic<bool>> stopReadFail = std::make_shared<std::atomic<bool>>(false);
@@ -146,7 +148,7 @@ void ResetRegisters(Board & b) {
 uint32_t Read(Board & b, uint32_t a) {
   if( a == 0x8104 ){
     uint32_t extClock = (Read(b, 0x8100) >> 6) & 1;
-    return (Settling(b) ? 0 : (1u << 8)) | (1u << 7) | (extClock << 5)
+    return (Settling(b) ? 0 : (1u << 8)) | (b.pllLocked ? (1u << 7) : 0) | (extClock << 5)
            | (b.st.running ? (1u << 2) : 0) | (b.st.aggAcquired > b.st.aggRead ? (1u << 3) : 0);
   }
   if( a >= 0x1000 && a < 0x2000 && (a & 0xFF) == 0x88 ){   // channel status: bit 2 = SPI bus busy, bit 3 = ADC calibration done
@@ -157,6 +159,7 @@ uint32_t Read(Board & b, uint32_t a) {
     bool calibrated = now >= b.calibratingUntil && !(b.fail == "calibrate" && b.st.calibrations > 0);
     return (v & ~0xCu) | (busy ? 0x4u : 0) | (calibrated ? 0x8u : 0);
   }
+  if( a == 0x8178 ){ uint32_t v = b.pllLost ? 0x10u : 0; b.pllLost = false; return v; }
   if( IsReadOnly(a) ){
     unsigned short i = ImageIndex(a);
     return i < b.image.size() ? b.image[i] : 0;
@@ -381,6 +384,11 @@ extern "C" int fake_caen_is_hung(int serial) {
 extern "C" void fake_caen_drop_write(int serial, uint32_t address) {
   Board * b = FromSerial(serial);
   if( b ) b->dropWrite = address;
+}
+
+extern "C" void fake_caen_set_pll(int serial, int locked, int lost) {
+  Board * b = FromSerial(serial);
+  if( b ){ b->pllLocked = locked; if( lost ) b->pllLost = true; }
 }
 
 //======================================================================= CAEN API

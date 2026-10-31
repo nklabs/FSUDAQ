@@ -18,7 +18,11 @@ upstream that matter at the console:
   is read out to the end before the files close. A board that stops answering or a file that cannot
   be written stops the run with one alarm, and the stop comment in RunTimeStamp says why. Timed and
   repeated runs: run length, repeat and pause on the main window. Ctrl-C, kill, a closed terminal or
-  closing the window stop a run properly. Start the program with `./FSUDAQ` (log in log/) or
+  closing the window stop a run properly. **Board clocks:** each board's PLL lock (0x8104 bit 7) and a
+  lock lost since the last check (0x8178 bit 4) are read after the open, at Start and at Stop (never
+  during a run) and shown on the main window. A board not locked refuses Start; one that lost its lock
+  and locked again starts with a warning (its 16 ns phase may have changed); a loss during a run is a
+  stop problem. Both are in the run file (`clock`, `stop.clock`) and on the dashboard. Start the program with `./FSUDAQ` (log in log/) or
   `./FSUDAQ-gdb` (backtrace on a crash).
 - **Online dashboard** (online/README.md) instead of the online histograms and analyzers.
 - **Setup and tests:** `./install.sh --check` reports what is missing, `./install.sh` installs it;

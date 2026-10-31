@@ -66,6 +66,9 @@ size_t fake_caen_handed_out(int serial, const uint32_t ** words);
 void fake_caen_fail(int serial, const char * what);
 // A write to this address returns success but is lost (a write dropped on the link); 0 = none.
 void fake_caen_drop_write(int serial, uint32_t address);
+// The board's PLL: locked or not (0x8104 bit 7); lost = 1 sets 0x8178 bit 4 (a lock loss since the last
+// read of 0x8178, which clears it). Boards start locked, with no loss.
+void fake_caen_set_pll(int serial, int locked, int lost);
 // A DT5730 whose PLL reference changes (0x8100 bit 6, or a reset while on CLK-IN) is settling for
 // this long: 0x8104 shows it not ready, and any access but the status registers (0x8104, 0xEF04,
 // 0x8178) hangs it for good, like the boards at PSI on 27 Oct 2026. Default 30 ms.

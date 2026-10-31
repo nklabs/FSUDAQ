@@ -404,6 +404,17 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
 
     //------------------------------------------
     rowID ++;
+    QLabel * lbPll = new QLabel("Board clocks : ", this);
+    lbPll->setAlignment(Qt::AlignRight | Qt::AlignCenter);
+    lbPllStatus = new QLabel("not checked (no boards open)", this);
+    lbPllStatus->setToolTip("Each board's PLL locked to its clock (Acquisition Status 0x8104 bit 7), and whether the lock was lost since the last check "
+                            "(Board Failure Status 0x8178 bit 4). Checked after the open, at Start and at Stop, never during a run. "
+                            "A board that lost its lock may come back a 16 ns clock cycle off against the others.");
+    layout->addWidget(lbPll, rowID, 0);
+    layout->addWidget(lbPllStatus, rowID, 1, 1, 7);
+
+    //------------------------------------------
+    rowID ++;
     QLabel * lbComment = new QLabel("Run Comment : ", this);
     lbComment->setAlignment(Qt::AlignRight | Qt::AlignCenter);
 
@@ -1077,6 +1088,7 @@ void FSUDAQ::OpenDigitizers(){
   }
 
   LogMsg("====== <font style=\"color: blue;\"><b>" + QString("Done. Opened %1 digitizer(s).").arg(nDigi) + "</b></font> =====");
+  CheckPLL("after the open");
   if( !openedWithSettings ) LogMsg("<font style=\"color: orange;\">Opened without settings files: the boards keep their registers (apart from what the CAEN library sets when it opens them).</font>");
   if( !settingsProblems.isEmpty() ){
     QStringList notProgrammed = BoardsNotProgrammed();
@@ -1100,6 +1112,8 @@ void FSUDAQ::OpenDigitizers(){
 
 void FSUDAQ::CloseDigitizers(){
   LogMsg("FSUDAQ::Closing Digitizer(s)....");
+  lbPllStatus->setText("not checked (no boards open)");
+  lbPllStatus->setStyleSheet("");
 
   if( scope ) {
     scope->close();
@@ -1813,6 +1827,17 @@ void FSUDAQ::StartACQ(){
     return;
   }
 
+  // the boards' clocks: a board not locked now would take data on a time base of its own
+  pllAtStart = CheckPLL("at Start");
+  if( !pllAtStart.unlocked.isEmpty() ){
+    LogMsg("<font style=\"color: red;\">Run not started: " + pllAtStart.unlocked.join(", ") + " not locked to the clock (PLL).</font>");
+    QMessageBox::warning(this, "Run not started", pllAtStart.unlocked.join(", ") + (pllAtStart.unlocked.size() == 1 ? " is" : " are") +
+                         " not locked to the clock (PLL): its times would not match the other boards'.\n\nCheck the clock cables, then press Start again.");
+    return;
+  }
+  if( !pllAtStart.lost.isEmpty() ) LogMsg("<font style=\"color: red;\">The run starts: " + pllAtStart.lost.join(", ") +
+                                          " locked again, but its 16 ns phase against the other boards may have changed (the LED hits show it).</font>");
+
   const bool save = chkSaveData->isChecked();
 
   if( save ){
@@ -2093,6 +2118,9 @@ void FSUDAQ::StopACQ(){
     LogMsg("Digi-" + QString::number(digi[i]->GetSerialNumber()) + " ACQ is stopped." );
   }
   inDataRun = false;
+  const PllCheck pllAtStop = CheckPLL("at Stop");
+  for( const QString & b : pllAtStop.lost ) stopProblems << b + " lost its clock lock (PLL) during the run: its times may be a clock cycle (16 ns) off against the other boards from then on.";
+  for( const QString & b : pllAtStop.unlocked ) if( !pllAtStop.lost.contains(b) ) stopProblems << b + " is not locked to the clock (PLL) at the stop.";
   const qint64 runMs = runClock.isValid() ? runClock.elapsed() : -1;
   StopRunClock();   // the acquisition time ends here, not after the comment dialog
   EndLedCycle();
@@ -2147,6 +2175,7 @@ void FSUDAQ::StopACQ(){
       {"run_ms", runMs},
       {"comment", stopComment},
       {"problems", QJsonArray::fromStringList(failures)},
+      {"clock", PllJson(pllAtStop)},
       {"bytes_saved", files},
     };
     SaveRunFile();
@@ -3205,6 +3234,44 @@ void FSUDAQ::LogMsg(QString msg){
 }
 
 //***************************************************************
+//*************** board clocks
+FSUDAQ::PllCheck FSUDAQ::CheckPLL(const QString & when){
+  PllCheck p;
+  if( digi == nullptr ) return p;
+  p.time = Iso(QDateTime::currentDateTime());
+  p.done = true;
+  for( unsigned int i = 0; i < nDigi; i++ ){
+    if( digi[i]->IsBoardDisabled() || digi[i]->IsRunning() || (i < boardStuck.size() && boardStuck[i]) ) continue;
+    digiMTX[i].lock();
+    const uint32_t acq = digi[i]->ReadRegister(DPP::AcquisitionStatus_R, 0, false);
+    const uint32_t fail = digi[i]->ReadRegister(DPP::BoardFailureStatus_R, 0, false);   // reading clears the loss bit
+    digiMTX[i].unlock();
+    const QString name = "Digi-" + QString::number(digi[i]->GetSerialNumber());
+    if( !((acq >> 7) & 1) ) p.unlocked << name;
+    if( (fail >> 4) & 1 ) p.lost << name;
+  }
+  const QString at = " (" + when + ", " + QDateTime::currentDateTime().toString("hh:mm:ss") + ")";
+  if( p.unlocked.isEmpty() && p.lost.isEmpty() ){
+    lbPllStatus->setText("all locked" + at);
+    lbPllStatus->setStyleSheet("color: green;");
+    return p;
+  }
+  QStringList parts;
+  if( !p.unlocked.isEmpty() ) parts << "NOT LOCKED: " + p.unlocked.join(", ");
+  if( !p.lost.isEmpty() ) parts << "lost the lock since the last check: " + p.lost.join(", ");
+  lbPllStatus->setText(parts.join("; ") + at);
+  lbPllStatus->setStyleSheet("color: red; font-weight: bold;");
+  LogMsg("<font style=\"color: red;\">Board clocks " + when + ": " + parts.join("; ") + ". Check the clock cables.</font>");
+  return p;
+}
+
+QJsonObject FSUDAQ::PllJson(const PllCheck & p){
+  if( !p.done ) return QJsonObject();
+  return QJsonObject{{"checked", p.time}, {"unlocked", QJsonArray::fromStringList(p.unlocked)},
+                     {"lost_since_last_check", QJsonArray::fromStringList(p.lost)}};
+}
+
+//***************************************************************
 //*************** LED trigger
 void FSUDAQ::EnableLedControls(bool enable){   // enable: no run going; the delay and hold only matter when the LED is enabled
   chkLed->setEnabled(enable);
@@ -3376,6 +3443,8 @@ void FSUDAQ::StartRunFile(const QString & runDir, const QString & runIDStr){
     {"prefix", prefix},
     {"folder", runDir},
     {"start", QJsonObject{{"time", Iso(QDateTime::currentDateTime())}, {"comment", startComment}}},
+    {"clock", QJsonObject{{"start", PllJson(pllAtStart)},
+                          {"note", "each board's PLL lock (0x8104 bit 7) and a lock lost since the previous check (0x8178 bit 4), at the start; the stop's is in stop.clock"}}},
     {"led", QJsonObject{
       {"enabled", chkLed->isChecked()},
       {"delay_s", sbLedDelaySec->value()},
@@ -3433,6 +3502,7 @@ void FSUDAQ::SaveRunFile(){
     {"folder", runFileHead["folder"]},
     {"start", runFileHead["start"]},
     {"stop", runFileStop.isEmpty() ? QJsonValue() : QJsonValue(runFileStop)},
+    {"clock", runFileHead["clock"]},
     {"led", led},
     {"run_control", runFileHead["run_control"]},
     {"fsudaq", runFileHead["fsudaq"]},

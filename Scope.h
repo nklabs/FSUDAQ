@@ -150,6 +150,8 @@ private:
   bool refreshPaused;
   bool singleArmed;
   double dataYMin, dataYMax, dataXMax;   // of the trace on the plot, for the automatic range
+  bool autoHeld = false;                 // Auto Y: the held range below is in use
+  double heldLow = 0, heldHigh = 1;      // Auto Y: grows at once to fit a waveform, shrinks back slowly
 
   //---- widgets
   RComboBox * cbScopeDigi;

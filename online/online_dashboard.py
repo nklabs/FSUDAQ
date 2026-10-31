@@ -1208,7 +1208,8 @@ def read_run_file(folder):
                             relay=led.get("relay"),
                             events=[{k: e.get(k) for k in ("what", "command", "sent", "run_ms", "reply", "ok", "switched", "error")}
                                     for e in led.get("events") or []]),
-                   source=(d.get("fsudaq") or {}).get("source"), boards=len(d.get("boards") or []))
+                   source=(d.get("fsudaq") or {}).get("source"), boards=len(d.get("boards") or []),
+                   clock=dict(start=(d.get("clock") or {}).get("start") or None, stop=(stop or {}).get("clock") or None))
     except (OSError, ValueError, AttributeError, TypeError) as ex:
         out = dict(file=os.path.basename(path), error=f"cannot read it: {ex}")
     _RUN_FILES.clear()                  # one run at a time

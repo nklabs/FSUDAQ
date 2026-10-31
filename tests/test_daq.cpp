@@ -1214,6 +1214,52 @@ public:
           "after a restart: LED %d, delay %g, hold %g, relay %s", w->chkLed->isChecked(), w->sbLedDelaySec->value(), w->sbLedHoldSec->value(), qPrintable(w->ledRelayURL));
     if( nFail == nFail0 ) OK("on at 0.3 s and off at 0.8 s, or off at the stop, or nothing before the delay; refused and unanswered commands logged, the run goes on; run file with settings, LED events and %d boards' registers; settings kept", (int) boards.size());
   }
+
+  void BoardClocks(){
+    printf("== board clocks (PLL): checked after the open, at Start and at Stop; a board not locked refuses Start; a loss in the run is a stop problem\n");
+    int nFail0 = nFail;
+    NewWorkDir(); AddBoards(3, 1); NewFSUDAQ();
+    Open();
+    w->chkSaveData->setChecked(true);
+    CHECK(w->lbPllStatus->text().startsWith("all locked"), "after the open: \"%s\"", qPrintable(w->lbPllStatus->text()));
+    const int sn = w->digi[1]->GetSerialNumber();
+    const QString name = "Digi-" + QString::number(sn);
+
+    // not locked now: no run, one dialog naming the board
+    dialogs.clear();
+    fake_caen_set_pll(sn, 0, 0);
+    w->AutoRun();
+    CHECK(!w->inDataRun && dialogs.size() == 1 && dialogs[0].contains(name) && dialogs[0].contains("not locked"),
+          "board not locked: run %d, dialogs %s", w->inDataRun, qPrintable(dialogs.join(" | ")));
+    CHECK(w->lbPllStatus->text().contains("NOT LOCKED: " + name), "status \"%s\"", qPrintable(w->lbPllStatus->text()));
+
+    // locked again after a loss: the run starts with a warning; a loss in the run: one dialog at the stop, both in the run file
+    dialogs.clear();
+    fake_caen_set_pll(sn, 1, 1);
+    w->AutoRun();
+    CHECK(w->inDataRun && dialogs.isEmpty(), "locked again: run %d, dialogs %s", w->inDataRun, qPrintable(dialogs.join(" | ")));
+    const QString runDir = w->RunFolder();
+    Pump(200);
+    fake_caen_set_pll(sn, 1, 1);
+    w->StopPressed();
+    CHECK(dialogs.size() == 1 && dialogs[0].contains(name + " lost its clock lock"), "lost in the run: dialogs %s", qPrintable(dialogs.join(" | ")));
+    QJsonObject rf = RunFile(runDir, QFileInfo(runDir).fileName() + "_run.json");
+    const QJsonObject atStart = rf["clock"].toObject()["start"].toObject(), atStop = rf["stop"].toObject()["clock"].toObject();
+    CHECK(atStart["lost_since_last_check"].toArray() == QJsonArray({name}) && atStart["unlocked"].toArray().isEmpty()
+          && atStop["lost_since_last_check"].toArray() == QJsonArray({name}),
+          "run file clock: start %s, stop %s", QJsonDocument(atStart).toJson(QJsonDocument::Compact).constData(), QJsonDocument(atStop).toJson(QJsonDocument::Compact).constData());
+
+    // all well again: no dialog, all locked
+    dialogs.clear();
+    w->AutoRun();
+    Pump(200);
+    w->StopPressed();
+    CHECK(dialogs.isEmpty() && w->lbPllStatus->text().startsWith("all locked"), "a good run: dialogs %s, status \"%s\"",
+          qPrintable(dialogs.join(" | ")), qPrintable(w->lbPllStatus->text()));
+    w->CloseDigitizers();
+    CHECK(w->lbPllStatus->text().startsWith("not checked"), "after the close: \"%s\"", qPrintable(w->lbPllStatus->text()));
+    if( nFail == nFail0 ) OK("not locked: Start refused, named; lost and locked again: the run starts; lost in the run: one dialog; both in the run file; reset at the close");
+  }
 };
 
 int main(int argc, char ** argv){
@@ -1278,6 +1324,7 @@ int main(int argc, char ** argv){
   t.DataFileCannotGrow();
   t.ReadLongerThanBuffer();
   t.LedTriggerAndRunFile();
+  t.BoardClocks();
 
   delete t.w;
   QDir(t.work).removeRecursively();

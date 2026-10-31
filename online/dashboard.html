@@ -352,6 +352,11 @@ function banner(){
     for(const e of ev) if(e.ok===false)
       out.push(['bad', `LED ${esc(e.what)} failed: ${esc(e.error)}` + (e.what!=='off' ? '' : mayBeOn ?
         ' — the LED may still be on: switch it off with ros2 service call /plc/command (pion-ros README).' : ' (the LED was not switched on in this run)')]);
+    const CK = (S.run_file||{}).clock||{};
+    if(CK.stop && CK.stop.lost_since_last_check.length)
+      out.push(['bad', `Board clock lost during this run: ${esc(CK.stop.lost_since_last_check.join(', '))} — its times may be a 16 ns clock cycle off against the other boards from then on. Check the clock cables.`]);
+    if(CK.start && CK.start.lost_since_last_check.length)
+      out.push(['ph', `Board clock lost before this run and locked again: ${esc(CK.start.lost_since_last_check.join(', '))} — its 16 ns phase against the other boards may have changed (the LED hits show it).`]);
     if(S.warnings.length) out.push(['ph', `Placeholders (${S.warnings.length}): ` + S.warnings.join('; ') + ' — fill online/experiment.json.']);
     if(S.live_start) out.push(['', `Started while this run was going (${new Date(S.since_wall*1000).toLocaleTimeString()}): counts and histograms are from then on` +
       (S.early ? `; ${S.early.toLocaleString()} hits from before then reached the disk later (counted on the DAQ tab, not in the finder, not as late).` : '.')]);
@@ -483,6 +488,15 @@ function ledMarks(){
   return R.led.events.filter(e=>e.run_ms!=null && e.run_ms>=0 && e.ok!==false)
     .map(e=>({x:e.run_ms/1000 - S.t0_s, color:e.what==='on' ? LED_COLOR : css('--muted'), label:'LED '+e.what}));
 }
+// the boards' PLL lock at the start and at the stop (run file "clock", "stop.clock")
+function clockRow(C){
+  const one = (c, when) => !c ? '' : (!c.unlocked.length && !c.lost_since_last_check.length) ? `${when}: all locked` :
+    `${when}: ` + warn([c.unlocked.length ? 'not locked ' + esc(c.unlocked.join(', ')) : '',
+                        c.lost_since_last_check.length ? 'lost the lock ' + (when==='stop' ? 'during the run' : 'before') + ': ' + esc(c.lost_since_last_check.join(', ')) : '']
+                       .filter(Boolean).join('; '));
+  const parts = [one((C||{}).start, 'start'), one((C||{}).stop, 'stop')].filter(Boolean);
+  return parts.length ? parts.join(' · ') : 'not recorded (FSUDAQ before the clock check)';
+}
 function drawRun(){
   const row=(k,v)=>`<tr><td>${k}</td><td class="l">${v}</td></tr>`, R=S.run_file;
   const clock = t => t ? t.slice(11, 19) : '–';   // FSUDAQ's time of day, as in its log
@@ -502,6 +516,7 @@ function drawRun(){
     row('stopped', !st ? (going ? 'running' : 'no stop recorded (running, or FSUDAQ ended in the run)') :
         `${clock(st.time)} after ${fmt((st.run_ms||0)/1000, 1)} s` + (st.comment ? ` · "${esc(st.comment)}"` : '') +
         (st.problems && st.problems.length ? ' · ' + warn(esc([].concat(st.problems).join('; '))) : '')) +
+    row('board clocks', clockRow(R.clock)) +
     row('LED trigger', plan) +
     (L.enabled || L.events.length ? row('LED commands', cmds || (st ? 'none sent (the run ended before the delay)' : 'none sent yet')) : '') +
     row('FSUDAQ', esc(R.source || 'source not known'));

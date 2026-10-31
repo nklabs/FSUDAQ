@@ -259,6 +259,14 @@ private:
   void WaitForLed(int ms);       // closing: let a last "off" be answered
   void EnableLedControls(bool enable);
 
+  //@----- board clocks: each board's PLL locked to its clock (0x8104 bit 7), and a lock lost since the last check
+  //       (0x8178 bit 4); read after the open, at Start and at Stop only, never while a board runs
+  QLabel    * lbPllStatus;
+  struct PllCheck { QString time; QStringList unlocked, lost; bool done = false; };
+  PllCheck CheckPLL(const QString & when);
+  static QJsonObject PllJson(const PllCheck & p);
+  PllCheck pllAtStart;           // for the run file
+
   //@----- run file: <prefix>_<run>_run.json in the run folder, everything about the run that is not data
   QString runFilePath;           // empty: no saved run yet
   QJsonObject runFileHead;       // what is known at the start

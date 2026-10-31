@@ -173,7 +173,7 @@ Scope::Scope(Digitizer ** digi, unsigned int nDigi, ReadDataThread ** readDataTh
 
   connect(bnSingle, &QToolButton::clicked, this, [=](){ singleArmed = true; SetRefreshPaused(false); });
   connect(bnRefresh, &QToolButton::clicked, this, [=](){ singleArmed = false; SetRefreshPaused(!refreshPaused); });
-  connect(bnUnzoom, &QToolButton::clicked, this, [=](){ plot->zoomReset(); ApplyAutoRange(); });
+  connect(bnUnzoom, &QToolButton::clicked, this, [=](){ plot->zoomReset(); autoHeld = false; if( haveLastTrace ) DrawTrace(lastTrace, false); else ApplyAutoRange(); });
   connect(bnSnapshot, &QToolButton::clicked, this, &Scope::SaveSnapshot);
   connect(bnSaveTrace, &QToolButton::clicked, this, &Scope::SaveTraceCSV);
 
@@ -208,9 +208,10 @@ Scope::Scope(Digitizer ** digi, unsigned int nDigi, ReadDataThread ** readDataTh
 
   chkAutoY = new QCheckBox("Auto Y", this);
   chkAutoY->setChecked(false);   // the whole ADC range, steady; zoom with the mouse (an axis fitted to each waveform jumps)
-  chkAutoY->setToolTip("Fit the y axis to each waveform; off: the whole ADC range (zoom by dragging up or down over the plot).");
+  chkAutoY->setToolTip("Fit the y axis to the waveforms: it grows at once to fit a larger one and shrinks back slowly (about 7 s to halve the gap); "
+                       "double-click or Unzoom fits it to the current waveform again. Off: the whole ADC range (zoom by dragging up or down over the plot).");
   top->addWidget(chkAutoY);
-  connect(chkAutoY, &QCheckBox::toggled, this, [=](){ if( haveLastTrace ) DrawTrace(lastTrace, false); else ApplyAutoRange(); });
+  connect(chkAutoY, &QCheckBox::toggled, this, [=](){ autoHeld = false; if( haveLastTrace ) DrawTrace(lastTrace, false); else ApplyAutoRange(); });
 
   top->addStretch(1);
 
@@ -702,8 +703,16 @@ void Scope::DrawTrace(const ReadDataThread::ScopeTrace & trace, bool isNew){
   double low, high;
   if( chkAutoY->isChecked() ){
     const double span = std::max(yMax - yMin, 20 * ys);
-    low = yMin - 0.05 * span;
-    high = yMax + 0.05 * span;
+    const double fitLow = yMin - 0.05 * span, fitHigh = yMax + 0.05 * span;
+    if( !autoHeld ){
+      heldLow = fitLow; heldHigh = fitHigh; autoHeld = true;
+    }else{   // a larger waveform widens it at once; a new smaller one narrows it by 5 % of the gap (redraws only widen)
+      const double shrink = isNew ? 0.05 : 0;
+      heldLow  = fitLow  < heldLow  ? fitLow  : heldLow  + shrink * (fitLow - heldLow);
+      heldHigh = fitHigh > heldHigh ? fitHigh : heldHigh - shrink * (heldHigh - fitHigh);
+    }
+    low = heldLow;
+    high = heldHigh;
   }else{
     low = fullLow * ys;
     high = fullHigh * ys;
@@ -757,7 +766,8 @@ void Scope::DrawTrace(const ReadDataThread::ScopeTrace & trace, bool isNew){
 bool Scope::eventFilter(QObject * watched, QEvent * event){
   if( watched == plotView->viewport() && event->type() == QEvent::MouseButtonDblClick ){
     plot->zoomReset();
-    ApplyAutoRange();
+    autoHeld = false;
+    if( haveLastTrace ) DrawTrace(lastTrace, false); else ApplyAutoRange();
     return true;
   }
   return QMainWindow::eventFilter(watched, event);
@@ -788,7 +798,8 @@ void Scope::ClearTraces(){
   lastTrace = ReadDataThread::ScopeTrace();
 }
 
-void Scope::ClearPersistence(){
+void Scope::ClearPersistence(){   // also when the channel, board, unit or settings change: Auto Y starts again
+  autoHeld = false;
   for( int i = 0; i < MaxPersistTrace; i++ ){
     persistTrace[i]->clear();
     persistTrace[i]->setVisible(false);
