@@ -88,6 +88,8 @@ function drawChannels(){
     <div class="fields">
       <label>name<input class="wide" data-f="name" value="${esc(c.name)}"></label>
       <label>group (card on the status page)<input class="mid" data-f="group" value="${esc(c.group)}"></label>
+      <label title="unticked: shown as not connected (yellow) whatever it reads; an open thermocouple reads believable but meaningless values">connected
+        <input type="checkbox" data-f="connected"${c.connected===false?'':' checked'} style="width:18px;height:18px"></label>
       <label>PLC input<select data-f="source">${opt('', c.source||'', '(not assigned)')}${SOURCES.map(s=>opt(s, c.source, s.replace('plc.',''))).join('')}</select></label>
       <label>scale<input type="number" step="any" data-f="scale" value="${esc(c.scale)}"></label>
       <label>offset<input type="number" step="any" data-f="offset" value="${esc(c.offset)}"></label>
@@ -133,6 +135,7 @@ document.body.addEventListener('input', ev=>{
     if(a==='' && b==='') delete c.range; else c.range = [+a, +b];
     touch(); return;
   }
+  if(t.dataset.f==='connected'){ c.connected = t.checked; touch(); return; }
   if(t.dataset.f){
     const f = t.dataset.f;
     c[f] = ['scale','offset','digits'].includes(f) ? (t.value==='' ? 0 : +t.value) : (f==='source' && !t.value ? null : t.value);

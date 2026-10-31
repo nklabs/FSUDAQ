@@ -65,10 +65,12 @@ DEFAULT_LIMITS = {
     ] + [{"id": f"trumeter_{i - 4}", "name": f"Trumeter {i - 4}", "group": "PLC", "source": f"plc.ai{i}",
           "scale": 1.0, "offset": 0.0, "unit": "", "digits": 3, "range": [0, 5], "rules": []} for i in (5, 6, 7)]
       # two thermocouples per detector: tc0/1 tracker 0, tc2/3 tracker 1, tc4/5 tracker 2, tc6/7 the Cherenkov.
-      # An open input on this card reads a noisy staircase (about 120-520) or 3276.7: outside the range = not connected?
+      # An open input on this card reads a noisy staircase (about 120-520) or 3276.7, which looks like a real temperature:
+      # "connected" says which are plugged in; the others show as not connected whatever they read.
       + [{"id": f"tc{i}", "name": (f"Tracker {i // 2} temperature {'AB'[i % 2]}" if i < 6 else f"Cherenkov temperature {'AB'[i % 2]}") + f" (tc{i})",
           "group": "Trackers" if i < 6 else "Cherenkov", "source": f"plc.tc{i}",
-          "scale": 1.0, "offset": 0.0, "unit": "°C", "digits": 1, "range": [-40, 80], "rules": []} for i in range(8)],
+          "scale": 1.0, "offset": 0.0, "unit": "°C", "digits": 1, "range": [-50, 1300], "rules": [{"above": 80, "level": "bad"}],
+          "connected": i >= 6} for i in range(8)],   # tc0-tc5 read open inputs (31 Oct 2026): tick them on /limits when plugged in
     "unused": ["plc.ai3", "plc.ai4"],
     "daq": {"disk_warn_gb": 200, "disk_bad_gb": 50, "plc_stale_s": 10, "analysis_lag_warn_s": 30},
 }
@@ -100,6 +102,8 @@ def validate_limits(L: dict) -> list:
         for k in ("scale", "offset"):
             if not isinstance(c.get(k, 0), (int, float)) or not math.isfinite(c.get(k, 0)):
                 bad.append(f"{where}: {k} is not a number")
+        if not isinstance(c.get("connected", True), bool):
+            bad.append(f"{where}: connected must be true or false")
         rg = c.get("range")
         if rg is not None and not (isinstance(rg, list) and len(rg) == 2 and all(isinstance(x, (int, float)) for x in rg) and rg[0] < rg[1]):
             bad.append(f"{where}: range must be [min, max] with min < max")
@@ -448,6 +452,11 @@ class Monitor:
                 continue
             used.add(src)
             raw = None if plc is None or stale else plc.get(src)
+            if c.get("connected") is False:   # marked not plugged in: what it reads means nothing
+                out.append(item(c.get("group") or "Inputs", c["name"], "warn",
+                                "not connected" + (f"; reads {raw:.4g}" if raw is not None else ""),
+                                dict(source=c.get("source"), raw=raw, connected=False, hint="tick \"connected\" on the limits page once it is plugged in")))
+                continue
             value = None
             if raw is not None and not (src.startswith("tc") and raw >= TC_OPEN):
                 value = raw * c.get("scale", 1) + c.get("offset", 0)

@@ -131,12 +131,19 @@ def scenario_rules(tmp):
     # not assigned, and the unnamed inputs
     it = find(m, "Cherenkov", NAME["isobutane_2"])
     good &= check(it["level"] == "nodata" and "not assigned" in it["text"], f"unassigned: {it}")
-    good &= check(find(m, "Trackers", NAME["tc0"])["level"] == "nodata", "an open (3276.7) thermocouple judged")
-    src.plc["tc6"] = 20.6; src.plc["tc2"] = 305.4; clock.t += 2; m.step()       # connected; and an open input's staircase value
+    good &= check(find(m, "Cherenkov", NAME["tc7"])["level"] == "nodata", "a connected thermocouple reading 3276.7 (open) judged")
+    src.plc["tc6"] = 20.6; src.plc["tc2"] = 305.4; src.plc["tc0"] = 20.0; clock.t += 2; m.step()
     good &= check(find(m, "Cherenkov", NAME["tc6"])["level"] == "ok" and find(m, "Cherenkov", NAME["tc6"])["text"] == "20.6 °C",
                   f"Cherenkov thermocouple: {find(m, 'Cherenkov', NAME['tc6'])}")
-    it = find(m, "Trackers", NAME["tc2"])
-    good &= check(it["level"] == "warn" and "not connected?" in it["text"], f"thermocouple at 305 °C: {it}")
+    for tc in ("tc2", "tc0"):      # marked not connected: yellow whatever it reads (an open input's staircase, or room temperature)
+        it = find(m, "Trackers", NAME[tc])
+        good &= check(it["level"] == "warn" and it["text"].startswith("not connected"), f"unconnected {tc}: {it}")
+    src.plc["tc6"] = 80.0; clock.t += 2; m.step()
+    good &= check(find(m, "Cherenkov", NAME["tc6"])["level"] == "ok", f"80.0 C: {find(m, 'Cherenkov', NAME['tc6'])}")
+    src.plc["tc6"] = 85.0; clock.t += 2; m.step()
+    it = find(m, "Cherenkov", NAME["tc6"])
+    good &= check(it["level"] == "bad" and "> 80" in it["text"] and "outside" not in it["text"], f"85 C: {it}")
+    src.plc["tc6"] = 20.6
     good &= check(find(m, "PLC", "Trumeter 1") is not None, "Trumeters not on the PLC card")
     good &= check(find(m, "PLC inputs (not named)", "ai1") is None, "an assigned input also listed as not named")
     good &= check(find(m, "PLC inputs (not named)", "ai3") is None, "an unused input listed")
