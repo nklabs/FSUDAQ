@@ -1,6 +1,6 @@
 # Experiment status
 
-What is going on under the hood, on one page: a dot per item (green as it should be, grey a plain
+What is going on under the hood, on one page: a dot per item (green as it should be, blue not running, grey a plain
 fact, hollow no data, yellow look at it, red wrong, flashing act now), one line of text, and the
 details behind it on a click. Read-only: it never talks to the digitizers, and changes nothing in
 FSUDAQ, the online dashboard or pion-ros.
@@ -12,15 +12,17 @@ online dashboard):
 
     ssh -N -o LogLevel=QUIET -L 8060:localhost:8060 beamtime@129.129.141.162
 
-then http://localhost:8060/ (status) and http://localhost:8060/limits (limits and names).
+then http://localhost:8060/ (status) and http://localhost:8060/limits (limits and names). Cards move by dragging their
+title; the order is kept in the browser ("reset layout" restores it).
 
 | card | items | from |
 |---|---|---|
-| DAQ | FSUDAQ running, the last run (running, stopped, stopped with problems, no stop), board clocks, boards writing, disk, data rate | `/proc`, the newest run folder's `<run>_run.json`, the data path |
+| DAQ | FSUDAQ running, the last run (running, stopped, stopped with problems, no stop), board clocks, disk (with a bar), data rate | `/proc`, the newest run folder's `<run>_run.json`, the data path |
+| Boards | one dot per board: writing or silent while a run goes, its clock; model otherwise | online dashboard, run file |
 | Online analysis | the dashboard's status, health, lag; placeholders in `online/experiment.json` | `GET localhost:8050/state` |
 | LED trigger | enabled, the last command and the PLC's answer, the relay | run file, pion-ros |
-| PLC | heartbeat counting, status age, outputs | pion-ros `GET :8770/status` |
-| Cherenkov (and any group named on /limits) | each named input, judged by its rules | PLC inputs, `limits.json` |
+| PLC | heartbeat counting, status age, outputs, the Trumeters (ai5-ai7) | pion-ros `GET :8770/status` |
+| Cherenkov, Trackers (and any group named on /limits) | pressure (ai0), gas sensors (ai1, ai2), thermocouples (tc0/1 tracker 0, tc2/3 tracker 1, tc4/5 tracker 2, tc6/7 Cherenkov), each judged by its rules and expected range | PLC inputs, `limits.json` |
 | PLC inputs (not named) | the raw value of every input not named yet | PLC |
 | ROS | pion-ros answering, plc_status, rosbag2_recorder | pion-ros |
 
@@ -32,11 +34,14 @@ bad (big warning) or critical (massive warning) when the value is at or above, a
 number, or changes by at least an amount within a time; a rule can apply in one mode only. The
 modes (Cherenkov: normal / full of isobutane) are set there too.
 
-The defaults (inputs not assigned yet):
+The defaults (the PLC as labelled on 31 Oct 2026):
 
-- Isobutane monitors 1 and 2: at or above 5 %LEL warn, 10 bad, 100 critical.
-- Cherenkov pressure: above 2 psi warn, always; in "full of isobutane", also below 0.3 psi, or a
-  change of 0.05 psi or more within an hour.
+- Gas sensors (RKI M2A, ai1 and ai2; 100 %LEL = 1.6 % isobutane in air): at or above 5 %LEL warn, 10 bad,
+  100 critical; expected range 0-100.
+- Cherenkov pressure (WIKA WUC-10, ai0, psig): above 2 warn, always; in "full of isobutane", also below 0.3,
+  or a change of 0.05 or more within an hour; expected range -14.7 to 100.
+- Thermocouples (°C): expected range -40 to 80 (an open input reads a noisy staircase of 120-520, or 3276.7);
+  no rules yet. Trumeters (ai5-ai7): expected range 0-5. ai3 and ai4 unused.
 
 Saving writes `status/limits.json` and appends the whole set with the time to
 `status/limits_log.jsonl`, so what was in force when stays on record. The monitor keeps each input's

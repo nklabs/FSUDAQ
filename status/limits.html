@@ -93,7 +93,7 @@ function drawChannels(){
       <label>offset<input type="number" step="any" data-f="offset" value="${esc(c.offset)}"></label>
       <label>unit<input class="mid" style="width:70px" data-f="unit" value="${esc(c.unit)}"></label>
       <label>decimals<input type="number" min="0" max="6" style="width:60px" data-f="digits" value="${esc(c.digits)}"></label>
-      <label title="what the sensor can read; a value outside means wiring or scaling, not a reading">sensor range (blank: none)<span>
+      <label title="what a working sensor can read here; a value outside means not connected, wiring or scaling">expected range (blank: none)<span>
         <input type="number" step="any" style="width:75px" data-f="range0" value="${esc((c.range||[])[0])}"> to
         <input type="number" step="any" style="width:75px" data-f="range1" value="${esc((c.range||[])[1])}"></span></label>
       <span class="live" data-live="${i}">${esc(preview(c))}</span>

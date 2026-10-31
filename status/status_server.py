@@ -35,7 +35,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # summary order: the worst item names the page; info (a plain fact) and ok rank lowest
-RANK = {"info": 0, "ok": 1, "nodata": 2, "warn": 3, "bad": 4, "critical": 5}
+RANK = {"info": 0, "idle": 0, "ok": 1, "nodata": 2, "warn": 3, "bad": 4, "critical": 5}   # idle: blue, not running
 RULE_LEVELS = ("warn", "bad", "critical")
 PLC_INPUTS = [f"ai{i}" for i in range(8)] + [f"tc{i}" for i in range(8)]
 TC_OPEN = 3276.0          # a thermocouple input reads 3276.7 with nothing connected
@@ -62,11 +62,13 @@ DEFAULT_LIMITS = {
          "note": "100 %LEL = 1.6 % isobutane in air",
          "rules": [{"at_or_above": 5, "level": "warn"}, {"at_or_above": 10, "level": "bad"},
                    {"at_or_above": 100, "level": "critical"}]},
-    ] + [{"id": f"trumeter_{i - 4}", "name": f"Trumeter {i - 4}", "group": "Trumeters", "source": f"plc.ai{i}",
+    ] + [{"id": f"trumeter_{i - 4}", "name": f"Trumeter {i - 4}", "group": "PLC", "source": f"plc.ai{i}",
           "scale": 1.0, "offset": 0.0, "unit": "", "digits": 3, "range": [0, 5], "rules": []} for i in (5, 6, 7)]
-      + [{"id": f"tc{i}", "name": f"Thermocouple {i}", "group": "Temperatures", "source": f"plc.tc{i}",
-          "scale": 1.0, "offset": 0.0, "unit": "°C", "digits": 1, "rules": [],
-          "note": "reads about 120-520: probably °C"} for i in range(6)],
+      # two thermocouples per detector: tc0/1 tracker 0, tc2/3 tracker 1, tc4/5 tracker 2, tc6/7 the Cherenkov.
+      # An open input on this card reads a noisy staircase (about 120-520) or 3276.7: outside the range = not connected?
+      + [{"id": f"tc{i}", "name": (f"Tracker {i // 2} temperature {'AB'[i % 2]}" if i < 6 else f"Cherenkov temperature {'AB'[i % 2]}") + f" (tc{i})",
+          "group": "Trackers" if i < 6 else "Cherenkov", "source": f"plc.tc{i}",
+          "scale": 1.0, "offset": 0.0, "unit": "°C", "digits": 1, "range": [-40, 80], "rules": []} for i in range(8)],
     "unused": ["plc.ai3", "plc.ai4"],
     "daq": {"disk_warn_gb": 200, "disk_bad_gb": 50, "plc_stale_s": 10, "analysis_lag_warn_s": 30},
 }
@@ -157,7 +159,7 @@ def evaluate(channel: dict, value, history, modes: dict, now: float):
     level, why = "ok", []
     rg = channel.get("range")
     if rg and not (rg[0] <= value <= rg[1]):   # wiring or scaling, or a sensor past full scale: never lowers what the rules say
-        level, why = "warn", [f"outside the sensor's range {rg[0]:g} to {rg[1]:g}: check the wiring or the scaling"]
+        level, why = "warn", [f"outside {rg[0]:g} to {rg[1]:g}: not connected? (or wiring, scaling)"]
     for r in channel.get("rules", []):
         if any(modes.get(k, {}).get("value") != v for k, v in (r.get("when") or {}).items()):
             continue
@@ -269,7 +271,7 @@ class Monitor:
             p = procs[0]
             out.append(item(G, "FSUDAQ", "ok", f"running from {p['cwd']} (since {hms(p['started'])})", dict(processes=procs)))
         else:
-            out.append(item(G, "FSUDAQ", "warn", "not running: no data are being taken", dict(settings_from=fsudaq_dir)))
+            out.append(item(G, "FSUDAQ", "idle", "not running: no data are being taken", dict(settings_from=fsudaq_dir)))
         name = os.path.basename(folder) if folder else None
         if folder is None:
             out.append(item(G, "Run", "nodata", f"no run folder in {data_path or '(no data path)'}"))
@@ -295,24 +297,19 @@ class Monitor:
                 out.append(item(G, "Run", "info", f"last run {rf.get('run')} ({name}) stopped {st.get('time', '')[11:19]} "
                                 f"after {st.get('run_ms', 0) / 60000:.1f} min", det))
             out.append(clock_item(G, rf))
-        # boards: from the online analysis while a run goes, else what the run file names
-        boards = (self.online or {}).get("boards") if running else None
-        if boards:
-            quiet = [f"Digi-{b['serial']}" for b in boards if b.get("quiet_alarm") or not b.get("has_data")]
-            lvl = "warn" if quiet else "ok"
-            txt = (f"{len(boards) - len(quiet)} of {len(boards)} writing" + (f"; silent: {', '.join(quiet)}" if quiet else ""))
-            out.append(item(G, "Boards", lvl, txt, {f"Digi-{b['serial']}": b for b in boards}))
-        elif rf:
-            out.append(item(G, "Boards", "info", f"{len(rf.get('boards') or [])} in the last run",
-                            {f"Digi-{b.get('serial')}": {k: b.get(k) for k in ("model", "dpp", "channels")} for b in rf.get("boards") or []}))
+        out += self.board_items(rf, running)
         if data_path:
             try:
                 du = shutil.disk_usage(data_path)
                 gb = du.free / 1e9
                 d = self.limits.get("daq", {})
                 lvl = "bad" if gb < d.get("disk_bad_gb", 50) else "warn" if gb < d.get("disk_warn_gb", 200) else "ok"
-                out.append(item(G, "Disk", lvl, f"{gb:,.0f} GB free of {du.total / 1e9:,.0f} GB ({data_path})",
-                                dict(warn_below_gb=d.get("disk_warn_gb"), bad_below_gb=d.get("disk_bad_gb"))))
+                it = item(G, "Disk", lvl, f"{gb:,.0f} GB free of {du.total / 1e9:,.0f} GB ({data_path})",
+                          dict(warn_below_gb=d.get("disk_warn_gb"), bad_below_gb=d.get("disk_bad_gb")))
+                # the page draws a bar: used share, and where the warn and bad levels start
+                it["bar"] = dict(used=1 - du.free / du.total, marks=[1 - d.get("disk_warn_gb", 200) * 1e9 / du.total,
+                                                                      1 - d.get("disk_bad_gb", 50) * 1e9 / du.total])
+                out.append(it)
             except OSError as ex:
                 out.append(item(G, "Disk", "bad", f"{data_path}: {ex}"))
         daq = (self.online or {}).get("daq") if running else None
@@ -325,6 +322,36 @@ class Monitor:
             out.append(item(G, "Data rate", "info", (f"{rate:,.0f} hits/s" if rate is not None else "hit rate not known yet")
                             + (f", {mbps:.1f} MB/s" if mbps is not None else "") + f", {(rb or 0) / 1e9:.2f} GB this run",
                             dict(run_bytes=rb, total_rate=rate, files=daq.get("files"))))
+        return out
+
+    def board_items(self, rf, running):
+        """One dot per board: writing (from the online analysis while a run goes) and its clock (run file)."""
+        G, out = "Boards", []
+        listed = [b.get("serial") for b in (rf or {}).get("boards") or []]
+        live = {b["serial"]: b for b in ((self.online or {}).get("boards") or [])} if running else {}
+        ck = (rf or {}).get("clock") or {}
+        start, stop = ck.get("start") or {}, ((rf or {}).get("stop") or {}).get("clock") or {}
+        for sn in listed + [s for s in live if s not in listed]:
+            name = f"Digi-{sn}"
+            info = next((b for b in (rf or {}).get("boards") or [] if b.get("serial") == sn), {})
+            what = " ".join(str(x) for x in (info.get("model"), info.get("dpp"), f"{info.get('channels')} ch" if info.get("channels") else None) if x)
+            clock_bad = name in (stop.get("lost_since_last_check") or []) or name in (start.get("unlocked") or []) + (stop.get("unlocked") or [])
+            clock_warn = name in (start.get("lost_since_last_check") or [])
+            clock = ("clock lost during the run" if name in (stop.get("lost_since_last_check") or []) else
+                     "clock not locked" if clock_bad else "clock lost before the run" if clock_warn else "")
+            b = live.get(sn)
+            if b is not None:
+                silent = b.get("quiet_alarm") or not b.get("has_data")
+                lvl = "bad" if clock_bad else "warn" if (silent or clock_warn) else "ok"
+                txt = ("NOT WRITING" + (f" for {b['quiet_s']:.0f} s" if b.get("quiet_s") else "") if silent else
+                       f"writing · {(b.get('bytes') or 0) / 1e6:,.0f} MB · newest {b.get('newest_s') or 0:.1f} s") + (f" · {clock}" if clock else "")
+                det = dict(b, model=what)
+            else:
+                lvl = "bad" if clock_bad else "warn" if clock_warn else "idle"
+                txt = (what or "in the last run") + (f" · {clock}" if clock else "")
+                det = dict(info, clock_start=start, clock_stop=stop)
+                det.pop("registers", None)
+            out.append(item(G, name, lvl, txt, det))
         return out
 
     def online_items(self, now, taking):
