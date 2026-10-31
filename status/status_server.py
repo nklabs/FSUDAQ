@@ -518,10 +518,10 @@ def summarize(items):
     counts = collections.Counter(i["level"] for i in items)
     bad = [i for i in items if RANK[i["level"]] >= RANK["warn"]]
     if not bad:
-        return dict(level="ok", text="all well", counts=counts)
+        return dict(level="ok", text="All well", counts=counts)
     bad.sort(key=lambda i: -RANK[i["level"]])
     return dict(level=worst["level"], counts=counts,
-                text="; ".join(f"{i['group']} · {i['name']}: {i['text']}" for i in bad[:3]) + (f" (+{len(bad) - 3} more)" if len(bad) > 3 else ""))
+                text=f"{bad[0]['group']} · {bad[0]['name']}: {bad[0]['text']}" + (f"  (+{len(bad) - 1} more)" if len(bad) > 1 else ""))
 
 
 # ---------------------------------------------------------------- FSUDAQ's files

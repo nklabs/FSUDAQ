@@ -5,74 +5,89 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Experiment Status</title>
 <style>
-  :root { --bg:#f6f7f9; --card:#fff; --fg:#1d232b; --muted:#6b7480; --line:#dfe3e8;
-          --ok:#2e9e4f; --info:#9aa3ad; --idle:#2f7fd8; --nodata:#c4cad1; --warn:#e0a100; --bad:#d6342c; --crit:#a3001b; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#14171b; --card:#1d2127; --fg:#e4e8ec; --muted:#98a1ab; --line:#30363e;
+  :root { --bg:#f4f5f7; --card:#fff; --fg:#1d232b; --muted:#6b7480; --soft:#8a929c; --line:#eceef1;
+          --ok:#2e9e4f; --info:#9aa3ad; --idle:#2f7fd8; --nodata:#cdd2d8; --warn:#e0a100; --bad:#d6342c; --crit:#a3001b; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#121519; --card:#1b1f25; --fg:#e4e8ec; --muted:#98a1ab; --soft:#7c858f; --line:#2a3038;
           --info:#7c858f; --nodata:#4a525b; --idle:#4b95e8; } }
   * { box-sizing:border-box; }
-  body { margin:0; padding:12px 16px 30px; background:var(--bg); color:var(--fg); font:13px/1.4 system-ui, sans-serif; }
-  h1 { font-size:17px; margin:0 0 8px; display:flex; gap:12px; align-items:baseline; flex-wrap:wrap; }
-  h1 small { color:var(--muted); font-weight:normal; font-size:12px; }
-  h1 a, h1 button { font:12px system-ui, sans-serif; color:var(--muted); }
-  h1 button { background:none; border:1px solid var(--line); border-radius:4px; padding:0 6px; cursor:pointer; }
-  #overview { display:flex; flex-wrap:wrap; gap:14px 22px; justify-content:center; padding:12px 8px 16px; margin-bottom:10px;
-              background:var(--card); border:1px solid var(--line); border-radius:8px; }
-  #overview a { display:flex; flex-direction:column; align-items:center; gap:6px; text-decoration:none; color:var(--fg); width:96px; text-align:center; }
-  #overview .big { width:72px; height:72px; border-radius:50%; background:var(--nodata); box-shadow:inset 0 -4px 8px rgba(0,0,0,.15); }
+  body { margin:0; padding:16px 20px 32px; background:var(--bg); color:var(--fg); font:13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; margin-bottom:12px; }
+  header h1 { font-size:18px; font-weight:650; margin:0; letter-spacing:-.01em; }
+  header small { color:var(--soft); font-size:12px; }
+  header nav { margin-left:auto; display:flex; gap:14px; }
+  header nav a, header nav button { font:12px system-ui, sans-serif; color:var(--muted); background:none; border:none; padding:0; cursor:pointer; text-decoration:none; }
+  header nav a:hover, header nav button:hover { color:var(--fg); text-decoration:underline; }
+  /* the one line that matters most */
+  #summary { display:flex; align-items:center; gap:10px; border-radius:10px; padding:10px 14px; margin-bottom:14px; font-size:14px; font-weight:550;
+             background:color-mix(in srgb, var(--nodata) 18%, var(--card)); border-left:5px solid var(--nodata); }
+  #summary .t { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #summary .counts { font-size:12px; font-weight:500; color:var(--muted); white-space:nowrap; }
+  #summary.ok, #summary.info, #summary.idle { background:color-mix(in srgb, var(--ok) 12%, var(--card)); border-left-color:var(--ok); }
+  #summary.warn { background:color-mix(in srgb, var(--warn) 16%, var(--card)); border-left-color:var(--warn); }
+  #summary.bad { background:color-mix(in srgb, var(--bad) 14%, var(--card)); border-left-color:var(--bad); }
+  #summary.critical { background:var(--crit); border-left-color:var(--crit); color:#fff; animation:pulse 1s infinite; } #summary.critical .counts { color:#fff; }
+  #summary.stale { background:#555; border-left-color:#333; color:#fff; }
+  /* the big picture */
+  #overview { display:flex; flex-wrap:wrap; gap:16px 26px; justify-content:center; padding:6px 0 20px; }
+  #overview a { display:flex; flex-direction:column; align-items:center; gap:8px; text-decoration:none; color:var(--muted); width:88px; text-align:center; }
+  #overview a:hover { color:var(--fg); }
+  #overview .big { width:64px; height:64px; border-radius:50%; background:var(--nodata); transition:transform .15s; }
+  #overview a:hover .big { transform:scale(1.06); }
   #overview .big.ok { background:var(--ok); } #overview .big.info { background:var(--info); } #overview .big.idle { background:var(--idle); }
   #overview .big.warn { background:var(--warn); } #overview .big.bad { background:var(--bad); }
-  #overview .big.critical { background:var(--crit); animation:pulse 1s infinite; box-shadow:0 0 0 6px color-mix(in srgb, var(--crit) 35%, transparent); }
-  #overview .big.nodata { background:transparent; border:4px solid var(--nodata); }
-  #overview span { font-size:12px; font-weight:600; line-height:1.2; }
-  @media (max-width: 480px) { #overview .big { width:52px; height:52px; } #overview a { width:72px; } }
-  .card.flash { outline:3px solid var(--idle); outline-offset:2px; }
-  #summary { border-radius:8px; padding:10px 14px; margin-bottom:12px; font-size:14px; font-weight:600; color:#fff; background:var(--nodata); }
-  #summary.ok, #summary.info, #summary.idle { background:var(--ok); } #summary.warn { background:var(--warn); color:#1d232b; } #summary.bad { background:var(--bad); }
-  #summary.critical { background:var(--crit); animation:pulse 1s infinite; } #summary.stale { background:#555; }
-  #summary .counts { font-weight:normal; font-size:12px; opacity:.9; margin-left:8px; }
+  #overview .big.critical { background:var(--crit); animation:pulse 1s infinite; box-shadow:0 0 0 6px color-mix(in srgb, var(--crit) 30%, transparent); }
+  #overview span { font-size:12px; font-weight:550; line-height:1.2; }
+  @media (max-width: 480px) { #overview .big { width:48px; height:48px; } #overview a { width:68px; } }
   @keyframes pulse { 50% { opacity:.55; } }
-  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(420px, 1fr)); gap:12px; align-items:start; }
+  /* the cards */
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(400px, 1fr)); gap:14px; align-items:start; }
   @media (max-width: 480px) { .grid { grid-template-columns:1fr; } }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:8px 10px; min-width:0; }
-  .card.dragging { opacity:.4; } .card.drop { outline:2px dashed var(--muted); outline-offset:2px; }
-  .card h2 { font-size:13px; margin:2px 0 6px; display:flex; gap:8px; align-items:center; cursor:grab; user-select:none; }
-  .card h2 .grip { margin-left:auto; color:var(--muted); font-weight:normal; letter-spacing:-2px; }
-  .row { display:grid; grid-template-columns:14px 150px 1fr auto; gap:8px; align-items:start; padding:4px 2px; border-top:1px solid var(--line); cursor:pointer; }
+  .card { background:var(--card); border-radius:10px; padding:12px 14px 8px; min-width:0; box-shadow:0 1px 2px rgba(0,0,0,.06), 0 0 0 1px var(--line); }
+  .card.dragging { opacity:.4; } .card.drop { outline:2px dashed var(--soft); outline-offset:2px; }
+  .card.flash { outline:3px solid var(--idle); outline-offset:2px; }
+  .card h2 { font-size:12px; font-weight:650; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:0 0 6px;
+             display:flex; gap:8px; align-items:center; cursor:grab; user-select:none; }
+  .card h2 .grip { margin-left:auto; color:var(--soft); letter-spacing:-2px; opacity:0; transition:opacity .15s; }
+  .card:hover h2 .grip { opacity:1; }
+  .row { display:grid; grid-template-columns:12px 160px 1fr auto; gap:10px; align-items:start; padding:6px 4px; border-top:1px solid var(--line); cursor:pointer; border-radius:4px; }
   .rows .row:first-child { border-top:none; }
-  .row:hover { background:color-mix(in srgb, var(--line) 35%, transparent); }
-  .name { font-weight:600; overflow-wrap:anywhere; } .text { overflow-wrap:anywhere; } .age { color:var(--muted); font-size:11px; white-space:nowrap; }
-  .dot { width:12px; height:12px; border-radius:50%; margin-top:2px; background:var(--nodata); }
+  .row.dragging { opacity:.35; }
+  .row:hover { background:color-mix(in srgb, var(--line) 55%, transparent); }
+  .name { font-weight:550; overflow-wrap:anywhere; } .text { color:var(--muted); overflow-wrap:anywhere; }
+  .age { color:var(--soft); font-size:11px; white-space:nowrap; }
+  .dot { width:10px; height:10px; border-radius:50%; margin-top:4px; background:var(--nodata); }
   .dot.ok { background:var(--ok); } .dot.info { background:var(--info); } .dot.idle { background:var(--idle); } .dot.warn { background:var(--warn); }
-  .dot.bad { background:var(--bad); } .dot.critical { background:var(--crit); animation:pulse 1s infinite; box-shadow:0 0 0 3px color-mix(in srgb, var(--crit) 35%, transparent); }
-  .dot.nodata { background:transparent; border:2px solid var(--nodata); }
-  .bar { grid-column:3 / -1; position:relative; height:10px; border-radius:5px; background:color-mix(in srgb, var(--line) 70%, transparent); overflow:hidden; margin-top:2px; }
-  .bar i { position:absolute; left:0; top:0; bottom:0; border-radius:5px; background:var(--ok); }
+  .dot.bad { background:var(--bad); } .dot.critical { background:var(--crit); animation:pulse 1s infinite; box-shadow:0 0 0 3px color-mix(in srgb, var(--crit) 30%, transparent); }
+  .row .dot.warn ~ .text, .row .dot.bad ~ .text, .row .dot.critical ~ .text { color:var(--fg); }
+  .bar { grid-column:3 / -1; position:relative; height:6px; border-radius:3px; background:var(--line); overflow:hidden; margin-top:2px; }
+  .bar i { position:absolute; left:0; top:0; bottom:0; border-radius:3px; background:var(--ok); }
   .bar i.warn { background:var(--warn); } .bar i.bad { background:var(--bad); }
-  .bar b { position:absolute; top:0; bottom:0; width:2px; background:var(--muted); opacity:.7; }
-  .details { grid-column:2 / -1; font:11px/1.35 ui-monospace, monospace; color:var(--muted); background:color-mix(in srgb, var(--line) 25%, transparent);
-             border-radius:4px; padding:6px 8px; white-space:pre-wrap; overflow-wrap:anywhere; max-height:320px; overflow:auto; cursor:text; }
-  .mode { font-size:11px; font-weight:normal; border:1px solid var(--line); border-radius:10px; padding:0 8px; color:var(--muted); }
-  footer { margin-top:14px; color:var(--muted); font-size:11px; }
+  .bar b { position:absolute; top:0; bottom:0; width:2px; background:var(--card); }
+  .details { grid-column:2 / -1; font:11px/1.4 ui-monospace, monospace; color:var(--muted); background:color-mix(in srgb, var(--line) 50%, transparent);
+             border-radius:6px; padding:8px 10px; white-space:pre-wrap; overflow-wrap:anywhere; max-height:320px; overflow:auto; cursor:text; }
+  .mode { font-size:10px; font-weight:600; text-transform:none; letter-spacing:0; border-radius:10px; padding:1px 8px; color:var(--muted); background:var(--line); }
+  footer { margin-top:18px; color:var(--soft); font-size:11px; line-height:1.6; }
+  footer i { display:inline-block; width:8px; height:8px; border-radius:50%; margin:0 4px 0 10px; vertical-align:0; }
 </style>
 </head>
 <body>
-<h1>Experiment status <small id="updated">connecting…</small> <a href="/limits" target="_blank">limits and names</a>
-  <button id="reset" title="Put the cards back in their original order">reset layout</button></h1>
+<header><h1>Experiment status</h1><small id="updated">connecting…</small>
+  <nav><a href="/limits" target="_blank">limits and names</a><button id="reset" title="Put the cards back in their original order">reset layout</button></nav></header>
+<div id="summary"><span class="t">connecting…</span></div>
 <div id="overview"></div>
-<div id="summary">connecting…</div>
 <div class="grid" id="grid"></div>
-<footer>Green: as it should be · blue: not running · grey: a plain fact · hollow: no data · yellow: look at it · red: wrong · flashing: act now.
-Click a line for what is behind it; drag a card by its title to move it (kept in this browser). Read-only: FSUDAQ, the online dashboard and pion-ros are not changed from here.</footer>
+<footer><i style="background:var(--ok);margin-left:0"></i>as it should be<i style="background:var(--idle)"></i>not running<i style="background:var(--info)"></i>a plain fact<i style="background:var(--nodata)"></i>no data<i style="background:var(--warn)"></i>look at it<i style="background:var(--bad)"></i>wrong<i style="background:var(--crit)"></i>flashing: act now<br>
+Click a line for what is behind it. Drag a card by its title, or a line within its card, to rearrange (kept in this browser; "reset layout" undoes it). Read-only: FSUDAQ, the online dashboard and pion-ros are not changed from here.</footer>
 <script>
 const ORDER = ['DAQ', 'Boards', 'Online analysis', 'LED trigger', 'PLC', 'Cherenkov', 'Trackers', 'ROS'];
 const RANK = {info:0, idle:0, ok:1, nodata:2, warn:3, bad:4, critical:5};
-const KEY = 'status-card-order';
+const KEY = 'status-card-order', ROWKEY = 'status-row-order';   // ROWKEY: group -> line names in the order dragged to
 const esc = t => String(t ?? '').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const store = { get(k,d){ try { const v=localStorage.getItem(k); return v===null?d:JSON.parse(v); } catch(e){ return d; } },
                 set(k,v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} } };
 const open = new Set();   // the lines whose details are shown, by group/name
 const grid = document.getElementById('grid'), cards = {};   // group -> its card element
-let last = null, lastOK = null, dragging = null;
+let last = null, lastOK = null, dragging = null, dragRow = null;   // the card, or the line, being dragged
 function ago(s){ if(s==null) return ''; if(s<90) return s.toFixed(0)+' s'; if(s<5400) return (s/60).toFixed(0)+' min'; return (s/3600).toFixed(1)+' h'; }
 function detailText(d){ return Object.entries(d||{}).map(([k,v]) => k + ': ' + (typeof v==='object' && v!==null ? JSON.stringify(v, null, 1) : v)).join('\n'); }
 function order(groups){   // the saved order first, then new groups in the default order
@@ -99,7 +114,7 @@ function rowHTML(g, it){
   if(it.bar){ const u = Math.max(0, Math.min(1, it.bar.used));
     bar = `<div class="bar" title="${(100*u).toFixed(1)} % used"><i class="${it.level}" style="width:${(100*u).toFixed(2)}%"></i>` +
           (it.bar.marks||[]).filter(m=>m>0 && m<1).map(m=>`<b style="left:${(100*m).toFixed(2)}%"></b>`).join('') + '</div>'; }
-  return `<div class="row" data-key="${esc(key)}"><span class="dot ${it.level}" title="${it.level}"></span><span class="name">${esc(it.name)}</span>` +
+  return `<div class="row" draggable="true" data-key="${esc(key)}" data-name="${esc(it.name)}"><span class="dot ${it.level}" title="${it.level}"></span><span class="name">${esc(it.name)}</span>` +
          `<span class="text">${esc(it.text)}</span><span class="age">${it.age_s!=null && it.age_s>5 ? ago(it.age_s)+' old' : ''}</span>` + bar +
          (open.has(key) ? `<div class="details">${esc(detailText(it.details)) || '(nothing more)'}</div>` : '') + '</div>';
 }
@@ -108,10 +123,11 @@ function render(S){
   const stale = lastOK && (Date.now()-lastOK > 8000);
   sm.className = stale ? 'stale' : S.summary.level;
   const c = S.summary.counts || {};
-  sm.innerHTML = (stale ? `NO CONNECTION to the status server since ${new Date(lastOK).toLocaleTimeString()} — shown as it was then. ` : '') +
-    esc(S.summary.text) + `<span class="counts">${['critical','bad','warn'].filter(k=>c[k]).map(k=>c[k]+' '+k).join(' · ')}</span>`;
+  const say = (stale ? `NO CONNECTION to the status server since ${new Date(lastOK).toLocaleTimeString()} — shown as it was then. ` : '') + S.summary.text;
+  sm.innerHTML = `<span class="t" title="${esc(say)}">${esc(say)}</span>` +
+    `<span class="counts">${['critical','bad','warn'].filter(k=>c[k]).map(k=>c[k]+' '+(k==='warn'?'to look at':k)).join(' · ')}</span>`;
   document.getElementById('updated').textContent = S.updated ? 'updated ' + new Date(S.updated*1000).toLocaleTimeString() : '';
-  if(dragging) return;   // the cards stay put while one is being moved
+  if(dragging || dragRow) return;   // nothing moves under the mouse while a card or a line is being dragged
   const groups = {};
   for(const it of S.items) (groups[it.group] = groups[it.group] || []).push(it);
   const names = order(Object.keys(groups)), modes = S.modes || {};
@@ -126,7 +142,9 @@ function render(S){
     card.querySelector('h2 .dot').className = 'dot ' + worst;
     card.querySelector('h2 .title').textContent = g;
     card.querySelector('h2 .m').innerHTML = g==='Cherenkov' && modes.cherenkov ? `<span class="mode">mode: ${esc(modes.cherenkov.value)}</span>` : '';
-    card.querySelector('.rows').innerHTML = its.map(it=>rowHTML(g, it)).join('');
+    const saved = (store.get(ROWKEY, {})[g] || []);   // the lines in the order dragged to, new ones after
+    const pos = it => { const i = saved.indexOf(it.name); return i < 0 ? 1e6 + its.indexOf(it) : i; };
+    card.querySelector('.rows').innerHTML = its.slice().sort((a, b)=>pos(a) - pos(b)).map(it=>rowHTML(g, it)).join('');
     if(grid.children[i] !== card) grid.insertBefore(card, grid.children[i] || null);
   });
 }
@@ -139,7 +157,27 @@ document.getElementById('overview').addEventListener('click', ev=>{   // a big c
   const c = cards[a.dataset.go]; if(!c) return;
   c.scrollIntoView({behavior:'smooth', block:'center'}); c.classList.add('flash'); setTimeout(()=>c.classList.remove('flash'), 1200);
 });
-document.getElementById('reset').onclick = ()=>{ store.set(KEY, []); if(last) render(last); };
+// lines move within their card: drag one onto another
+grid.addEventListener('dragstart', e=>{
+  const r = e.target.closest && e.target.closest('.row'); if(!r || e.target.closest('h2')) return;
+  dragRow = r; r.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', r.dataset.name);
+  e.stopPropagation();
+});
+grid.addEventListener('dragover', e=>{
+  if(!dragRow) return;
+  const r = e.target.closest('.row');
+  if(!r || r===dragRow || r.parentElement!==dragRow.parentElement) return;   // only within the same card
+  e.preventDefault();
+  const kids = [...r.parentElement.children];
+  r.parentElement.insertBefore(dragRow, kids.indexOf(dragRow) < kids.indexOf(r) ? r.nextSibling : r);
+});
+grid.addEventListener('dragend', e=>{
+  if(!dragRow) return;
+  const box = dragRow.parentElement, g = box.closest('.card').dataset.group, all = store.get(ROWKEY, {});
+  all[g] = [...box.children].map(x=>x.dataset.name); store.set(ROWKEY, all);
+  dragRow.classList.remove('dragging'); dragRow = null; if(last) render(last);
+});
+document.getElementById('reset').onclick = ()=>{ store.set(KEY, []); store.set(ROWKEY, {}); if(last) render(last); };
 async function tick(){
   try { const r = await fetch('/api/status', {cache:'no-store', signal:AbortSignal.timeout(5000)}); if(r.ok){ last = await r.json(); lastOK = Date.now(); } } catch(e){}
   if(last) render(last);
