@@ -50,11 +50,14 @@ class Sources:
         self.nodes = ["plc_command", "plc_status", "rosbag2_recorder"]
         self.relay_up = True
         self.online = None
+        self.counting = False                  # the heartbeat goes up by itself (a scenario that does not test it)
 
     def fetch(self, url, timeout):
         if "8770" in url or "relay" in url:
             if not self.relay_up:
                 raise urllib.error.URLError("Connection refused")
+            if self.counting:          # like the PLC: the heartbeat goes up with every status
+                self.plc["heartbeat"] += 1
             return dict(time=0, plc=copy.deepcopy(self.plc), age_s=self.age, nodes=list(self.nodes))
         if self.online is None:
             raise urllib.error.URLError("Connection refused")
@@ -135,16 +138,31 @@ def scenario_rules(tmp):
     src.plc["tc6"] = 20.6; src.plc["tc2"] = 305.4; src.plc["tc0"] = 20.0; clock.t += 2; m.step()
     good &= check(find(m, "Cherenkov", NAME["tc6"])["level"] == "ok" and find(m, "Cherenkov", NAME["tc6"])["text"] == "20.6 °C",
                   f"Cherenkov thermocouple: {find(m, 'Cherenkov', NAME['tc6'])}")
-    for tc in ("tc2", "tc0"):      # marked not connected: yellow whatever it reads (an open input's staircase, or room temperature)
-        it = find(m, "Tracker temperatures", NAME[tc])
-        good &= check(it["level"] == "notice" and it["text"].startswith("not connected"), f"unconnected {tc}: {it}")
+    # the six tracker thermocouples: one line on the Trackers card; marked not connected = blue whatever they read
+    it = find(m, "Trackers", "Tracker temperatures")
+    good &= check(it["level"] == "notice" and it["text"] == "6 not connected" and find(m, "Tracker temperatures", NAME["tc0"]) is None,
+                  f"collapsed tracker temperatures: {it}")
+    good &= check(it["details"][NAME["tc2"]].startswith("not connected; reads 305.4") and it["details"][NAME["tc0"]].startswith("not connected"),
+                  f"tracker temperature details: {it['details']}")
+    L2 = copy.deepcopy(m.limits)    # two plugged in: their span on the line; one above 80 C: red, named first
+    for c in L2["channels"]:
+        if c["id"] in ("tc0", "tc1"):
+            c["connected"] = True
+    m.limits = L2
+    src.plc["tc1"] = 23.5; clock.t += 2; m.step()
+    it = find(m, "Trackers", "Tracker temperatures")
+    good &= check(it["level"] == "notice" and it["text"] == "20 to 23.5 °C (2 reading) · 4 not connected", f"two connected (four still blue): {it}")
+    src.plc["tc1"] = 85.0; clock.t += 2; m.step()
+    it = find(m, "Trackers", "Tracker temperatures")
+    good &= check(it["level"] == "bad" and it["text"].startswith(NAME["tc1"] + ": 85.0 °C"), f"a tracker at 85 C: {it}")
+    src.plc["tc1"] = 3276.7
     src.plc["tc6"] = 80.0; clock.t += 2; m.step()
     good &= check(find(m, "Cherenkov", NAME["tc6"])["level"] == "ok", f"80.0 C: {find(m, 'Cherenkov', NAME['tc6'])}")
     src.plc["tc6"] = 85.0; clock.t += 2; m.step()
     it = find(m, "Cherenkov", NAME["tc6"])
     good &= check(it["level"] == "bad" and "> 80" in it["text"] and "outside" not in it["text"], f"85 C: {it}")
     src.plc["tc6"] = 20.6
-    good &= check(find(m, "PLC", NAME["trumeter_1"]) is not None, "Trumeters not on the PLC card")
+    good &= check(find(m, "Trackers", NAME["trumeter_1"]) is not None, "the currents not on the Trackers card")
     good &= check(find(m, "PLC inputs (not named)", "ai1") is None, "an assigned input also listed as not named")
     good &= check(find(m, "PLC inputs (not named)", "ai3") is None, "an unused input listed")
     good &= check(find(m, "PLC inputs (not named)", "ai2")["text"].endswith("(raw)"), "a free input not listed")
@@ -156,7 +174,7 @@ def scenario_rules(tmp):
     it = find(m, "Cherenkov", NAME["isobutane_1"])
     good &= check(it["level"] == "critical" and "outside" in it["text"], f"gas sensor past full scale: {it}")
     src.plc["ai7"] = 6.0; clock.t += 2; m.step()     # a current (no safety rules) out of its range: to read, not a safety matter
-    it = find(m, "PLC", NAME["trumeter_3"])
+    it = find(m, "Trackers", NAME["trumeter_3"])
     good &= check(it["level"] == "notice" and "outside" in it["text"], f"ESPEON current out of range: {it}")
     if good:
         ok("isobutane at 5 / 10 / 100; pressure > 2 always, < 0.3 and a 0.05 psi change in an hour only when full; the window forgets; "
@@ -182,7 +200,7 @@ def scenario_changes(tmp):
     for label, want in (("10s", 0.1), ("1m", 0.6), ("10m", 6.0)):
         good &= check(ch[label] is not None and abs(ch[label] - want) < 0.01 * want, f"change over {label}: {ch[label]}, expected {want}")
     good &= check(it["trend"].startswith("Δ10s +0.100 · Δ1m +0.600 · Δ10m +6.000"), f"trend line: {it.get('trend')}")
-    good &= check("trend" not in find(m, "Tracker temperatures", NAME["tc0"]), "a trend on an input marked not connected")
+    good &= check("trend" not in find(m, "Trackers", "Tracker temperatures"), "a trend on the collapsed tracker temperatures")
     if good:
         ok("0.1 / 0.6 / 6.0 psig over 10 s / 1 min / 10 min from a 0.01 psig/s ramp under noise; '–' until each interval is covered")
 
@@ -199,18 +217,19 @@ def scenario_plc(tmp):
     for k in range(7):             # 14 s with the same heartbeat
         clock.t += 2; m.step()
     it = find(m, "PLC", "PLC status")
-    good &= check(it["level"] == "warn" and "stuck" in it["text"], f"heartbeat stuck: {it}")   # the safety readings: yellow
+    good &= check(it["level"] == "bad" and "stuck" in it["text"], f"heartbeat stuck: {it}")   # the safety readings blind: red
     src.plc["heartbeat"] += 1; src.age = 25; clock.t += 2; m.step()
     it = find(m, "PLC", "PLC status")
-    good &= check(it["level"] == "warn" and "old" in it["text"], f"status stale: {it}")
+    good &= check(it["level"] == "bad" and "old" in it["text"], f"status stale: {it}")
     good &= check(find(m, "Cherenkov", NAME["isobutane_1"])["level"] == "nodata", "a stale status still judged")
     src.age = 0.5; src.relay_up = False; clock.t += 2; m.step()
     it = find(m, "PLC", "PLC status")
-    good &= check(it["level"] == "warn" and "no answer" in it["text"], f"relay down: {it}")
-    good &= check(find(m, "ROS", "pion-ros")["level"] == "notice", "pion-ros not blue with the relay down")
+    good &= check(it["level"] == "bad" and "no answer" in it["text"], f"relay down: {it}")
+    good &= check(find(m, "ROS", "pion-ros")["level"] == "problem", "pion-ros not pink with the relay down")
+    good &= check(find(m, "Trackers", "LED relay live")["level"] == "info" and find(m, "Trackers", "LED relay live")["text"].startswith("NO"), f"relay live with pion-ros down: {find(m, 'Trackers', 'LED relay live')}")
     good &= check(find(m, "Cherenkov", NAME["isobutane_1"])["level"] == "nodata", "judged without an answer")
     src.relay_up = True; src.nodes = ["plc_command", "plc_status"]; clock.t += 2; m.step()
-    good &= check(find(m, "ROS", "Rosbag recording")["level"] == "notice", f"no recorder: {find(m, 'ROS', 'Rosbag recording')}")
+    good &= check(find(m, "ROS", "Rosbag recording")["level"] == "problem", f"no recorder: {find(m, 'ROS', 'Rosbag recording')}")
     good &= check(find(m, "PLC", "Outputs")["text"].startswith("DQ1 off"), f"outputs: {find(m, 'PLC', 'Outputs')}")
     if good:
         ok("stuck heartbeat, stale status, pion-ros down and a missing recorder are red; nothing judged on old values")
@@ -230,6 +249,7 @@ def scenario_run_file(tmp):
     with open(os.path.join(fs, "programSettings.txt"), "w") as f:
         f.write(data + "\n")
     procs = [dict(pid=4242, cwd=fs, started=clock.t - 600)]
+    src.counting = True
     running = {"on": True}
     m = make(tmp, clock, src, procs=lambda: procs if running["on"] else [])
     good = True
@@ -250,21 +270,25 @@ def scenario_run_file(tmp):
     it = find(m, "DAQ", "Run")
     good &= check(it["level"] == "ok" and "running for 2 min" in it["text"], f"running: {it}")
     good &= check(find(m, "DAQ", "Board clocks")["level"] == "ok", f"clocks: {find(m, 'DAQ', 'Board clocks')}")
-    good &= check(all(find(m, "Boards", f"Digi-{s}")["level"] == "ok" and find(m, "Boards", f"Digi-{s}")["text"].startswith("writing")
-                      for s in (1443, 1399)), f"boards: {find(m, 'Boards', 'Digi-1443')}")
-    good &= check(find(m, "LED trigger", "LED")["level"] == "ok", f"LED: {find(m, 'LED trigger', 'LED')}")
+    good &= check(find(m, "DAQ", "Boards")["level"] == "ok" and find(m, "DAQ", "Boards")["text"] == "2 of 2 writing"
+                  and find(m, "DAQ", "Digi-1399") is None, f"boards: {find(m, 'DAQ', 'Boards')}")
+    good &= check(find(m, "DAQ", "LED trigger") is None and find(m, "Trackers", "LED relay live")["level"] == "ok"
+                  and find(m, "Trackers", "LED relay live")["text"].startswith("yes"), f"LED: {find(m, 'Trackers', 'LED relay live')}")
+    probs = [i["name"] for i in m.state()["items"] if ss.RANK[i["level"]] >= ss.RANK["problem"] and i["name"] != "Disk"]   # /tmp may be small
+    good &= check(not probs, f"all well while running, but: {probs}")
     good &= check(find(m, "Online analysis", "Dashboard")["level"] == "ok", f"online: {find(m, 'Online analysis', 'Dashboard')}")
     src.online["daq"]["run_bytes"] = 21_000_000; m.online_next = 0; clock.t += 5; m.step()
     good &= check("4.0 MB/s" in find(m, "DAQ", "Data rate")["text"], f"data rate: {find(m, 'DAQ', 'Data rate')}")
     # a board falls silent; the analysis falls behind
     src.online["boards"][1]["quiet_alarm"] = True; src.online["status"] = "falling behind: the DAQ part"; m.online_next = 0
     clock.t += 5; m.step()
-    it = find(m, "Boards", "Digi-1399")
-    good &= check(it["level"] == "notice" and "NOT WRITING" in it["text"] and find(m, "Boards", "Digi-1443")["level"] == "ok", f"silent board: {it}")
-    good &= check(find(m, "Online analysis", "Dashboard")["level"] == "notice", "falling behind not blue")
+    it = find(m, "DAQ", "Digi-1399")
+    good &= check(it["level"] == "problem" and "NOT WRITING" in it["text"] and find(m, "DAQ", "Digi-1443") is None
+                  and find(m, "DAQ", "Boards")["text"] == "1 of 2 writing", f"silent board: {it}")
+    good &= check(find(m, "Online analysis", "Dashboard")["level"] == "problem", "falling behind not pink")
     # FSUDAQ gone with no stop
     running["on"] = False; clock.t += 2; m.step()
-    good &= check(find(m, "DAQ", "Run")["level"] == "notice" and "no stop" in find(m, "DAQ", "Run")["text"], f"no stop: {find(m, 'DAQ', 'Run')}")
+    good &= check(find(m, "DAQ", "Run")["level"] == "problem" and "no stop" in find(m, "DAQ", "Run")["text"], f"no stop: {find(m, 'DAQ', 'Run')}")
     good &= check(find(m, "DAQ", "FSUDAQ")["level"] == "info", "FSUDAQ not running not grey")
     # stopped with a clock loss and a failed LED off
     running["on"] = True
@@ -273,14 +297,14 @@ def scenario_run_file(tmp):
     run["led"]["events"].append({"what": "off", "sent": ss.iso(clock.t), "run_ms": 15000, "ok": False, "error": "no answer", "switched": "unknown"})
     write_run(folder, run)
     clock.t += 2; m.step()
-    good &= check(find(m, "DAQ", "Run")["level"] == "notice" and "1 problem(s)" in find(m, "DAQ", "Run")["text"], f"stop problems: {find(m, 'DAQ', 'Run')}")
-    good &= check(find(m, "DAQ", "Board clocks")["level"] == "notice" and "Digi-1399" in find(m, "DAQ", "Board clocks")["text"], f"clock lost: {find(m, 'DAQ', 'Board clocks')}")
-    it = find(m, "Boards", "Digi-1399")
-    good &= check(it["level"] == "notice" and "clock lost during the run" in it["text"] and find(m, "Boards", "Digi-1443")["level"] == "info",
-                  f"board with a lost clock after the stop: {it}; other: {find(m, 'Boards', 'Digi-1443')}")
-    good &= check(find(m, "LED trigger", "LED")["level"] == "notice", f"LED off failed: {find(m, 'LED trigger', 'LED')}")
+    good &= check(find(m, "DAQ", "Run")["level"] == "problem" and "1 problem(s)" in find(m, "DAQ", "Run")["text"], f"stop problems: {find(m, 'DAQ', 'Run')}")
+    good &= check(find(m, "DAQ", "Board clocks")["level"] == "problem" and "Digi-1399" in find(m, "DAQ", "Board clocks")["text"], f"clock lost: {find(m, 'DAQ', 'Board clocks')}")
+    good &= check(find(m, "DAQ", "Boards")["level"] == "info" and find(m, "DAQ", "Boards")["text"] == "2 in the last run", f"boards after the stop: {find(m, 'DAQ', 'Boards')}")
+    it = find(m, "DAQ", "LED trigger")
+    good &= check(it and it["level"] == "problem" and "off at" in it["text"] and "no answer" in it["text"], f"LED off failed: {it}")
     s = m.state()["summary"]
-    good &= check(s["counts"]["notice"] >= 3 and not s["counts"].get("bad"), f"summary: {s}")   # no safety alarm from the DAQ
+    good &= check(s["level"] == "problem" and s["counts"]["problem"] >= 3 and not any(s["counts"].get(k) for k in ("warn", "bad", "critical")),
+                  f"summary: {s}")   # data problems: pink, no safety colour
     # a clean stop
     run["stop"] = {"time": ss.iso(clock.t) + ".000+01:00", "run_ms": 125000, "problems": [],
                    "clock": {"checked": ss.iso(clock.t), "unlocked": [], "lost_since_last_check": []}}

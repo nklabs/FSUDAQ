@@ -35,8 +35,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # summary order: the worst item names the page; info (a plain fact) and ok rank lowest
-RANK = {"info": 0, "idle": 0, "ok": 1, "nodata": 2, "notice": 3, "warn": 4, "bad": 5, "critical": 6}
-# yellow and red (warn, bad, critical) are for safety only; blue (notice) is information the user needs to read; idle = info (grey)
+RANK = {"info": 0, "idle": 0, "ok": 1, "nodata": 2, "notice": 3, "problem": 4, "warn": 5, "bad": 6, "critical": 7}
+# yellow and red (warn, bad, critical): safety only; pink (problem): a data problem that is not a safety matter (DAQ, clocks,
+# analysis, LED, ROS); blue (notice): information to read (sensors not connected, placeholders); idle = info (grey)
 RULE_LEVELS = ("notice", "warn", "bad", "critical")   # notice: a non-safety limit (blue)
 SAFETY = ("warn", "bad", "critical")
 PLC_INPUTS = [f"ai{i}" for i in range(8)] + [f"tc{i}" for i in range(8)]
@@ -64,7 +65,7 @@ DEFAULT_LIMITS = {
          "note": "100 %LEL = 1.6 % isobutane in air",
          "rules": [{"at_or_above": 5, "level": "warn"}, {"at_or_above": 10, "level": "bad"},
                    {"at_or_above": 100, "level": "critical"}]},
-    ] + [{"id": f"trumeter_{i - 4}", "name": {5: "T0 current", 6: "T1 + T2 current", 7: "ESPEON current"}[i] + f" (Trumeter {i - 4})", "group": "PLC", "source": f"plc.ai{i}",
+    ] + [{"id": f"trumeter_{i - 4}", "name": {5: "T0 current", 6: "T1 + T2 current", 7: "ESPEON current"}[i] + f" (Trumeter {i - 4})", "group": "Trackers", "source": f"plc.ai{i}",
           # Trumeters 1 and 2 read half of what the meters show (31 Oct 2026): scale 2
           "scale": 2.0 if i < 7 else 1.0, "offset": 0.0, "unit": "", "digits": 3, "range": [0, 10 if i < 7 else 5], "rules": []} for i in (5, 6, 7)]
       # two thermocouples per detector: tc0/1 tracker 0, tc2/3 tracker 1, tc4/5 tracker 2, tc6/7 the Cherenkov.
@@ -283,9 +284,9 @@ class Monitor:
         running = bool(rf) and rf.get("stop") is None
         out += self.daq_items(now, procs, fsudaq_dir, data_path, folder, rf, rf_err, running)
         out += self.online_items(now, bool(procs) and running)
-        out += self.led_items(now, rf)
         out += self.plc_items(now)
-        out += self.channel_items(now)
+        out += collapse(self.channel_items(now), "Tracker temperatures", "Trackers")
+        out += self.led_items(now, rf)
         return out
 
     def daq_items(self, now, procs, fsudaq_dir, data_path, folder, rf, rf_err, running):
@@ -312,11 +313,11 @@ class Monitor:
                     dur = ""
                 out.append(item(G, "Run", "ok", f"run {rf.get('run')} ({name}) running{dur}, since {start[11:19]}", det))
             elif st is None:
-                out.append(item(G, "Run", "notice", f"run {rf.get('run')} ({name}) has no stop: FSUDAQ ended during the run", det))
+                out.append(item(G, "Run", "problem", f"run {rf.get('run')} ({name}) has no stop: FSUDAQ ended during the run", det))
             elif st.get("problems"):
                 p = st["problems"]   # the first, short; all of them in the details
                 first = p[0] if len(p[0]) <= 90 else p[0][:87].rstrip() + "..."
-                out.append(item(G, "Run", "notice", f"run {rf.get('run')} stopped {st.get('time', '')[11:19]} with {len(p)} problem(s): {first}"
+                out.append(item(G, "Run", "problem", f"run {rf.get('run')} stopped {st.get('time', '')[11:19]} with {len(p)} problem(s): {first}"
                                 + (f" (+{len(p) - 1} more, see details)" if len(p) > 1 else ""), dict(det, problems=p)))
             else:
                 out.append(item(G, "Run", "info", f"last run {rf.get('run')} ({name}) stopped {st.get('time', '')[11:19]} "
@@ -328,7 +329,7 @@ class Monitor:
                 du = shutil.disk_usage(data_path)
                 gb = du.free / 1e9
                 d = self.limits.get("daq", {})
-                lvl = "notice" if gb < d.get("disk_warn_gb", 200) else "ok"
+                lvl = "problem" if gb < d.get("disk_warn_gb", 200) else "ok"
                 it = item(G, "Disk", lvl, f"{gb:,.0f} GB free of {du.total / 1e9:,.0f} GB ({data_path})",
                           dict(warn_below_gb=d.get("disk_warn_gb"), bad_below_gb=d.get("disk_bad_gb")))
                 # the page draws a bar: used share, and where the warn and bad levels start
@@ -336,7 +337,7 @@ class Monitor:
                                                                       1 - d.get("disk_bad_gb", 50) * 1e9 / du.total])
                 out.append(it)
             except OSError as ex:
-                out.append(item(G, "Disk", "notice", f"{data_path}: {ex}"))
+                out.append(item(G, "Disk", "problem", f"{data_path}: {ex}"))
         daq = (self.online or {}).get("daq") if running else None
         if daq:
             rb, rate = daq.get("run_bytes"), daq.get("total_rate")
@@ -350,47 +351,39 @@ class Monitor:
         return out
 
     def board_items(self, rf, running):
-        """One dot per board: writing (from the online analysis while a run goes) and its clock (run file)."""
-        G, out = "Boards", []
-        listed = [b.get("serial") for b in (rf or {}).get("boards") or []]
+        """In the DAQ card: one line for the boards, and one for each board not writing while a run goes
+        (their clocks are on the Board clocks line)."""
+        G, out = "DAQ", []
+        boards = (rf or {}).get("boards") or []
         live = {b["serial"]: b for b in ((self.online or {}).get("boards") or [])} if running else {}
-        ck = (rf or {}).get("clock") or {}
-        start, stop = ck.get("start") or {}, ((rf or {}).get("stop") or {}).get("clock") or {}
-        for sn in listed + [s for s in live if s not in listed]:
-            name = f"Digi-{sn}"
-            info = next((b for b in (rf or {}).get("boards") or [] if b.get("serial") == sn), {})
-            what = " ".join(str(x) for x in (info.get("model"), info.get("dpp"), f"{info.get('channels')} ch" if info.get("channels") else None) if x)
-            clock_bad = name in (stop.get("lost_since_last_check") or []) or name in (start.get("unlocked") or []) + (stop.get("unlocked") or [])
-            clock_warn = name in (start.get("lost_since_last_check") or [])
-            clock = ("clock lost during the run" if name in (stop.get("lost_since_last_check") or []) else
-                     "clock not locked" if clock_bad else "clock lost before the run" if clock_warn else "")
-            b = live.get(sn)
-            if b is not None:
-                silent = b.get("quiet_alarm") or not b.get("has_data")
-                lvl = "notice" if (clock_bad or silent or clock_warn) else "ok"
-                txt = ("NOT WRITING" + (f" for {b['quiet_s']:.0f} s" if b.get("quiet_s") else "") if silent else
-                       f"writing · {(b.get('bytes') or 0) / 1e6:,.0f} MB · newest {b.get('newest_s') or 0:.1f} s") + (f" · {clock}" if clock else "")
-                det = dict(b, model=what)
-            else:
-                lvl = "notice" if (clock_bad or clock_warn) else "info"
-                txt = (what or "in the last run") + (f" · {clock}" if clock else "")
-                det = dict(info, clock_start=start, clock_stop=stop)
-                det.pop("registers", None)
-            out.append(item(G, name, lvl, txt, det))
+        serials = [b.get("serial") for b in boards] + [s for s in live if s not in [b.get("serial") for b in boards]]
+        if not serials:
+            return out
+        det = {f"Digi-{b.get('serial')}": " ".join(str(x) for x in (b.get("model"), b.get("dpp"), f"{b.get('channels')} ch" if b.get("channels") else None) if x)
+               for b in boards}
+        silent = [s for s, b in live.items() if b.get("quiet_alarm") or not b.get("has_data")]
+        if live:
+            out.append(item(G, "Boards", "problem" if silent else "ok", f"{len(serials) - len(silent)} of {len(serials)} writing", det))
+        else:
+            out.append(item(G, "Boards", "info", f"{len(serials)} in the last run", det))
+        for s in silent:
+            b = live[s]
+            out.append(item(G, f"Digi-{s}", "problem", "NOT WRITING" + (f" for {b['quiet_s']:.0f} s" if b.get("quiet_s") else "")
+                            + " while the other boards write", dict(b)))
         return out
 
     def online_items(self, now, taking):
         G, out = "Online analysis", []
         o = self.online
         if o is None:
-            lvl = "notice" if taking else "info"
+            lvl = "problem" if taking else "info"
             out.append(item(G, "Dashboard", lvl, f"not answering ({self.online_err})" + (" while a run goes" if taking else ""),
                             dict(url=self.a.online)))
             return out
         health = o.get("health") or []
         lag = (o.get("daq") or {}).get("lag_s")
         lim = self.limits.get("daq", {}).get("analysis_lag_warn_s", 30)
-        lvl = "notice" if (health or o.get("status", "").startswith("falling behind") or (lag or 0) > lim) else "ok"
+        lvl = "problem" if (health or o.get("status", "").startswith("falling behind") or (lag or 0) > lim) else "ok"
         txt = o.get("status", "?") + (f" · {lag:.0f} s of data behind" if lag else "") + ("; " + "; ".join(health) if health else "")
         out.append(item(G, "Dashboard", lvl, txt, dict(folder=o.get("folder"), workers=o.get("workers"), late_hits=o.get("late"),
                                                       health=health), now - self.online_t))
@@ -398,63 +391,56 @@ class Monitor:
             out.append(item(G, "Setup", "notice", f"{len(o['warnings'])} placeholder(s) in experiment.json",
                             dict(placeholders=o["warnings"])))
         if o.get("problems"):
-            out.append(item(G, "Setup problems", "notice", "; ".join(o["problems"])))
+            out.append(item(G, "Setup problems", "problem", "; ".join(o["problems"])))
         return out
 
     def led_items(self, now, rf):
-        G, out = "LED trigger", []
-        led = (rf or {}).get("led")
-        relay_up = self.plc_err is None and self.plc is not None
-        if led is None:
-            out.append(item(G, "LED", "nodata", "no LED record in the last run file"))
-        elif not led.get("enabled"):
-            out.append(item(G, "LED", "info", "disabled in the last run", led))
-        else:
-            ev = led.get("events") or []
-            failed = [e for e in ev if e.get("ok") is False]
-            last = ev[-1] if ev else None
-            lvl = "notice" if failed else "ok"
-            txt = f"on {led.get('delay_s')} s after the start for {led.get('hold_s')} s"
-            if last:
-                txt += f"; last: {last.get('what')} {str(last.get('sent', ''))[11:19]} " + (
-                    "confirmed" if last.get("ok") else "waiting" if last.get("ok") is None else f"FAILED: {last.get('error')}")
-            out.append(item(G, "LED", lvl, txt, led))
-        enabled = bool(led and led.get("enabled"))
-        out.append(item(G, "Relay", "ok" if relay_up else ("notice" if enabled else "info"),
-                        f"{self.a.relay} answers" if relay_up else "no status from pion-ros (see ROS · pion-ros)", dict(url=self.a.relay)))
+        """A failed LED command of the last run, in the DAQ card; whether the LED relay is live, in the Trackers card."""
+        out = []
+        led = (rf or {}).get("led") or {}
+        enabled = bool(led.get("enabled"))
+        failed = [e for e in led.get("events") or [] if e.get("ok") is False]
+        if failed:
+            e = failed[-1]
+            out.append(item("DAQ", "LED trigger", "problem", f"{len(failed)} LED command(s) failed in the last run; last: "
+                            f"{e.get('what')} at {str(e.get('sent', ''))[11:19]}: {e.get('error')}", led))
+        live = self.plc_err is None and self.plc is not None
+        out.append(item("Trackers", "LED relay live", "ok" if live else ("problem" if enabled else "info"),
+                        ("yes" if live else "NO: pion-ros does not answer (see ROS)") + f" · the LED trigger is {'on' if enabled else 'off'} in FSUDAQ",
+                        dict(url=self.a.relay, led=led)))
         return out
 
     def plc_items(self, now):
         out = []
         d = self.plc
         if d is None:
-            out.append(item("PLC", "PLC status", "warn", "no status from pion-ros (see ROS · pion-ros)", dict(url=self.a.relay)))
-            out.append(item("ROS", "pion-ros", "notice", f"no answer from {self.a.relay}: {self.plc_err}"))
+            out.append(item("PLC", "PLC status", "bad", "no status from pion-ros (see ROS · pion-ros)", dict(url=self.a.relay)))
+            out.append(item("ROS", "pion-ros", "problem", f"no answer from {self.a.relay}: {self.plc_err}"))
             return out
         stale = self.limits.get("daq", {}).get("plc_stale_s", 10)
         plc, age = d.get("plc"), d.get("age_s")
         since = now - self.plc_t
         if plc is None:
-            out.append(item("PLC", "PLC status", "warn", "pion-ros has no PLC status (plc_status not publishing)", d))
+            out.append(item("PLC", "PLC status", "bad", "pion-ros has no PLC status (plc_status not publishing)", d))
         else:
             hb_age = now - self.hb[1] if self.hb else None
             if age is not None and age > stale:
-                lvl, txt = "warn", f"the last PLC status is {age:.0f} s old"
+                lvl, txt = "bad", f"the last PLC status is {age:.0f} s old"
             elif hb_age is not None and hb_age > stale:
-                lvl, txt = "warn", f"heartbeat stuck at {self.hb[0]} for {hb_age:.0f} s"
+                lvl, txt = "bad", f"heartbeat stuck at {self.hb[0]} for {hb_age:.0f} s"
             else:
                 lvl, txt = "ok", f"heartbeat {plc.get('heartbeat')}, status {age:.1f} s old"
             if self.plc_err:
-                lvl, txt = "warn", f"no answer from pion-ros for {since:.0f} s (see ROS · pion-ros); " + txt
+                lvl, txt = "bad", f"no answer from pion-ros for {since:.0f} s (see ROS · pion-ros); " + txt
             out.append(item("PLC", "PLC status", lvl, txt, plc, since))
             outs = ", ".join(f"DQ{i + 1} {'ON' if plc.get(f'dq{i}') else 'off'}" for i in range(4))
             out.append(item("PLC", "Outputs", "info", outs + " (DQ1 = LED)", {f"DQ{i + 1}": plc.get(f"dq{i}") for i in range(4)}))
         nodes = d.get("nodes") or []
         up = lambda n: any(x == n or x.startswith(n) for x in nodes)
-        out.append(item("ROS", "pion-ros", "notice" if self.plc_err else "ok",
+        out.append(item("ROS", "pion-ros", "problem" if self.plc_err else "ok",
                         ("no answer now; " if self.plc_err else "") + f"{len(nodes)} nodes: {', '.join(nodes)}", dict(nodes=nodes)))
-        out.append(item("ROS", "PLC status node", "ok" if up("plc_status") else "notice", "plc_status " + ("up" if up("plc_status") else "NOT running")))
-        out.append(item("ROS", "Rosbag recording", "ok" if up("rosbag2_recorder") else "notice",
+        out.append(item("ROS", "PLC status node", "ok" if up("plc_status") else "problem", "plc_status " + ("up" if up("plc_status") else "NOT running")))
+        out.append(item("ROS", "Rosbag recording", "ok" if up("rosbag2_recorder") else "problem",
                         "rosbag2_recorder " + ("up" if up("rosbag2_recorder") else "NOT running: nothing is recorded")))
         return out
 
@@ -522,6 +508,36 @@ class Monitor:
             return dict(self.snapshot, server_time=self.clock(), relay=self.a.relay)
 
 
+def collapse(items, group, into):
+    """The items of `group` as one line, first in the card `into`: its worst level, the readings' span, how many
+    are not connected, and each one in the details."""
+    mine = [i for i in items if i["group"] == group]
+    if not mine:
+        return items
+    rest = [i for i in items if i["group"] != group]
+    worst = max(mine, key=lambda i: RANK[i["level"]])["level"]
+    unconnected = [i for i in mine if i["text"].startswith("not connected")]
+    read = [i for i in mine if i not in unconnected and i["details"].get("raw") is not None and not i["text"].startswith("no value")]
+    vals = []
+    for i in read:
+        try:
+            vals.append(float(i["text"].split()[0]))
+        except (ValueError, IndexError):
+            pass
+    flagged = [i for i in mine if RANK[i["level"]] >= RANK["warn"]]   # safety first, by name
+    parts = [f"{i['name']}: {i['text']}" for i in flagged]
+    if vals:
+        unit = read[0]["text"].split()[1] if len(read[0]["text"].split()) > 1 else ""
+        parts.append((f"{min(vals):g} to {max(vals):g} {unit}" if len(vals) > 1 else f"{vals[0]:g} {unit}") + f" ({len(vals)} reading)")
+    if unconnected:
+        parts.append(f"{len(unconnected)} not connected")
+    if not parts:
+        parts.append("no values")
+    one = item(into, group, worst, " · ".join(parts), {i["name"]: i["text"] for i in mine})
+    at = next((k for k, i in enumerate(rest) if i["group"] == into), len(rest))
+    return rest[:at] + [one] + rest[at:]
+
+
 def clock_item(G, rf):
     ck = rf.get("clock")
     if not ck:
@@ -530,10 +546,10 @@ def clock_item(G, rf):
     lost_in, lost_before = stop.get("lost_since_last_check") or [], start.get("lost_since_last_check") or []
     unlocked = sorted(set((start.get("unlocked") or []) + (stop.get("unlocked") or [])))
     if lost_in or unlocked:
-        lvl, txt = "notice", "; ".join(([f"lost during the run: {', '.join(lost_in)}"] if lost_in else []) +
+        lvl, txt = "problem", "; ".join(([f"lost during the run: {', '.join(lost_in)}"] if lost_in else []) +
                                     ([f"not locked: {', '.join(unlocked)}"] if unlocked else []))
     elif lost_before:
-        lvl, txt = "notice", f"lost before the run, locked again: {', '.join(lost_before)} (16 ns phase may have changed)"
+        lvl, txt = "problem", f"lost before the run, locked again: {', '.join(lost_before)} (16 ns phase may have changed)"
     else:
         lvl, txt = "ok", "all locked at the start" + (" and the stop" if stop else "")
     return item(G, "Board clocks", lvl, txt, dict(start=start, stop=stop))

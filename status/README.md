@@ -8,11 +8,12 @@ the online dashboard or pion-ros.
 |---|---|
 | green | as it should be |
 | grey | a plain fact, not running, or no data |
-| blue | information the user needs to read: DAQ (run problems, board clocks, disk), the online analysis, the LED, ROS, sensors not connected |
-| yellow, red (flashing; a ring = act now) | **safety only**: the gas sensors, the Cherenkov pressure and the temperatures by their rules; a safety sensor reading outside its range; the PLC status (which carries those readings) missing or stale |
+| blue | information to read: sensors not connected, placeholders in experiment.json, a non-safety input out of range |
+| pink | a data problem that is not a safety matter: run problems, board clocks, a board not writing, the analysis, disk, the LED, ROS |
+| yellow, red (flashing; a ring = act now) | **safety only**: the gas sensors, the Cherenkov pressure and the temperatures by their rules; a safety sensor reading outside its range (yellow); the PLC status, which carries those readings, missing or stale (red) |
 
-A big lamp per card on top (fixed order: Cherenkov, DAQ, Online analysis, Tracker temperatures,
-Boards, LED trigger, PLC, ROS), the cards below in the same order. Skins: Panel, Retro, Minimal.
+A big lamp per card on top (fixed order: Cherenkov, DAQ, Online analysis, Trackers, PLC, ROS), the
+cards below in the same order. Skins: Panel, Retro, Minimal.
 
     python3 status/status_server.py          # on odin; standard library only
 
@@ -26,12 +27,11 @@ within their card by dragging; the order is kept in the browser ("reset lines" r
 
 | card | items | from |
 |---|---|---|
-| DAQ | FSUDAQ running, the last run (running, stopped, stopped with problems, no stop), board clocks, disk (with a bar), data rate | `/proc`, the newest run folder's `<run>_run.json`, the data path |
-| Boards | one dot per board: writing or silent while a run goes, its clock; model otherwise | online dashboard, run file |
+| Cherenkov | pressure (ai0), stack and floor gas sensors (ai1, ai2), Cherenkov temperatures (tc6, tc7), each with its change over 10 s / 1 min / 10 min | PLC inputs, `limits.json` |
+| DAQ | FSUDAQ running, the last run (running, stopped, problems, no stop), board clocks, the boards (one line; a line per board not writing), a failed LED command, disk (with a bar), data rate | `/proc`, the newest run folder's `<run>_run.json`, the online dashboard, the data path |
 | Online analysis | the dashboard's status, health, lag; placeholders in `online/experiment.json` | `GET localhost:8050/state` |
-| LED trigger | enabled, the last command and the PLC's answer, the relay | run file, pion-ros |
-| PLC | heartbeat counting, status age, outputs, the Trumeters (ai5-ai7) | pion-ros `GET :8770/status` |
-| Cherenkov, Tracker temperatures (and any group named on /limits) | pressure (ai0), gas sensors (ai1, ai2), thermocouples (tc0/1 tracker 0, tc2/3 tracker 1, tc4/5 tracker 2, tc6/7 Cherenkov), each judged by its rules and expected range | PLC inputs, `limits.json` |
+| Trackers | the six tracker thermocouples as one line (tc0/1 tracker 0, tc2/3 tracker 1, tc4/5 tracker 2; each in the details), the T0, T1 + T2 and ESPEON currents (Trumeters, ai5-ai7), LED relay live | PLC inputs, pion-ros |
+| PLC | heartbeat counting, status age, outputs | pion-ros `GET :8770/status` |
 | PLC inputs (not named) | the raw value of every input not named yet | PLC |
 | ROS | pion-ros answering, plc_status, rosbag2_recorder | pion-ros |
 

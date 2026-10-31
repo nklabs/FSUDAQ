@@ -8,7 +8,7 @@
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
   :root { --bg:#f4f5f7; --card:#fff; --fg:#1d232b; --muted:#6b7480; --soft:#8a929c; --line:#eceef1;
-          --ok:#2e9e4f; --info:#9aa3ad; --idle:#2f7fd8; --nodata:var(--info); --warn:#e0a100; --bad:#d6342c; --crit:var(--bad); }
+          --ok:#2e9e4f; --info:#9aa3ad; --idle:#2f7fd8; --nodata:var(--info); --warn:#e0a100; --bad:#d6342c; --crit:var(--bad); --problem:#e0529c; }
   @media (prefers-color-scheme: dark) { :root { --bg:#121519; --card:#1b1f25; --fg:#e4e8ec; --muted:#98a1ab; --soft:#7c858f; --line:#2a3038;
           --info:#7c858f; --idle:#4b95e8; } }
   * { box-sizing:border-box; }
@@ -43,6 +43,7 @@
   #summary .counts { font-size:11px; font-weight:600; white-space:nowrap; opacity:.85; }
   #summary.ok, #summary.info, #summary.idle { color:#8dff8a; text-shadow:0 0 6px rgba(141,255,138,.4); }
   #summary.notice { color:#6fb6ff; text-shadow:0 0 6px rgba(111,182,255,.45); }
+  #summary.problem { color:#ff7cc0; text-shadow:0 0 6px rgba(255,124,192,.45); }
   #summary.warn { color:#ffc23a; text-shadow:0 0 6px rgba(255,194,58,.45); }
   #summary.bad, #summary.critical { color:#ff5a4d; text-shadow:0 0 7px rgba(255,90,77,.55); animation:pulse 2s ease-in-out infinite; }
   #summary.critical { background:#2a0705; }
@@ -58,7 +59,7 @@
                    background:
                               radial-gradient(circle at 50% 60%, var(--lamp) 0 55%, color-mix(in srgb, var(--lamp) 60%, #000) 100%);
                    box-shadow:inset 0 -3px 6px rgba(0,0,0,.45), 0 0 16px 2px color-mix(in srgb, var(--lamp) 70%, transparent); }
-  #overview .big.ok { --lamp:#36d158; } #overview .big.notice { --lamp:#3d8cf0; } #overview .big.warn { --lamp:#ffb81f; }
+  #overview .big.ok { --lamp:#36d158; } #overview .big.notice { --lamp:#3d8cf0; } #overview .big.problem { --lamp:#ff5fae; } #overview .big.warn { --lamp:#ffb81f; }
   #overview .big.bad, #overview .big.critical { --lamp:#ff3b2f; animation:blink 2s ease-in-out infinite; }
   #overview .big.info, #overview .big.idle, #overview .big.nodata { --lamp:#5d636b; box-shadow:inset 0 -3px 6px rgba(0,0,0,.5); }   /* unlit */
   #overview .bezel:has(.critical) { box-shadow:0 0 0 4px rgba(255,59,47,.45), 0 2px 4px rgba(0,0,0,.55); }
@@ -84,12 +85,12 @@
   .trend { display:block; font-size:10.5px; color:var(--soft); letter-spacing:.01em; margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   body.retro .trend { color:#3e8f86; }
   .dot { width:10px; height:10px; border-radius:50%; margin-top:4px; background:var(--nodata); }
-  .dot.ok { background:var(--ok); } .dot.info { background:var(--info); } .dot.idle { background:var(--info); } .dot.notice { background:var(--idle); } .dot.warn { background:var(--warn); }
+  .dot.ok { background:var(--ok); } .dot.info { background:var(--info); } .dot.idle { background:var(--info); } .dot.notice { background:var(--idle); } .dot.problem { background:var(--problem); } .dot.warn { background:var(--warn); }
   .dot.bad { background:var(--bad); animation:pulse 2s ease-in-out infinite; } .dot.critical { background:var(--crit); animation:pulse 2s ease-in-out infinite; box-shadow:0 0 0 3px color-mix(in srgb, var(--crit) 30%, transparent); }
   .row .dot.warn ~ .text, .row .dot.bad ~ .text, .row .dot.critical ~ .text { color:var(--fg); }
   .bar { grid-column:3 / -1; position:relative; height:6px; border-radius:3px; background:var(--line); overflow:hidden; margin-top:2px; }
   .bar i { position:absolute; left:0; top:0; bottom:0; border-radius:3px; background:var(--ok); }
-  .bar i.notice { background:var(--idle); } .bar i.warn { background:var(--warn); } .bar i.bad { background:var(--bad); animation:pulse 2s ease-in-out infinite; }
+  .bar i.notice { background:var(--idle); } .bar i.problem { background:var(--problem); } .bar i.warn { background:var(--warn); } .bar i.bad { background:var(--bad); animation:pulse 2s ease-in-out infinite; }
   .bar b { position:absolute; top:0; bottom:0; width:2px; background:var(--card); }
   .details { grid-column:2 / -1; font:11px/1.4 ui-monospace, monospace; color:var(--muted); background:color-mix(in srgb, var(--line) 50%, transparent);
              border-radius:6px; padding:8px 10px; white-space:pre-wrap; overflow-wrap:anywhere; max-height:320px; overflow:auto; cursor:text; }
@@ -134,7 +135,7 @@
   body.retro .row { border-top-color:#123a3d; }
   body.retro .row:hover { background:rgba(57,255,136,.06); }
   body.retro .dot { box-shadow:0 0 8px currentColor; }
-  body.retro .dot.ok { box-shadow:0 0 8px #39ff88; } body.retro .dot.notice { box-shadow:0 0 8px #3fb8ff; } body.retro .dot.idle { box-shadow:none; }
+  body.retro .dot.ok { box-shadow:0 0 8px #39ff88; } body.retro .dot.notice { box-shadow:0 0 8px #3fb8ff; } body.retro .dot.problem { box-shadow:0 0 8px #ff5fae; } body.retro .dot.idle { box-shadow:none; }
   body.retro .dot.warn { box-shadow:0 0 8px #ffb000; } body.retro .dot.bad { box-shadow:0 0 10px #ff3d2e; }
   body.retro .dot.info, body.retro .dot.nodata { box-shadow:none; }
   body.retro .details { background:rgba(0,0,0,.35); color:#7fe8d4; border:1px solid #123a3d; }
@@ -156,14 +157,14 @@
   body.minimal .skins input:checked + span { background:none; box-shadow:none; color:var(--fg); text-decoration:underline; }
   body.minimal #summary { background:none; border:none; box-shadow:none; padding:4px 0; font-weight:500; color:var(--fg); text-shadow:none; animation:none; }
   body.minimal #summary::before { content:none; }
-  body.minimal #summary.notice .t { color:var(--idle); } body.minimal #summary.warn .t { color:var(--warn); } body.minimal #summary.bad .t, body.minimal #summary.critical .t { color:var(--bad); }
+  body.minimal #summary.notice .t { color:var(--idle); } body.minimal #summary.problem .t { color:var(--problem); } body.minimal #summary.warn .t { color:var(--warn); } body.minimal #summary.bad .t, body.minimal #summary.critical .t { color:var(--bad); }
   body.minimal #summary.critical { background:none; }
   body.minimal #overview { justify-content:flex-start; gap:6px 18px; margin-top:8px; }
   body.minimal #overview a { flex-direction:row; width:auto; gap:6px; }
   body.minimal #overview .bezel { width:10px; height:10px; padding:0; background:none; box-shadow:none; }
   body.minimal #overview a:hover .bezel { transform:none; }
   body.minimal #overview .big { background:var(--lamp); box-shadow:none; }
-  body.minimal #overview .big.info, body.minimal #overview .big.idle, body.minimal #overview .big.nodata { --lamp:var(--info); } body.minimal #overview .big.notice { --lamp:var(--idle); }
+  body.minimal #overview .big.info, body.minimal #overview .big.idle, body.minimal #overview .big.nodata { --lamp:var(--info); } body.minimal #overview .big.notice { --lamp:var(--idle); } body.minimal #overview .big.problem { --lamp:var(--problem); }
   body.minimal #overview .bezel:has(.critical) { box-shadow:0 0 0 2px var(--bad); border-radius:50%; }
   body.minimal #overview span { background:none; border:none; box-shadow:none; padding:0; color:var(--muted); font-weight:500; letter-spacing:0; text-transform:none; font-size:12px; }
   body.minimal .grid { gap:0 32px; }
@@ -185,11 +186,11 @@
   <div id="overview"></div>
 </section>
 <div class="grid" id="grid"></div>
-<footer><i style="background:var(--ok);margin-left:0"></i>as it should be<i style="background:var(--info)"></i>a plain fact, not running, or no data<i style="background:var(--idle)"></i>to read<i style="background:var(--warn)"></i>safety warning<i style="background:var(--bad)"></i>safety alarm (flashing; a ring: act now)<br>
+<footer><i style="background:var(--ok);margin-left:0"></i>as it should be<i style="background:var(--info)"></i>a plain fact, not running, or no data<i style="background:var(--idle)"></i>to read<i style="background:var(--problem)"></i>data problem (not safety)<i style="background:var(--warn)"></i>safety warning<i style="background:var(--bad)"></i>safety alarm (flashing; a ring: act now)<br>
 Click a line for what is behind it. The cards follow the lamps; drag a line within its card to rearrange (kept in this browser; "reset lines" undoes it). Read-only: FSUDAQ, the online dashboard and pion-ros are not changed from here.</footer>
 <script>
-const ORDER = ['Cherenkov', 'DAQ', 'Online analysis', 'Tracker temperatures', 'Boards', 'LED trigger', 'PLC', 'ROS'];   // the lamps and the cards, always in this order
-const RANK = {info:0, idle:0, ok:1, nodata:2, notice:3, warn:4, bad:5, critical:6};   // yellow and red: safety only; blue: to read
+const ORDER = ['Cherenkov', 'DAQ', 'Online analysis', 'Trackers', 'PLC', 'ROS'];   // the lamps and the cards, always in this order
+const RANK = {info:0, idle:0, ok:1, nodata:2, notice:3, problem:4, warn:5, bad:6, critical:7};   // yellow, red: safety only; pink: a data problem; blue: to read
 const KEY = 'status-card-order', ROWKEY = 'status-row-order';   // ROWKEY: group -> line names in the order dragged to
 const esc = t => String(t ?? '').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const store = { get(k,d){ try { const v=localStorage.getItem(k); return v===null?d:JSON.parse(v); } catch(e){ return d; } },
@@ -225,7 +226,7 @@ function render(S){
   const c = S.summary.counts || {};
   const say = (stale ? `NO CONNECTION to the status server since ${new Date(lastOK).toLocaleTimeString()} — shown as it was then. ` : '') + S.summary.text;
   sm.innerHTML = `<span class="t" title="${esc(say)}">${esc(say)}</span>` +
-    `<span class="counts">${['critical','bad','warn','notice'].filter(k=>c[k]).map(k=>c[k]+' '+({critical:'act now', bad:'safety alarm', warn:'safety warning', notice:'to read'})[k]).join(' · ')}</span>`;
+    `<span class="counts">${['critical','bad','warn','problem','notice'].filter(k=>c[k]).map(k=>c[k]+' '+({critical:'act now', bad:'safety alarm', warn:'safety warning', problem:'data problem', notice:'to read'})[k]).join(' · ')}</span>`;
   document.getElementById('updated').textContent = S.updated ? new Date(S.updated*1000).toLocaleTimeString([], {hour12:false}) : '--:--:--';
   if(dragging || dragRow) return;   // nothing moves under the mouse while a card or a line is being dragged
   const groups = {};
