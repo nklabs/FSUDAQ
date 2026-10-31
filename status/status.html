@@ -6,9 +6,9 @@
 <title>Experiment Status</title>
 <style>
   :root { --bg:#f4f5f7; --card:#fff; --fg:#1d232b; --muted:#6b7480; --soft:#8a929c; --line:#eceef1;
-          --ok:#2e9e4f; --info:#9aa3ad; --idle:#2f7fd8; --nodata:#cdd2d8; --warn:#e0a100; --bad:#d6342c; --crit:#a3001b; }
+          --ok:#2e9e4f; --info:#9aa3ad; --idle:#2f7fd8; --nodata:var(--info); --warn:#e0a100; --bad:#d6342c; --crit:var(--bad); }
   @media (prefers-color-scheme: dark) { :root { --bg:#121519; --card:#1b1f25; --fg:#e4e8ec; --muted:#98a1ab; --soft:#7c858f; --line:#2a3038;
-          --info:#7c858f; --nodata:#4a525b; --idle:#4b95e8; } }
+          --info:#7c858f; --idle:#4b95e8; } }
   * { box-sizing:border-box; }
   body { margin:0; padding:16px 20px 32px; background:var(--bg); color:var(--fg); font:13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
   header { display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; margin-bottom:12px; }
@@ -24,7 +24,7 @@
   #summary .counts { font-size:12px; font-weight:500; color:var(--muted); white-space:nowrap; }
   #summary.ok, #summary.info, #summary.idle { background:color-mix(in srgb, var(--ok) 12%, var(--card)); border-left-color:var(--ok); }
   #summary.warn { background:color-mix(in srgb, var(--warn) 16%, var(--card)); border-left-color:var(--warn); }
-  #summary.bad { background:color-mix(in srgb, var(--bad) 14%, var(--card)); border-left-color:var(--bad); }
+  #summary.bad { background:color-mix(in srgb, var(--bad) 14%, var(--card)); border-left-color:var(--bad); animation:pulse 1s infinite; }
   #summary.critical { background:var(--crit); border-left-color:var(--crit); color:#fff; animation:pulse 1s infinite; } #summary.critical .counts { color:#fff; }
   #summary.stale { background:#555; border-left-color:#333; color:#fff; }
   /* the big picture */
@@ -34,7 +34,7 @@
   #overview .big { width:64px; height:64px; border-radius:50%; background:var(--nodata); transition:transform .15s; }
   #overview a:hover .big { transform:scale(1.06); }
   #overview .big.ok { background:var(--ok); } #overview .big.info { background:var(--info); } #overview .big.idle { background:var(--idle); }
-  #overview .big.warn { background:var(--warn); } #overview .big.bad { background:var(--bad); }
+  #overview .big.warn { background:var(--warn); } #overview .big.bad { background:var(--bad); animation:pulse 1s infinite; }
   #overview .big.critical { background:var(--crit); animation:pulse 1s infinite; box-shadow:0 0 0 6px color-mix(in srgb, var(--crit) 30%, transparent); }
   #overview span { font-size:12px; font-weight:550; line-height:1.2; }
   @media (max-width: 480px) { #overview .big { width:48px; height:48px; } #overview a { width:68px; } }
@@ -57,11 +57,11 @@
   .age { color:var(--soft); font-size:11px; white-space:nowrap; }
   .dot { width:10px; height:10px; border-radius:50%; margin-top:4px; background:var(--nodata); }
   .dot.ok { background:var(--ok); } .dot.info { background:var(--info); } .dot.idle { background:var(--idle); } .dot.warn { background:var(--warn); }
-  .dot.bad { background:var(--bad); } .dot.critical { background:var(--crit); animation:pulse 1s infinite; box-shadow:0 0 0 3px color-mix(in srgb, var(--crit) 30%, transparent); }
+  .dot.bad { background:var(--bad); animation:pulse 1s infinite; } .dot.critical { background:var(--crit); animation:pulse 1s infinite; box-shadow:0 0 0 3px color-mix(in srgb, var(--crit) 30%, transparent); }
   .row .dot.warn ~ .text, .row .dot.bad ~ .text, .row .dot.critical ~ .text { color:var(--fg); }
   .bar { grid-column:3 / -1; position:relative; height:6px; border-radius:3px; background:var(--line); overflow:hidden; margin-top:2px; }
   .bar i { position:absolute; left:0; top:0; bottom:0; border-radius:3px; background:var(--ok); }
-  .bar i.warn { background:var(--warn); } .bar i.bad { background:var(--bad); }
+  .bar i.warn { background:var(--warn); } .bar i.bad { background:var(--bad); animation:pulse 1s infinite; }
   .bar b { position:absolute; top:0; bottom:0; width:2px; background:var(--card); }
   .details { grid-column:2 / -1; font:11px/1.4 ui-monospace, monospace; color:var(--muted); background:color-mix(in srgb, var(--line) 50%, transparent);
              border-radius:6px; padding:8px 10px; white-space:pre-wrap; overflow-wrap:anywhere; max-height:320px; overflow:auto; cursor:text; }
@@ -76,7 +76,7 @@
 <div id="summary"><span class="t">connecting…</span></div>
 <div id="overview"></div>
 <div class="grid" id="grid"></div>
-<footer><i style="background:var(--ok);margin-left:0"></i>as it should be<i style="background:var(--idle)"></i>not running<i style="background:var(--info)"></i>a plain fact<i style="background:var(--nodata)"></i>no data<i style="background:var(--warn)"></i>look at it<i style="background:var(--bad)"></i>wrong<i style="background:var(--crit)"></i>flashing: act now<br>
+<footer><i style="background:var(--ok);margin-left:0"></i>as it should be<i style="background:var(--idle)"></i>not running<i style="background:var(--info)"></i>a plain fact, or no data<i style="background:var(--warn)"></i>look at it<i style="background:var(--bad)"></i>wrong (flashing)<i style="background:var(--crit)"></i>act now (flashing, with a ring)<br>
 Click a line for what is behind it. Drag a card by its title, or a line within its card, to rearrange (kept in this browser; "reset layout" undoes it). Read-only: FSUDAQ, the online dashboard and pion-ros are not changed from here.</footer>
 <script>
 const ORDER = ['Cherenkov', 'DAQ', 'Online analysis', 'Trackers', 'Boards', 'LED trigger', 'PLC', 'ROS'];   // the big circles always; the cards until dragged
