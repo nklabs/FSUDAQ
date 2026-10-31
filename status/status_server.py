@@ -63,12 +63,13 @@ DEFAULT_LIMITS = {
          "rules": [{"at_or_above": 5, "level": "warn"}, {"at_or_above": 10, "level": "bad"},
                    {"at_or_above": 100, "level": "critical"}]},
     ] + [{"id": f"trumeter_{i - 4}", "name": {5: "T0 current", 6: "T1 + T2 current", 7: "ESPEON current"}[i] + f" (Trumeter {i - 4})", "group": "PLC", "source": f"plc.ai{i}",
-          "scale": 1.0, "offset": 0.0, "unit": "", "digits": 3, "range": [0, 5], "rules": []} for i in (5, 6, 7)]
+          # Trumeters 1 and 2 read half of what the meters show (31 Oct 2026): scale 2
+          "scale": 2.0 if i < 7 else 1.0, "offset": 0.0, "unit": "", "digits": 3, "range": [0, 10 if i < 7 else 5], "rules": []} for i in (5, 6, 7)]
       # two thermocouples per detector: tc0/1 tracker 0, tc2/3 tracker 1, tc4/5 tracker 2, tc6/7 the Cherenkov.
       # An open input on this card reads a noisy staircase (about 120-520) or 3276.7, which looks like a real temperature:
       # "connected" says which are plugged in; the others show as not connected whatever they read.
       + [{"id": f"tc{i}", "name": (f"Tracker {i // 2} temperature {'AB'[i % 2]}" if i < 6 else f"Cherenkov temperature {'AB'[i % 2]}") + f" (tc{i})",
-          "group": "Trackers" if i < 6 else "Cherenkov", "source": f"plc.tc{i}",
+          "group": "Tracker temperatures" if i < 6 else "Cherenkov", "source": f"plc.tc{i}",
           "scale": 1.0, "offset": 0.0, "unit": "°C", "digits": 1, "range": [-50, 1300], "rules": [{"above": 80, "level": "bad"}],
           "connected": i >= 6} for i in range(8)],   # tc0-tc5 read open inputs (31 Oct 2026): tick them on /limits when plugged in
     "unused": ["plc.ai3", "plc.ai4"],
@@ -309,8 +310,10 @@ class Monitor:
             elif st is None:
                 out.append(item(G, "Run", "bad", f"run {rf.get('run')} ({name}) has no stop: FSUDAQ ended during the run", det))
             elif st.get("problems"):
-                out.append(item(G, "Run", "bad", f"run {rf.get('run')} stopped {st.get('time', '')[11:19]} with problems: "
-                                + "; ".join(st["problems"]), det))
+                p = st["problems"]   # the first, short; all of them in the details
+                first = p[0] if len(p[0]) <= 90 else p[0][:87].rstrip() + "..."
+                out.append(item(G, "Run", "bad", f"run {rf.get('run')} stopped {st.get('time', '')[11:19]} with {len(p)} problem(s): {first}"
+                                + (f" (+{len(p) - 1} more, see details)" if len(p) > 1 else ""), dict(det, problems=p)))
             else:
                 out.append(item(G, "Run", "info", f"last run {rf.get('run')} ({name}) stopped {st.get('time', '')[11:19]} "
                                 f"after {st.get('run_ms', 0) / 60000:.1f} min", det))

@@ -54,7 +54,7 @@
                      box-shadow:0 2px 4px rgba(0,0,0,.55), inset 0 0 0 1px rgba(0,0,0,.35); transition:transform .12s; }
   #overview a:hover .bezel { transform:scale(1.05); }
   #overview .big { --lamp:#4b5057; width:100%; height:100%; border-radius:50%;
-                   background:radial-gradient(circle at 34% 28%, rgba(255,255,255,.75) 0 8%, rgba(255,255,255,.18) 22%, transparent 46%),
+                   background:
                               radial-gradient(circle at 50% 60%, var(--lamp) 0 55%, color-mix(in srgb, var(--lamp) 60%, #000) 100%);
                    box-shadow:inset 0 -3px 6px rgba(0,0,0,.45), 0 0 16px 2px color-mix(in srgb, var(--lamp) 70%, transparent); }
   #overview .big.ok { --lamp:#36d158; } #overview .big.idle { --lamp:#3d8cf0; } #overview .big.warn { --lamp:#ffb81f; }
@@ -71,7 +71,7 @@
   .card.dragging { opacity:.4; } .card.drop { outline:2px dashed var(--soft); outline-offset:2px; }
   .card.flash { outline:3px solid var(--idle); outline-offset:2px; }
   .card h2 { font-size:12px; font-weight:650; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:0 0 6px;
-             display:flex; gap:8px; align-items:center; cursor:grab; user-select:none; }
+             display:flex; gap:8px; align-items:center; user-select:none; }
   .card h2 .grip { margin-left:auto; color:var(--soft); letter-spacing:-2px; opacity:0; transition:opacity .15s; }
   .card:hover h2 .grip { opacity:1; }
   .row { display:grid; grid-template-columns:12px 160px 1fr auto; gap:10px; align-items:start; padding:6px 4px; border-top:1px solid var(--line); cursor:pointer; border-radius:4px; }
@@ -95,17 +95,14 @@
   .mode { font-size:10px; font-weight:600; text-transform:none; letter-spacing:0; border-radius:10px; padding:1px 8px; color:var(--muted); background:var(--line); }
   footer { margin-top:18px; color:var(--soft); font-size:11px; line-height:1.6; }
   footer i { display:inline-block; width:8px; height:8px; border-radius:50%; margin:0 4px 0 10px; vertical-align:0; }
-  /* ------------------------------------------------ the skin switch: a panel slide switch */
-  .skin { display:flex; align-items:center; gap:8px; cursor:pointer; user-select:none; margin-right:6px;
-          font-size:10.5px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:#cfd5db; }
-  .skin input { position:absolute; opacity:0; width:0; height:0; }
-  .skin i { position:relative; width:38px; height:20px; border-radius:10px; background:#0d0f11; border:1px solid #000;
-            box-shadow:inset 0 2px 4px rgba(0,0,0,.8), 0 1px 0 rgba(255,255,255,.08); transition:background .2s; }
-  .skin i::after { content:""; position:absolute; top:2px; left:2px; width:14px; height:14px; border-radius:50%;
-                   background:linear-gradient(180deg, #e9ecef, #9aa1a9); box-shadow:0 1px 2px rgba(0,0,0,.6); transition:left .2s; }
-  .skin input:checked + i { background:#ff7a1a; box-shadow:inset 0 2px 4px rgba(0,0,0,.5), 0 0 10px rgba(255,122,26,.6); }
-  .skin input:checked + i::after { left:20px; }
-  .skin input:focus-visible + i { outline:2px solid #ff7a1a; outline-offset:2px; }
+  /* ------------------------------------------------ the skin selector: a three-position panel switch */
+  .skins { display:inline-flex; margin-right:6px; padding:2px; border-radius:5px; background:#0d0f11; border:1px solid #000;
+           box-shadow:inset 0 2px 4px rgba(0,0,0,.8), 0 1px 0 rgba(255,255,255,.08); }
+  .skins label { cursor:pointer; }
+  .skins input { position:absolute; opacity:0; width:0; height:0; }
+  .skins span { display:block; padding:3px 9px; border-radius:3px; font-size:10px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:#8d959e; }
+  .skins input:checked + span { color:#1d2126; background:linear-gradient(180deg, #e9ecef, #a6adb5); box-shadow:0 1px 2px rgba(0,0,0,.6); }
+  .skins input:focus-visible + span { outline:2px solid #ff7a1a; outline-offset:1px; }
 
   /* ------------------------------------------------ the retro-future skin: a 1970s control room, CRT screens */
   body.retro { --bg:#0a0f1a; --card:#0c1a1f; --fg:#b8fff0; --muted:#5fd1bd; --soft:#3e8f86; --line:#123a3d;
@@ -124,7 +121,7 @@
   body.retro .panel nav a, body.retro .panel nav button { background:linear-gradient(180deg, #ff9a3c, #e0620c); color:#2b1404; border:1px solid #7a3405;
                       border-radius:14px; box-shadow:inset 0 1px 0 rgba(255,255,255,.45), 0 2px 0 #7a3405; }
   body.retro .panel nav a:hover, body.retro .panel nav button:hover { background:linear-gradient(180deg, #ffad5c, #ee7020); }
-  body.retro .skin { color:#2b2116; }
+  body.retro .skins { background:#2b2116; } body.retro .skins input:checked + span { background:linear-gradient(180deg, #ff9a3c, #e0620c); color:#2b1404; }
   body.retro #summary { background:#071512; border-radius:14px; border:2px solid #2b2116; box-shadow:inset 0 0 18px rgba(57,255,136,.12), inset 0 2px 6px rgba(0,0,0,.9); }
   body.retro #overview .bezel { background:conic-gradient(from 210deg, #fff1cf, #a88a55, #f0dcae, #7a6238, #fff1cf); }
   body.retro #overview span { background:#2b2116; color:#ffd27a; border-color:#120d08; border-radius:8px; }
@@ -144,21 +141,53 @@
   body.retro .bar { background:#123a3d; } body.retro .bar b { background:#0c1a1f; }
   body.retro footer { color:#3e8f86; }
   body.retro .grid { gap:26px; padding:0 7px; } body.retro .panel { margin:0 7px 26px; }
+  /* ------------------------------------------------ the minimal skin: just the facts */
+  body.minimal { --bg:#fff; --card:#fff; --fg:#111; --muted:#555; --soft:#999; --line:#eee; background:#fff; }
+  @media (prefers-color-scheme: dark) { body.minimal { --bg:#000; --card:#000; --fg:#eee; --muted:#aaa; --soft:#666; --line:#1a1a1a; background:#000; } }
+  body.minimal .panel { background:none; border:none; box-shadow:none; color:var(--fg); padding:0 0 12px; border-radius:0; border-bottom:1px solid var(--line); }
+  body.minimal .panel .screw { display:none; }
+  body.minimal .panel h1 { background:none; border:none; box-shadow:none; padding:0; color:var(--fg); font-weight:700; letter-spacing:.1em; }
+  body.minimal .readout { background:none; border:none; box-shadow:none; padding:0; color:var(--soft); text-shadow:none; font-weight:400; }
+  body.minimal .panel nav a, body.minimal .panel nav button { background:none; border:none; box-shadow:none; padding:0 0 0 10px; color:var(--soft); }
+  body.minimal .panel nav a:hover, body.minimal .panel nav button:hover { background:none; color:var(--fg); }
+  body.minimal .skins { background:none; border:none; box-shadow:none; padding:0; }
+  body.minimal .skins span { padding:0 6px; color:var(--soft); }
+  body.minimal .skins input:checked + span { background:none; box-shadow:none; color:var(--fg); text-decoration:underline; }
+  body.minimal #summary { background:none; border:none; box-shadow:none; padding:4px 0; font-weight:500; color:var(--fg); text-shadow:none; animation:none; }
+  body.minimal #summary::before { content:none; }
+  body.minimal #summary.warn .t { color:var(--warn); } body.minimal #summary.bad .t, body.minimal #summary.critical .t { color:var(--bad); }
+  body.minimal #summary.critical { background:none; }
+  body.minimal #overview { justify-content:flex-start; gap:6px 18px; margin-top:8px; }
+  body.minimal #overview a { flex-direction:row; width:auto; gap:6px; }
+  body.minimal #overview .bezel { width:10px; height:10px; padding:0; background:none; box-shadow:none; }
+  body.minimal #overview a:hover .bezel { transform:none; }
+  body.minimal #overview .big { background:var(--lamp); box-shadow:none; }
+  body.minimal #overview .big.info, body.minimal #overview .big.nodata { --lamp:var(--info); }
+  body.minimal #overview .bezel:has(.critical) { box-shadow:0 0 0 2px var(--bad); border-radius:50%; }
+  body.minimal #overview span { background:none; border:none; box-shadow:none; padding:0; color:var(--muted); font-weight:500; letter-spacing:0; text-transform:none; font-size:12px; }
+  body.minimal .grid { gap:0 32px; }
+  body.minimal .card { background:none; box-shadow:none; border-radius:0; padding:14px 0 6px; }
+  body.minimal .card h2 { letter-spacing:.05em; }
+  body.minimal .row { border-top:none; padding:2px 0; }
+  body.minimal .row:hover { background:none; }
+  body.minimal .details { background:none; border-left:2px solid var(--line); border-radius:0; }
+  body.minimal .bar { height:2px; } body.minimal .mode { background:none; padding:0; }
+  body.minimal footer { border-top:1px solid var(--line); padding-top:8px; }
 </style>
 </head>
 <body>
 <section class="panel"><i class="screw tl"></i><i class="screw tr"></i><i class="screw bl"></i><i class="screw br"></i>
   <header><h1>Experiment status</h1><span class="readout" id="updated">--:--:--</span>
-    <nav><label class="skin" title="Retro-future skin (kept in this browser)"><span>Retro-future</span><input type="checkbox" id="skin"><i></i></label>
-      <a href="/limits" target="_blank">Limits</a><button id="reset" title="Put the cards back in their original order">Reset layout</button></nav></header>
+    <nav><span class="skins" title="Skin (kept in this browser)"><label><input type="radio" name="skin" value="panel"><span>Panel</span></label><label><input type="radio" name="skin" value="retro"><span>Retro</span></label><label><input type="radio" name="skin" value="minimal"><span>Minimal</span></label></span>
+      <a href="/limits" target="_blank">Limits</a><button id="reset" title="Put the lines in each card back in their original order">Reset lines</button></nav></header>
   <div id="summary"><span class="t">connecting…</span></div>
   <div id="overview"></div>
 </section>
 <div class="grid" id="grid"></div>
 <footer><i style="background:var(--ok);margin-left:0"></i>as it should be<i style="background:var(--idle)"></i>not running<i style="background:var(--info)"></i>a plain fact, or no data<i style="background:var(--warn)"></i>look at it<i style="background:var(--bad)"></i>wrong (flashing)<i style="background:var(--crit)"></i>act now (flashing, with a ring)<br>
-Click a line for what is behind it. Drag a card by its title, or a line within its card, to rearrange (kept in this browser; "reset layout" undoes it). Read-only: FSUDAQ, the online dashboard and pion-ros are not changed from here.</footer>
+Click a line for what is behind it. The cards follow the lamps; drag a line within its card to rearrange (kept in this browser; "reset lines" undoes it). Read-only: FSUDAQ, the online dashboard and pion-ros are not changed from here.</footer>
 <script>
-const ORDER = ['Cherenkov', 'DAQ', 'Online analysis', 'Trackers', 'Boards', 'LED trigger', 'PLC', 'ROS'];   // the big circles always; the cards until dragged
+const ORDER = ['Cherenkov', 'DAQ', 'Online analysis', 'Tracker temperatures', 'Boards', 'LED trigger', 'PLC', 'ROS'];   // the lamps and the cards, always in this order
 const RANK = {info:0, idle:0, ok:1, nodata:2, warn:3, bad:4, critical:5};
 const KEY = 'status-card-order', ROWKEY = 'status-row-order';   // ROWKEY: group -> line names in the order dragged to
 const esc = t => String(t ?? '').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -169,22 +198,13 @@ const grid = document.getElementById('grid'), cards = {};   // group -> its card
 let last = null, lastOK = null, dragging = null, dragRow = null;   // the card, or the line, being dragged
 function ago(s){ if(s==null) return ''; if(s<90) return s.toFixed(0)+' s'; if(s<5400) return (s/60).toFixed(0)+' min'; return (s/3600).toFixed(1)+' h'; }
 function detailText(d){ return Object.entries(d||{}).map(([k,v]) => k + ': ' + (typeof v==='object' && v!==null ? JSON.stringify(v, null, 1) : v)).join('\n'); }
-function order(groups){   // the saved order first, then new groups in the default order
-  const saved = store.get(KEY, []).filter(g=>groups.includes(g));
-  const rest = groups.filter(g=>!saved.includes(g)).sort((a,b)=>{ const ia=ORDER.indexOf(a), ib=ORDER.indexOf(b); return (ia<0?99:ia)-(ib<0?99:ib) || a.localeCompare(b); });
-  return saved.concat(rest);
+function order(groups){   // always the lamps' order: ORDER first, anything else after, by name
+  return groups.slice().sort((a,b)=>{ const ia=ORDER.indexOf(a), ib=ORDER.indexOf(b); return (ia<0?99:ia)-(ib<0?99:ib) || a.localeCompare(b); });
 }
 function cardFor(g){
   if(cards[g]) return cards[g];
   const c = document.createElement('div'); c.className = 'card'; c.dataset.group = g;
-  c.innerHTML = '<h2 draggable="true"><span class="dot"></span><span class="title"></span><span class="m"></span><span class="grip" title="drag to move">⋮⋮</span></h2><div class="rows"></div>';
-  const h = c.querySelector('h2');
-  h.addEventListener('dragstart', e=>{ dragging = c; c.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', g); });
-  h.addEventListener('dragend', ()=>{ c.classList.remove('dragging'); dragging = null; Object.values(cards).forEach(x=>x.classList.remove('drop'));
-    store.set(KEY, [...grid.children].map(x=>x.dataset.group)); if(last) render(last); });
-  c.addEventListener('dragover', e=>{ if(!dragging || dragging===c) return; e.preventDefault(); Object.values(cards).forEach(x=>x.classList.toggle('drop', x===c)); });
-  c.addEventListener('drop', e=>{ if(!dragging || dragging===c) return; e.preventDefault();
-    const kids = [...grid.children]; grid.insertBefore(dragging, kids.indexOf(dragging) < kids.indexOf(c) ? c.nextSibling : c); });
+  c.innerHTML = '<h2><span class="dot"></span><span class="title"></span><span class="m"></span></h2><div class="rows"></div>';   // cards stay in the lamps' order
   return (cards[g] = c);
 }
 function rowHTML(g, it){
@@ -258,13 +278,17 @@ grid.addEventListener('dragend', e=>{
   dragRow.classList.remove('dragging'); dragRow = null; if(last) render(last);
 });
 // the skin switch, kept in this browser
-const skin = document.getElementById('skin');
-{ const q = new URLSearchParams(location.search).get('skin');   // ?skin=retro or ?skin=standard sets it (a bookmark)
-  if(q) store.set('status-skin', q === 'retro' ? 'retro' : ''); }
-skin.checked = store.get('status-skin', '') === 'retro';
-document.body.classList.toggle('retro', skin.checked);
-skin.onchange = ()=>{ document.body.classList.toggle('retro', skin.checked); store.set('status-skin', skin.checked ? 'retro' : ''); };
-document.getElementById('reset').onclick = ()=>{ store.set(KEY, []); store.set(ROWKEY, {}); if(last) render(last); };
+const SKINS = ['panel', 'retro', 'minimal'];
+function setSkin(s){
+  s = SKINS.includes(s) ? s : 'panel';
+  document.body.classList.toggle('retro', s === 'retro'); document.body.classList.toggle('minimal', s === 'minimal');
+  document.querySelectorAll('.skins input').forEach(x=>{ x.checked = x.value === s; });
+  store.set('status-skin', s);
+}
+{ const q = new URLSearchParams(location.search).get('skin');   // ?skin=panel / retro / minimal sets it (a bookmark)
+  setSkin(q || store.get('status-skin', 'panel') || 'panel'); }
+document.querySelectorAll('.skins input').forEach(x=>{ x.onchange = ()=>setSkin(x.value); });
+document.getElementById('reset').onclick = ()=>{ store.set(ROWKEY, {}); if(last) render(last); };
 async function tick(){
   try { const r = await fetch('/api/status', {cache:'no-store', signal:AbortSignal.timeout(5000)}); if(r.ok){ last = await r.json(); lastOK = Date.now(); } } catch(e){}
   if(last) render(last);

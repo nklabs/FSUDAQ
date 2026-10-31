@@ -136,7 +136,7 @@ def scenario_rules(tmp):
     good &= check(find(m, "Cherenkov", NAME["tc6"])["level"] == "ok" and find(m, "Cherenkov", NAME["tc6"])["text"] == "20.6 °C",
                   f"Cherenkov thermocouple: {find(m, 'Cherenkov', NAME['tc6'])}")
     for tc in ("tc2", "tc0"):      # marked not connected: yellow whatever it reads (an open input's staircase, or room temperature)
-        it = find(m, "Trackers", NAME[tc])
+        it = find(m, "Tracker temperatures", NAME[tc])
         good &= check(it["level"] == "warn" and it["text"].startswith("not connected"), f"unconnected {tc}: {it}")
     src.plc["tc6"] = 80.0; clock.t += 2; m.step()
     good &= check(find(m, "Cherenkov", NAME["tc6"])["level"] == "ok", f"80.0 C: {find(m, 'Cherenkov', NAME['tc6'])}")
@@ -179,7 +179,7 @@ def scenario_changes(tmp):
     for label, want in (("10s", 0.1), ("1m", 0.6), ("10m", 6.0)):
         good &= check(ch[label] is not None and abs(ch[label] - want) < 0.01 * want, f"change over {label}: {ch[label]}, expected {want}")
     good &= check(it["trend"].startswith("Δ10s +0.100 · Δ1m +0.600 · Δ10m +6.000"), f"trend line: {it.get('trend')}")
-    good &= check("trend" not in find(m, "Trackers", NAME["tc0"]), "a trend on an input marked not connected")
+    good &= check("trend" not in find(m, "Tracker temperatures", NAME["tc0"]), "a trend on an input marked not connected")
     if good:
         ok("0.1 / 0.6 / 6.0 psig over 10 s / 1 min / 10 min from a 0.01 psig/s ramp under noise; '–' until each interval is covered")
 
@@ -270,7 +270,7 @@ def scenario_run_file(tmp):
     run["led"]["events"].append({"what": "off", "sent": ss.iso(clock.t), "run_ms": 15000, "ok": False, "error": "no answer", "switched": "unknown"})
     write_run(folder, run)
     clock.t += 2; m.step()
-    good &= check(find(m, "DAQ", "Run")["level"] == "bad" and "problems" in find(m, "DAQ", "Run")["text"], f"stop problems: {find(m, 'DAQ', 'Run')}")
+    good &= check(find(m, "DAQ", "Run")["level"] == "bad" and "1 problem(s)" in find(m, "DAQ", "Run")["text"], f"stop problems: {find(m, 'DAQ', 'Run')}")
     good &= check(find(m, "DAQ", "Board clocks")["level"] == "bad" and "Digi-1399" in find(m, "DAQ", "Board clocks")["text"], f"clock lost: {find(m, 'DAQ', 'Board clocks')}")
     it = find(m, "Boards", "Digi-1399")
     good &= check(it["level"] == "bad" and "clock lost during the run" in it["text"] and find(m, "Boards", "Digi-1443")["level"] == "idle",
