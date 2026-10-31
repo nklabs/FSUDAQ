@@ -41,6 +41,7 @@
   /* cards: drag by the title, widen, heighten, collapse; the layout is kept in this browser */
   .bar { display:flex; align-items:center; gap:4px; margin:0 0 4px; }
   .bar h2 { flex:1; margin:0; cursor:grab; user-select:none; }
+  .toolbar input[type=number] { width:64px; font:12px system-ui, sans-serif; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:4px; padding:0 3px; }
   .ctl input[type=number] { width:64px; font:12px system-ui, sans-serif; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:4px; padding:0 3px; }
   #c_q, #c_psd, .cmpgrid canvas.zoomable { cursor:crosshair; }
   /* channels side by side: one panel each, as many per row as fit */
@@ -136,6 +137,12 @@
 </section>
 
 <section id="tab_trk" hidden>
+  <div class="toolbar">
+    <span title="Hits closer than this to the previous one are in the same bunch (the finder's coincidence window)">Bunch window
+      <input type="number" id="win_ns" min="1" max="1000" step="any"> ns</span>
+    <button id="win_apply" title="Use this window from now on: the accumulated counts (both tabs) start again, and the value is kept for the next start">Apply</button>
+    <span id="win_note"></span>
+  </div>
   <div class="tiles">
     <div class="tile"><span class="big" id="rate_bunch">–</span><small>bunches / s</small></div>
     <div class="tile"><span class="big" id="rate_trk">–</span><small>accepted tracks / s</small></div>
@@ -297,6 +304,18 @@ function fillSelects(){
 }
 document.getElementById('sel_ch').onchange = e=>{ selSlot=+e.target.value; store.set('fsudaq-sel-slot', selSlot); fetchChannel(); };
 document.getElementById('sel_ref').onchange = async e=>{ await fetch('/set?ref='+e.target.value); await tick(); fetchChannel(); };
+const winIn = document.getElementById('win_ns'), winNote = document.getElementById('win_note');
+async function applyWindow(){
+  let r = null;
+  try { r = await fetch('/window?ns='+encodeURIComponent(winIn.value)); winNote.textContent = (await r.json()).note; }
+  catch(e){ winNote.textContent = 'not applied: no answer from the dashboard'; }
+  winNote.style.color = r && r.ok ? '' : 'var(--heavy)';
+  winIn.dataset.edited = '';
+  if(r && r.ok){ document.getElementById('clear_note').textContent = 'cleared at '+new Date().toLocaleTimeString()+' (bunch window changed)'; await tick(); fetchChannel(); }
+}
+document.getElementById('win_apply').onclick = applyWindow;
+winIn.oninput = ()=>{ winIn.dataset.edited = '1'; };
+winIn.onkeydown = e=>{ if(e.key==='Enter') applyWindow(); };
 document.getElementById('btn_clear').onclick = async ()=>{ await fetch('/clear'); document.getElementById('clear_note').textContent='cleared at '+new Date().toLocaleTimeString(); await tick(); fetchChannel(); };
 ['occ_mode','occ_log','q_log','dt_log','spec_which','grid_log'].forEach(id=>document.getElementById(id).onchange=()=>{ if(id==='spec_which') fetchChannel(); else draw(); });
 
@@ -347,6 +366,8 @@ function draw(){
   if(!S) return;
   const D=S.daq;
   banner();
+  if(!winIn.dataset.edited && document.activeElement!==winIn) winIn.value = S.window_ns;
+  if(S.window_note && !winNote.textContent) winNote.textContent = S.window_note;
   document.getElementById('folder').textContent = S.folder ? S.folder.split('/').slice(-1)[0] : '';
   document.getElementById('status').textContent = `${S.status} · ${S.workers} workers · ${S.kernels}${S.replay?' · REPLAY':''}`;
   document.getElementById('t_hits').textContent = fmt(D.total_rate);
@@ -594,7 +615,7 @@ function drawTrk(){
     row('counters', (F.installed.length?F.installed.join(', '):'none') + (F.missing.length?' · '+warn('not cabled: '+F.missing.join(', ')):'')) +
     row('timing', (F.timing==='no offsets'?warn('no cable offsets'):F.timing + ', removed before bunching') + ` · accepted within ${F.nsig} σ · no bunch clock: the ${S.window_ns} ns window is the gate` +
         ' · counters (veto, Cherenkov) count anywhere in the bunch, at any charge') +
-    row('bunch window', `${S.window_ns} ns gap`) +
+    row('bunch window', `${S.window_ns} ns gap · from ${S.window_src}` + (S.window_note ? ` · ${S.window_note}` : '')) +
     row('late hits', S.late ? warn(`${S.late.toLocaleString()} hits reached the disk after their time was processed: not in the finder`) +
         ` · ${S.late_recent.toLocaleString()} in the last minute` : 'none') +
     (S.early ? row('before the start', `${S.early.toLocaleString()} hits from before the dashboard started: not in the finder`) : '');

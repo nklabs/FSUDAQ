@@ -754,11 +754,57 @@ def scenario_boundaries(tmp):
                   f"boundaries: early {early[:4].tolist()} late {late[:4].tolist()}, expected 1, 1 each on ch2, ch3")
     files = [(0, b.path(0), {k: A[k] for k in ("ev_start", "nev", "couple", "wpe")})]
     m = online.margin_ps()
-    after = od.slice_task(dict(t0=T, t1=T + PS // 1000, margin=m, files=files, ref=None))["owned"]
-    before = od.slice_task(dict(t0=T - PS // 1000, t1=T, margin=m, files=files, ref=None))["owned"]
+    after = od.slice_task(dict(t0=T, t1=T + PS // 1000, margin=m, files=files, ref=None, window=online.window_ps))["owned"]
+    before = od.slice_task(dict(t0=T - PS // 1000, t1=T, margin=m, files=files, ref=None, window=online.window_ps))["owned"]
     good &= check(after == 2 and before == 2, f"boundaries: slices own {before} before T and {after} from T, expected 2 and 2")
     if good:
         ok("a hit at the boundary is the later slice's, not late; one tick before it is late; offsets removed first")
+
+
+def scenario_window(tmp):
+    print("== the page's bunch window: used from then on, counts restarted, saved in the config for the next start")
+    folder = os.path.join(tmp, "window"); os.makedirs(folder)
+    cfg = os.path.join(tmp, "window.json")
+    with open(cfg, "w") as f:
+        json.dump({"_comment": "kept", "setting": "high"}, f)
+    clock = Clock(); boards = boards_for(folder, seed=7)
+    online = make_online(folder, SERIALS, EIGHT, clock, extra=["--config", cfg])
+    good = check(online.window_ps == 25000 and online.state()["window_src"] == "default", f"window: starts at {online.window_ps} ps")
+    for bad in ("0", "1001", "nan", "x", ""):
+        try:
+            online.set_window(float(bad)); good &= check(False, f"window: {bad!r} accepted")
+        except ValueError:
+            pass
+    good &= check(online.window_ps == 25000, "window: changed by a bad value")
+    drive(online, clock, boards, 0, 5)
+    good &= check(online.state()["hits"] > 0, "window: no hits before the change")
+    note = online.set_window(1000)
+    st = online.state()
+    good &= check(st["window_ns"] == 1000 and st["hits"] == 0 and st["bunches"] == 0 and "saved" in note,
+                  f"window: after the change {st['window_ns']} ns, {st['hits']} hits, {st['bunches']} bunches; '{note}'")
+    with open(cfg) as f:
+        saved = json.load(f)
+    good &= check(saved == {"_comment": "kept", "setting": "high", "window_ns": 1000}, f"window: config now {saved}")
+    good &= check("nothing changed" in online.set_window(1000) and online.state()["window_ns"] == 1000, "window: same value again")
+    # from here every slice is cut with 1000 ns: the finder equals all later hits at once with 1000 ns
+    t_change = online.W
+    drive(online, clock, boards, 5, 15)
+    finish(online, clock, boards)
+    ts, bd, ch, e = [], [], [], []
+    for b in boards:
+        for t, c, ql, qs in b.truth:
+            ts.append(t); bd.append(SERIALS.index(b.serial)); ch.append(c); e.append(ql)
+    args = (online.setup.tables, online.setup.chans, np.array(ts, np.int64), np.array(bd), np.array(ch), np.array(e, np.float64))
+    end = max(ts) + 1   # the bunches that start from the change on
+    wide, narrow = ff.process_hits(*args, 1_000_000, t_change, end), ff.process_hits(*args, 25_000, t_change, end)
+    good &= check(not same_finder(online.acc, wide), f"window: finder differs from 1000 ns at once: {same_finder(online.acc, wide)}")
+    good &= check(bool(same_finder(wide, narrow)), "window: 1000 ns and 25 ns give the same histograms (the test shows nothing)")
+    again = make_online(folder, SERIALS, EIGHT, Clock(), extra=["--config", cfg])
+    good &= check(again.window_ps == 1_000_000 and again.state()["window_src"] == "window.json", f"window: next start {again.window_ps} ps")
+    cli = make_online(folder, SERIALS, EIGHT, Clock(), extra=["--config", cfg, "--window", "40"])
+    good &= check(cli.window_ps == 40_000 and cli.state()["window_src"] == "command line", f"window: --window gives {cli.window_ps} ps")
+    if good:
+        ok("bad values refused; 1000 ns used for every later slice (differs from 25 ns), counts restarted; kept in the config, --window overrides")
 
 
 def scenario_x725(tmp):
@@ -793,7 +839,8 @@ def main():
         for sc in (scenario_steady, scenario_slow, scenario_pause, scenario_damage_rollover, scenario_run_switch,
                    scenario_live_start, scenario_offsets, scenario_replay, scenario_short_hold, scenario_worker_killed,
                    scenario_idle_worker_killed, scenario_falling_behind, scenario_counters, scenario_finished_at_start,
-                   scenario_long_pause, scenario_offsets_dense, scenario_missing_board, scenario_boundaries, scenario_x725):
+                   scenario_long_pause, scenario_offsets_dense, scenario_missing_board, scenario_boundaries, scenario_x725,
+                   scenario_window):
             sc(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

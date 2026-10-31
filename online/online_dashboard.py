@@ -88,6 +88,48 @@ LATE_RECENT_S = 60                            # the page shows late hits of the 
 
 
 # ---------------------------------------------------------------- run configuration
+WINDOW_NS = 25.0                              # bunch window when neither --window nor the config gives one
+WINDOW_RANGE_NS = (1.0, 1000.0)
+
+
+def initial_window(a):
+    """The bunch window (ps) and where it came from: --window, else the config file's window_ns (the page
+    saves it there), else WINDOW_NS."""
+    if a.window is not None:
+        return int(round(a.window * 1000)), "command line"
+    try:
+        with open(a.config) as f:
+            v = float(json.load(f).get("window_ns"))
+        if WINDOW_RANGE_NS[0] <= v <= WINDOW_RANGE_NS[1]:
+            return int(round(v * 1000)), os.path.basename(a.config)
+        say(f"window_ns {v} in {a.config} is out of {WINDOW_RANGE_NS} ns: {WINDOW_NS:g} ns used")
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass                                  # no file, not JSON, no window_ns in it
+    return int(round(WINDOW_NS * 1000)), "default"
+
+
+def save_window(path, ns):
+    """Write window_ns into the config file, keeping the rest of it. Returns what happened, for the page."""
+    if not path:
+        return "not saved (no config file)"
+    try:
+        cfg = {}
+        if os.path.exists(path):
+            with open(path) as f:
+                cfg = json.load(f)
+            if not isinstance(cfg, dict):
+                return f"not saved ({os.path.basename(path)} is not a JSON object)"
+        cfg["window_ns"] = ns
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cfg, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, path)
+        return f"saved in {os.path.basename(path)}"
+    except (OSError, ValueError) as ex:
+        return f"not saved ({ex})"
+
+
 def load_config(a):
     """Setting, cabling, gains, time offsets and map: the command line first, then the config file.
     Returns (values, where each came from, problems)."""
@@ -187,13 +229,13 @@ class Setup:
 _G: dict = {}
 
 
-def _init_worker(tables, chans, window_ps):
+def _init_worker(tables, chans):
     try:
         os.nice(10)                           # below the DAQ, which shares the machine
     except OSError:
         pass
     signal.signal(signal.SIGINT, signal.SIG_IGN)   # the main process decides when to stop
-    _G.update(tables=tables, chans=chans, window_ps=window_ps)
+    _G.update(tables=tables, chans=chans)
 
 
 def _toff_of(slot):
@@ -218,7 +260,7 @@ def slice_task(task: dict) -> dict:
     common clock, is in [t0, t1). Decodes only the couple aggregates that overlap the slice."""
     t_start = time.perf_counter()
     t0, t1, margin = task["t0"], task["t1"], task["margin"]
-    tables, chans, window_ps = _G["tables"], _G["chans"], _G["window_ps"]
+    tables, chans, window_ps = _G["tables"], _G["chans"], task["window"]
     parts = []
     for bi, path, A in task["files"]:
         ts, ch, e, qs = fsu_fast.decode_aggs(path, A["ev_start"], A["nev"], A["couple"], A["wpe"], t0 - margin, t1 + margin)
@@ -429,7 +471,8 @@ class Online:
         self.serials = [int(x) for x in a.boards.split(",") if x.strip()]
         eight = {int(x) for x in a.eight_channel_boards.split(",") if x.strip()}
         self.nch = {s: (8 if s in eight else 16) for s in self.serials}
-        self.window_ps = int(round(a.window * 1000))
+        self.window_ps, self.window_src = initial_window(a)
+        self.window_note = ""                   # the page's last change of the window, and whether it was saved
         self.lock = threading.RLock()           # the loop and the web server's threads
         self.pool = None
         self.setup = None
@@ -459,9 +502,9 @@ class Online:
         self._kill_pool()
         if self.a.workers > 0:
             self.pool = cf.ProcessPoolExecutor(self.a.workers, mp_context=mp.get_context("fork"), initializer=_init_worker,
-                                               initargs=(self.setup.tables, self.setup.chans, self.window_ps))
+                                               initargs=(self.setup.tables, self.setup.chans))
         else:
-            _G.update(tables=self.setup.tables, chans=self.setup.chans, window_ps=self.window_ps)
+            _G.update(tables=self.setup.tables, chans=self.setup.chans)
 
     def _submit(self, kind, task, tries=0, epoch=None):
         fn = ingest_task if kind == "ingest" else slice_task
@@ -741,7 +784,8 @@ class Online:
                 break                           # too thin a slice: wait for more
             t1 = min(target, self.W + max_slice)
             files = [(b.bi, p, A) for b in boards for p, A in b.overlapping(self.W - margin, t1 + margin)]
-            self._submit("slice", dict(t0=int(self.W), t1=int(t1), margin=int(margin), files=files, ref=self.ref_slot))
+            self._submit("slice", dict(t0=int(self.W), t1=int(t1), margin=int(margin), files=files, ref=self.ref_slot,
+                                       window=self.window_ps))
             self.W = t1; n_slices += 1
         all_done = self.W >= target and not self.pending and self.untaken_t is None and not self.behind
         if mode == "running":
@@ -916,7 +960,8 @@ class Online:
                 server_time=now, folder=self.folder, status=self.status, mode=self.mode, kernels="numba" if FAST else "numpy",
                 workers=self.a.workers, in_flight=len(self.pending), oldest_task_s=max(ages) if ages else None,
                 last_result_s=None if self.last_fold_wall is None else now - self.last_fold_wall,
-                replay=bool(self.a.replay), window_ns=self.a.window, hold_s=self.a.hold_s, stall_s=self.a.stall_s,
+                replay=bool(self.a.replay), window_ns=self.window_ps / 1000, window_src=self.window_src,
+                window_note=self.window_note, window_range=WINDOW_RANGE_NS, hold_s=self.a.hold_s, stall_s=self.a.stall_s,
                 quiet_s=self.quiet_s, finished_at_start=self.finished_at_start,
                 live_start=self.since is not None, since_wall=self.reset_wall,
                 processed_s=None if done is None or self.t_first is None else (done - self.t_first) / PS,
@@ -1093,6 +1138,25 @@ class Online:
             self.late_log.clear()
             self.epoch += 1
 
+    def set_window(self, ns):
+        """The page's bunch window: used for the slices cut from now on; the accumulated counts start again
+        (as Clear), so no histogram mixes two windows. Saved in the config file for the next start."""
+        lo, hi = WINDOW_RANGE_NS
+        if not (lo <= ns <= hi):
+            raise ValueError(f"the window must be {lo} to {hi} ns")
+        with self.lock:
+            old = self.window_ps / 1000
+            if int(round(ns * 1000)) == self.window_ps:
+                return f"already {old:g} ns: nothing changed"
+            self.window_ps = int(round(ns * 1000))
+            self.clear()
+            saved = save_window(self.a.config, self.window_ps / 1000)
+            self.window_src = "page"
+            self.window_note = (f"changed from {old:g} to {self.window_ps / 1000:g} ns at {time.strftime('%H:%M:%S')}, counts "
+                                f"restarted; {saved}")
+            say(f"{time.strftime('%H:%M:%S')} bunch window {old:g} -> {self.window_ps / 1000:g} ns ({saved})")
+            return self.window_note
+
     def set_ref(self, sl):
         with self.lock:
             self.ref_slot = sl if sl in self.labels else None
@@ -1150,6 +1214,16 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/clear"):      # the page's Clear: per-channel and finder histograms start again
             self.online.clear()
             self.send_response(204); self.end_headers(); return
+        if self.path.startswith("/window"):     # the page's bunch window [ns]
+            try:
+                note = self.online.set_window(float(q.get("ns", [""])[0]))
+                code = 200
+            except ValueError as ex:
+                note, code = str(ex) if "window" in str(ex) else "not a number", 400
+            body = json.dumps(dict(note=note)).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body)))
+            self.end_headers(); self.wfile.write(body); return
         if self.path.startswith("/set"):        # reference channel for the time differences
             try:
                 self.online.set_ref(int(q.get("ref", ["-1"])[0]))
@@ -1210,9 +1284,10 @@ def parse_args(argv=None):
     p.add_argument("--time-offsets", default=None, help="CSV serial,channel,offset_ns subtracted from each channel's time")
     p.add_argument("--ref-slot", type=int, default=None,
                    help="reference channel for the time differences (board index x 16 + channel); the page can change it")
-    p.add_argument("--window", type=float, default=25.0,
-                   help="bunch building: a gap longer than this starts a new bunch [ns]. 25 = the finder's +-10 ns gate "
-                        "around each plane's expected arrival plus the 4.3 ns T0->T2 flight at beta 0.75")
+    p.add_argument("--window", type=float, default=None,
+                   help="bunch building: a gap longer than this starts a new bunch [ns]; default window_ns in the config file "
+                        "(the page's Bunch window saves it there), else 25 = the finder's +-10 ns gate around each plane's "
+                        "expected arrival plus the 4.3 ns T0->T2 flight at beta 0.75")
     p.add_argument("--stall-s", type=float, default=5.0, help="no couple written for this long: a pause (or the run ended "
                                                               "without word from FSUDAQ)")
     p.add_argument("--hold-s", type=float, default=30.0, help="a couple silent this long no longer holds the finder back, "
