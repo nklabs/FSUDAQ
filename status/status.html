@@ -104,6 +104,14 @@
   .skins { display:inline-flex; margin-right:6px; padding:2px; border-radius:5px; background:#0d0f11; border:1px solid #000;
            box-shadow:inset 0 2px 4px rgba(0,0,0,.8), 0 1px 0 rgba(255,255,255,.08); }
   .skins label { cursor:pointer; }
+  .sizer { display:inline-flex; align-items:center; gap:6px; margin-right:6px; font-size:10px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:#8d959e; }
+  .sizer input { width:110px; accent-color:#ff7a1a; cursor:pointer; }
+  .sizer output { min-width:4.5ch; text-align:right; font-variant-numeric:tabular-nums; }
+  .panel nav .sizer button.on { color:#ff9a3c; }
+  body.retro .sizer { color:#3a2a1a; }
+  body.retro .panel nav .sizer button.on { color:#fff3e0; }
+  body.minimal .sizer { color:var(--soft); }
+  body.minimal .panel nav .sizer button.on { color:var(--fg); text-decoration:underline; }
   .skins input { position:absolute; opacity:0; width:0; height:0; }
   .skins span { display:block; padding:3px 9px; border-radius:3px; font-size:10px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:#8d959e; }
   .skins input:checked + span { color:#1d2126; background:linear-gradient(180deg, #e9ecef, #a6adb5); box-shadow:0 1px 2px rgba(0,0,0,.6); }
@@ -184,6 +192,7 @@
 <section class="panel"><i class="screw tl"></i><i class="screw tr"></i><i class="screw bl"></i><i class="screw br"></i>
   <header><h1>Experiment status</h1><span class="readout" id="updated">--:--:--</span>
     <nav><span class="skins" title="Skin (kept in this browser)"><label><input type="radio" name="skin" value="panel"><span>Panel</span></label><label><input type="radio" name="skin" value="retro"><span>Retro</span></label><label><input type="radio" name="skin" value="minimal"><span>Minimal</span></label></span>
+      <span class="sizer" title="Size (kept in this browser). Fit: as large as still fits the window."><span>Size</span><input type="range" id="size" min="0.7" max="2.2" step="0.05"><output id="sizeval"></output><button id="sizefit">Fit</button></span>
       <a href="/limits" target="_blank">Limits</a><button id="reset" title="Put the lines in each card back in their original order">Reset lines</button></nav></header>
   <div id="summary"><span class="t">connecting…</span></div>
   <div id="overview"></div>
@@ -297,22 +306,29 @@ function setSkin(s){
 document.querySelectorAll('.skins input').forEach(x=>{ x.onchange = ()=>setSkin(x.value); });
 document.getElementById('reset').onclick = ()=>{ store.set(ROWKEY, {}); if(last) render(last); };
 // fill the screen: the largest zoom (text, lamps and spacing together) at which the page still fits the window,
-// at least 1 (then it scrolls); found again when the window changes, when it no longer fits, and each minute
-let zoom = 1, lastFit = 0;
+// at least 1 (then it scrolls); found again when the window changes, when it no longer fits, and each minute.
+// The size slider sets a zoom of its own instead (kept in this browser); Fit goes back to fitting.
+let zoom = 1, lastFit = 0, manual = store.get('status-size', null);
+const sizeIn = document.getElementById('size'), sizeVal = document.getElementById('sizeval'), sizeFit = document.getElementById('sizefit');
+function showSize(z){ sizeIn.value = z; sizeVal.textContent = Math.round(z * 100) + '%'; sizeFit.classList.toggle('on', manual == null); }
 const fits = () => document.documentElement.scrollHeight <= innerHeight + 1;
 function fit(){
+  if(manual != null){ zoom = manual; document.body.style.zoom = zoom; lastFit = Date.now(); showSize(zoom); return; }
   let lo = 1, hi = 2.2;
   document.body.style.zoom = hi;
   if(fits()) lo = hi;
   else for(let k = 0; k < 8; k++){ const m = (lo + hi) / 2; document.body.style.zoom = m; if(fits()) lo = m; else hi = m; }
-  zoom = Math.floor(lo * 100) / 100; document.body.style.zoom = zoom; lastFit = Date.now();
+  zoom = Math.floor(lo * 100) / 100; document.body.style.zoom = zoom; lastFit = Date.now(); showSize(zoom);
 }
+sizeIn.oninput = ()=>{ sizeVal.textContent = Math.round(sizeIn.value * 100) + '%'; };     // applied on release: the
+sizeIn.onchange = ()=>{ manual = +sizeIn.value; store.set('status-size', manual); fit(); };  // slider grows with the page
+sizeFit.onclick = ()=>{ manual = null; store.set('status-size', null); fit(); };
 let rf; addEventListener('resize', ()=>{ clearTimeout(rf); rf = setTimeout(fit, 150); });
 async function tick(){
   try { const r = await fetch('/api/status', {cache:'no-store', signal:AbortSignal.timeout(5000)}); if(r.ok){ last = await r.json(); lastOK = Date.now(); } } catch(e){}
   if(last){
     render(last);
-    if(!document.querySelector('.row.open') && (!fits() && zoom > 1 || Date.now() - lastFit > 60000 || !lastFit)) fit();   // an opened line may scroll
+    if(manual == null && !document.querySelector('.row.open') && (!fits() && zoom > 1 || Date.now() - lastFit > 60000) || !lastFit) fit();   // an opened line may scroll
   }
 }
 tick(); setInterval(tick, 2000);
