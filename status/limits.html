@@ -26,7 +26,7 @@
   button.x { color:var(--muted); padding:1px 7px; }
   .bar { position:fixed; left:0; right:0; bottom:0; background:var(--card); border-top:1px solid var(--line); padding:8px 16px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
   #msg { font-size:12px; } #msg.err { color:var(--bad); } #msg.ok { color:var(--ok); }
-  .lv-warn { border-left:4px solid var(--warn); } .lv-bad { border-left:4px solid var(--bad); } .lv-critical { border-left:4px solid var(--crit); }
+  .lv-notice { border-left:4px solid #2f7fd8; } .lv-warn { border-left:4px solid var(--warn); } .lv-bad { border-left:4px solid var(--bad); } .lv-critical { border-left:4px solid var(--crit); }
 </style>
 </head>
 <body>
@@ -35,7 +35,7 @@
 (value = raw × scale + offset) and given rules; a rule raises its level when the value is at or above, above or below a number,
 or changes by at least an amount within a time. A rule can apply in one mode only. Saving writes <code>status/limits.json</code> on odin and
 appends the whole set, with the time, to <code>status/limits_log.jsonl</code>: what was in force when stays on record.
-Levels: <b>warn</b> = little warning (yellow), <b>bad</b> = big warning (red), <b>critical</b> = massive warning (flashing).</p>
+Levels: <b>notice</b> = to read, not a safety matter (blue); safety only: <b>warn</b> = little warning (yellow), <b>bad</b> = big warning (red, flashing), <b>critical</b> = massive warning (red, flashing, with a ring).</p>
 
 <h2>Modes</h2>
 <div class="card"><div class="fields" id="modes"></div></div>

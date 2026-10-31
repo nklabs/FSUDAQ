@@ -1,9 +1,18 @@
 # Experiment status
 
-What is going on under the hood, on one page: a dot per item (green as it should be, blue not running, grey a plain
-fact, hollow no data, yellow look at it, red wrong, flashing act now), one line of text, and the
-details behind it on a click. Read-only: it never talks to the digitizers, and changes nothing in
-FSUDAQ, the online dashboard or pion-ros.
+What is going on under the hood, on one page: a dot per item, one line of text, and the details
+behind it on a click. Read-only: it never talks to the digitizers, and changes nothing in FSUDAQ,
+the online dashboard or pion-ros.
+
+| colour | meaning |
+|---|---|
+| green | as it should be |
+| grey | a plain fact, not running, or no data |
+| blue | information the user needs to read: DAQ (run problems, board clocks, disk), the online analysis, the LED, ROS, sensors not connected |
+| yellow, red (flashing; a ring = act now) | **safety only**: the gas sensors, the Cherenkov pressure and the temperatures by their rules; a safety sensor reading outside its range; the PLC status (which carries those readings) missing or stale |
+
+A big lamp per card on top (fixed order: Cherenkov, DAQ, Online analysis, Tracker temperatures,
+Boards, LED trigger, PLC, ROS), the cards below in the same order. Skins: Panel, Retro, Minimal.
 
     python3 status/status_server.py          # on odin; standard library only
 
@@ -12,8 +21,8 @@ online dashboard):
 
     ssh -N -o LogLevel=QUIET -L 8060:localhost:8060 beamtime@129.129.141.162
 
-then http://localhost:8060/ (status) and http://localhost:8060/limits (limits and names). Cards move by dragging their
-title; the order is kept in the browser ("reset layout" restores it).
+then http://localhost:8060/ (status) and http://localhost:8060/limits (limits and names). Lines move
+within their card by dragging; the order is kept in the browser ("reset lines" restores it).
 
 | card | items | from |
 |---|---|---|
@@ -22,15 +31,16 @@ title; the order is kept in the browser ("reset layout" restores it).
 | Online analysis | the dashboard's status, health, lag; placeholders in `online/experiment.json` | `GET localhost:8050/state` |
 | LED trigger | enabled, the last command and the PLC's answer, the relay | run file, pion-ros |
 | PLC | heartbeat counting, status age, outputs, the Trumeters (ai5-ai7) | pion-ros `GET :8770/status` |
-| Cherenkov, Trackers (and any group named on /limits) | pressure (ai0), gas sensors (ai1, ai2), thermocouples (tc0/1 tracker 0, tc2/3 tracker 1, tc4/5 tracker 2, tc6/7 Cherenkov), each judged by its rules and expected range | PLC inputs, `limits.json` |
+| Cherenkov, Tracker temperatures (and any group named on /limits) | pressure (ai0), gas sensors (ai1, ai2), thermocouples (tc0/1 tracker 0, tc2/3 tracker 1, tc4/5 tracker 2, tc6/7 Cherenkov), each judged by its rules and expected range | PLC inputs, `limits.json` |
 | PLC inputs (not named) | the raw value of every input not named yet | PLC |
 | ROS | pion-ros answering, plc_status, rosbag2_recorder | pion-ros |
 
 ## Limits and names (`/limits`)
 
 Each PLC input (`ai0`-`ai7`, `tc0`-`tc7`) can be named, put on a card, scaled (value = raw x scale +
-offset, with a unit) and given rules. A rule raises the input's level to warn (little warning),
-bad (big warning) or critical (massive warning) when the value is at or above, above or below a
+offset, with a unit) and given rules. A rule raises the input's level to notice (to read, not a
+safety matter: blue) or, for safety, warn (little warning), bad (big warning) or critical (massive
+warning) when the value is at or above, above or below a
 number, or changes by at least an amount within a time; a rule can apply in one mode only. The
 modes (Cherenkov: normal / full of isobutane) are set there too.
 
