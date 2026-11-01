@@ -70,7 +70,7 @@ What the status line means:
 | no new data for N s (a pause?) | nothing written for `--stall-s` (5 s): the boards may still hold partly filled buffers, so the finder waits up to `--hold-s` (30 s) |
 | no new data for N s: ... | waited `--hold-s`: the finder went on; hits still in the buffers come late when the beam is back |
 | run stopped: ... | FSUDAQ said the run stopped (its files are closed): everything is processed at once |
-| last run (finished before the dashboard started) | started after the run ended: the run is read whole |
+| last run (already finished when it was read) | its run file has the stop, or no file was written for 5 min: the run is read whole (a run that is written again goes back to running) |
 
 Started during a run, the dashboard reads from then on (hits from before then that a slow pair
 writes later are counted apart, not as late). The hit rate is the newest second whose hits are all

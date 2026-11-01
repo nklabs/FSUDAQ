@@ -90,6 +90,8 @@ BATCH_HITS = 4_000_000                        # hits per DAQ task
 INDEX_WORDS = 32 << 20                        # words of a file indexed per step at most (128 MB): a big run
                                               # already on disk is read over several steps
 LATE_RECENT_S = 60                            # the page shows late hits of the last minute too
+FINISHED_QUIET_S = 300                        # a folder no file of which was written for this long: a finished run
+                                              # (when its run file has no stop entry: an older run, or FSUDAQ died)
 
 
 # ---------------------------------------------------------------- run configuration
@@ -276,8 +278,10 @@ def slice_task(task: dict) -> dict:
         e = np.concatenate([p[2] for p in parts]); bd = np.concatenate([p[3] for p in parts])
         res = ff.process_hits(tables, chans, ts, bd, ch, e.astype(np.float64), window_ps, t0, t1)
         slot = bd * chans.board_channels + ch
-        daq = dh.process_ordered(ts, slot, np.argsort(ts, kind="stable"), t0, t1, task["ref"], chans.n_slots)
         tc = ts - _toff_of(slot)
+        # on the finder's clock (offsets removed): with the boards' raw times, the -217 to -239 ns offsets of
+        # 1399, 1443 and 30505 put their peak outside the +-200 ns of "time to the reference" (1 Nov 2026)
+        daq = dh.process_ordered(tc, slot, np.argsort(tc, kind="stable"), t0, t1, task["ref"], chans.n_slots)
         owned = int(np.count_nonzero((tc >= t0) & (tc < t1)))   # hits whose own time (offset removed) is in the slice
     else:
         res = ff.Result(chans.n_slots)
@@ -320,6 +324,7 @@ class BoardStream:
         self.newest_wall = np.zeros(8)                # when it last moved
         self.first = None                     # oldest time seen
         self.hits = 0                         # hits indexed (all files)
+        self.waiting = 0                      # files not indexed yet because an earlier one is not indexed to its end
 
     def _live(self):
         return [p for p in self.order if p not in self.released]
@@ -338,16 +343,24 @@ class BoardStream:
                 self.order.append(p)
 
     def index(self, now, max_words=None):
-        """Index what was written since the last call (at most max_words words per file)."""
-        for p in self._live():
+        """Index what was written since the last call (at most max_words words per file), file by file: a
+        file only once the one before it is indexed to its end. (Indexing the next file early moved the
+        couples' newest time past the unread rest of the earlier one: the finder passed it, its hits came
+        late, and the earlier file was released before the rest was read, 1 Nov 2026.)"""
+        live = self._live()
+        self.waiting = 0
+        for i, p in enumerate(live):
             fs = self.scans[p]
             n0 = fs.hits
             fs.update(now, max_words)
             self.hits += fs.hits - n0
+            if fs.behind:
+                self.waiting = len(live) - 1 - i
+                break
 
     def behind(self):
         """More is written than indexed (the indexing reads a limited amount per step)."""
-        return any(self.scans[p].behind for p in self._live())
+        return self.waiting > 0 or any(self.scans[p].behind for p in self._live())
 
     def replaced(self):
         return any(self.scans[p].replaced() for p in self._live())
@@ -410,7 +423,8 @@ class BoardStream:
 
     def ready_to_skip(self, marks):
         """Every file indexed up to its size at the start (or as far as it can be)."""
-        return all(self.scans[p].pos >= marks.get(p, 0) or not self.scans[p].behind for p in self._live())
+        return all((self.scans[p].ino is not None or not marks.get(p, 0))       # a file not looked at yet is not ready
+                   and (self.scans[p].pos >= marks.get(p, 0) or not self.scans[p].behind) for p in self._live())
 
     def skip_to(self, marks):
         """A live start: mark the couple aggregates that were on disk at the start (before marks[path]
@@ -444,6 +458,8 @@ class BoardStream:
             if p in self.released:
                 continue
             fs = self.scans[p]
+            if fs.ino is None or fs.behind:     # not indexed to its end: what is not read yet is still to come
+                continue
             A = fs.arrays()
             if self.done[p] == A["nev"].size and (A["nev"].size == 0 or int(A["t_last"].max()) < before):
                 fs.release()
@@ -454,7 +470,7 @@ class BoardStream:
         f = [self.scans[p] for p in list(self.order)]
         n = sum(s.gaps for s in f)
         for x, y in zip(f, f[1:]):
-            if x.last_ctr >= 0 and y.first_ctr >= 0:
+            if x.last_ctr >= 0 and y.first_ctr >= 0 and not x.behind:   # x's last counter: only once x is indexed to its end
                 step = (y.first_ctr - x.last_ctr) & fsu_fast.CTR_MASK
                 if 1 <= step <= fsu_fast.FORWARD:
                     n += step - 1
@@ -484,7 +500,8 @@ class Online:
         self.ref_slot = a.ref_slot
         self.follow = a.follow                  # run folder FSUDAQ named (--follow or GET /run); None = newest in the data path
         self.inspect = None                     # a recorded run loaded from the page (GET /load); None = live
-        self.restart = False                    # set by GET /run: a new run starts, even in the same folder
+        self.restart = False                    # set by GET /run (a new run starts, even in the same folder) and GET /load
+        self.by_run = False                     # the restart is GET /run's: the run is being taken, not finished
         self.stop_notice = False                # FSUDAQ stopped this run and closed its files
         self.stopped_folder = None              # the folder GET /stopped named (it may come before we follow it)
         self.wake = threading.Event()
@@ -567,7 +584,8 @@ class Online:
         self.status = "waiting for data"
         self.mode = "waiting"                   # running, paused, stopped, quiet (see _advance)
         self.stop_notice = False
-        self.finished_at_start = False          # the folder was already finished when the dashboard started
+        self.finished_at_start = False          # the folder was already finished when it was first read
+        self.finished_guess = False             # ... judged so by its files' age only (no stop in its run file)
         self.quiet_s = 0.0                      # how long no couple has written
         self.behind = False                     # more is written than indexed
         self.untaken_t = None                   # oldest time seen on disk and not yet given to the DAQ part
@@ -606,10 +624,11 @@ class Online:
     def run_started(self, folder):
         """GET /run: FSUDAQ starts a saving run in this folder (also the same folder again). A run
         loaded for a look gives way: the data being taken come first."""
-        self.follow = folder
-        self.inspect = None
-        self.stopped_folder = None
-        self.restart = True
+        with self.lock:
+            self.follow = folder
+            self.inspect = None
+            self.stopped_folder = None
+            self.restart = self.by_run = True
         self.wake.set()
 
     def run_stopped(self, folder):
@@ -698,16 +717,28 @@ class Online:
             # a run that starts while we watch is read from its start; the one running when the
             # dashboard started only from then on (unless --from-start); a run already finished then
             # is read whole
-            from_start = bool(a.replay or a.from_start or self.restart or self.folder is not None)
-            finished = (folder is not None and (folder == self.inspect or not from_start and self.folder is None)
-                        and folder_quiet(folder, a.stall_s))     # a run loaded for a look: read whole
-            from_start = from_start or folder == self.inspect
-            self.restart = False
+            from_start = bool(a.replay or a.from_start or self.restart or self.folder is not None or folder == self.inspect)
+            # finished: its run file has the stop, or no file of it was written for FINISHED_QUIET_S. Not a run
+            # FSUDAQ just started, and not merely quiet for a while: a beam pause is not the end of the run
+            # (a 5 s quiet once made a run being taken "finished" for good; and "back to live" showed a run
+            # finished long ago as running, 1 Nov 2026)
+            finished = guess = False
+            if folder is not None and not self.by_run:
+                rf = read_run_file(folder) or {}
+                finished = bool(rf.get("stop"))
+                if not finished:
+                    finished = guess = folder_quiet(folder, FINISHED_QUIET_S)
+            self.restart = self.by_run = False
             self.reset(folder, from_start or finished)
             if finished:
                 self.finished_at_start = self.stop_notice = True
+                self.finished_guess = guess
         if folder is not None and self.stopped_folder == os.path.abspath(folder):
             self.stop_notice = True
+            self.finished_guess = False
+        elif self.finished_guess and folder is not None and not folder_quiet(folder, a.stall_s):
+            # judged finished by its files' age, and now written again: it is being taken after all
+            self.stop_notice = self.finished_at_start = self.finished_guess = False
         if folder is None:
             self.status = f"no run folder under {a.data_path}"
             return None
@@ -727,6 +758,19 @@ class Online:
         span = max(self.a.hold_s, self.a.stall_s)
         return [(b, c) for b in boards for c in range(8)
                 if b.newest[c] >= 0 and (now - b.newest_wall[c] < span or b.behind())]
+
+    def _hold_target(self, holding, boards, stopped, margin):
+        """Where the finder may cut to while data are written or a board's files are not all indexed: the
+        newest time on disk of every couple holding it, less the margin. A board not indexed to the end
+        holds it at its indexed part less --hold-s (its couples not seen yet may have hits that far back
+        in the part not read yet); in a run already over (all on disk) the finder waits for the index."""
+        ts = [int(b.newest[c]) for b, c in holding]
+        for b in boards:
+            if b.behind():
+                if stopped or b.newest.max() < 0:
+                    return self.W
+                ts.append(int(b.newest.max()) - int(self.a.hold_s * PS))
+        return min(ts) - margin if ts else self.W
 
     def _advance(self, stopped):
         a = self.a
@@ -795,6 +839,10 @@ class Online:
         if self.t_first is None:
             # wait a moment for every board's first data, so a slower board's first hits are not late
             missing = [b.serial for b in boards if b.newest.max() < 0]
+            if self.behind and stopped:         # a run already over: its first time from the whole index (a couple's
+                self.status = "falling behind: reading the files"   # first hits may lie past the part read so far)
+                self.mode = "running"
+                return
             if missing and now - self.first_data_wall < a.hold_s and not stopped:
                 self.status = (f"waiting up to {a.hold_s:.0f} s for the first data of "
                                + ", ".join(f"Digi-{x}" for x in missing))
@@ -812,7 +860,7 @@ class Online:
             target = top + margin + 1
         elif writing or self.behind:
             mode = "running"
-            target = min(int(b.newest[c]) for b, c in holding) - margin
+            target = self._hold_target(holding, boards, stopped, margin)
         elif self.quiet_s < a.hold_s:
             mode = "paused"                     # nothing written for a while: a beam pause holds data in the
             target = min(int(b.newest[c]) for b, c in holding) - margin   # boards' buffers; wait for them
@@ -847,7 +895,7 @@ class Online:
                 self.status = "running"
         elif mode == "stopped":
             what = ("recorded run, loaded for a look" if self.inspect and self.folder == self.inspect else
-                    "last run (finished before the dashboard started)" if self.finished_at_start else "run stopped")
+                    "last run (already finished when it was read)" if self.finished_at_start else "run stopped")
             self.status = f"{what}: " + ("everything processed" if all_done else "processing what is on disk")
         elif mode == "paused":
             self.status = (f"no new data for {self.quiet_s:.0f} s (a pause?): the finder waits up to {a.hold_s:.0f} s "
@@ -953,8 +1001,8 @@ class Online:
                                    newest_s=None if top is None or t_ref is None else (top - t_ref) / PS,
                                    quiet_s=quiet,
                                    # silent while the others write: worth a look (not after the run ended)
-                                   quiet_alarm=bool(running and quiet is not None and quiet >= self.a.stall_s),
-                                   slow_couples=[int(c) for c in range(8) if running and seen[c] and now - b.newest_wall[c] >= self.a.stall_s
+                                   quiet_alarm=bool(running and not self.behind and quiet is not None and quiet >= self.a.stall_s),
+                                   slow_couples=[int(c) for c in range(8) if running and not self.behind and seen[c] and now - b.newest_wall[c] >= self.a.stall_s
                                                  and now - b.newest_wall.max() < self.a.stall_s]))
             occ = [[0] * (int(n) + 1) for n in (ch.ch[ch.plane == p].max(initial=0) for p in range(3))]
             counters = {}
@@ -984,7 +1032,7 @@ class Online:
             if self.status.startswith("falling behind"):
                 health.append(f"the analysis is {self.status}: what the page shows lags the data")
             for b in boards:
-                if self.t_first is not None and not b["has_data"] and (running or self.mode == "paused"):
+                if self.t_first is not None and not b["has_data"] and not self.behind and (running or self.mode == "paused"):
                     health.append(f"Digi-{b['serial']}: no data in this run")
                 elif b["quiet_alarm"]:
                     health.append(f"Digi-{b['serial']}: nothing written for {b['quiet_s']:.0f} s while the other boards write")
@@ -1006,7 +1054,8 @@ class Online:
                 self.late_log.popleft()
             n_late = int(late.sum())
             return dict(
-                server_time=now, folder=self.folder, inspect=self.inspect, status=self.status, mode=self.mode, kernels="numba" if FAST else "numpy",
+                # inspect: only once the loaded run is the one read (until the next step it is still the one before)
+                server_time=now, folder=self.folder, inspect=self.inspect if self.inspect == self.folder else None, status=self.status, mode=self.mode, kernels="numba" if FAST else "numpy",
                 workers=self.a.workers, in_flight=len(self.pending), oldest_task_s=max(ages) if ages else None,
                 last_result_s=None if self.last_fold_wall is None else now - self.last_fold_wall,
                 replay=bool(self.a.replay), window_ns=self.window_ps / 1000, window_src=self.window_src,
@@ -1119,8 +1168,17 @@ class Online:
             lag_s=None if newest is None or done is None else max(0.0, (newest - done) / PS),
             in_flight=len(self.pending), backpressure=self.status.startswith("falling behind"),
             run_bytes=sum(b["bytes"] for b in boards), files=sum(b["files"] for b in boards), disk=disk, n_windows=D.n_seg,
-            seconds=[dict(t=s - t0s, boards=[int(self.secs[s][bi * nbc:(bi + 1) * nbc].sum()) for bi in range(len(self.serials))])
+            seconds=[dict(t=s - t0s, boards=[None if s >= self._known_until(bi, slow) else int(self.secs[s][bi * nbc:(bi + 1) * nbc].sum())
+                                             for bi in range(len(self.serials))])
                      for s in secs[-HISTORY_S:]])
+
+    def _known_until(self, bi, slow, couple=None):
+        """The first second (board clock) whose count of board bi (or of one couple of it) is not known yet:
+        a couple that does not hold the finder back (slow, see _complete_seconds) but has written has its
+        hits on disk only up to its newest time. (Its newest seconds were drawn as 0 Hz, 1 Nov 2026.)"""
+        b = self.boards[self.serials[bi]]
+        cs = [c for c in range(8) if (bi, c) in slow and b.newest[c] >= 0 and (couple is None or c == couple)]
+        return min((int(b.newest[c]) // PS for c in cs), default=1 << 62)
 
     def channel(self, sl, view=None, light=False):
         """One channel's histograms for the DAQ tab (sl = -1: all channels together, spectrum only).
@@ -1137,7 +1195,12 @@ class Online:
                 return None
             n = float(D.spec_n[sl])
             t0s = self.t_first // PS if self.t_first is not None else 0
-            rates = [[s - t0s, int(self.secs[s][sl])] for s in self._complete_seconds()[0]]
+            nbc = self.setup.chans.board_channels
+            secs, slow = self._complete_seconds()
+            known = self._known_until(sl // nbc, slow, (sl % nbc) // 2)
+            if self.boards[self.serials[sl // nbc]].newest[(sl % nbc) // 2] < 0:
+                known = -(1 << 62)              # its pair has written nothing yet: a first buffer may be filling, no rate known
+            rates = [[s - t0s, int(self.secs[s][sl])] for s in secs if s < known]
             lo, hi, nb, log = view or (0, 65536, 4096, False)
             e = dh.q_edges(lo, hi, nb, log)
             row = D.q[sl]
@@ -1314,47 +1377,44 @@ class Handler(BaseHTTPRequestHandler):
         return self.client_address[0] in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
 
     def do_GET(self):
-        if urllib.parse.urlparse(self.path).path in CONTROLS and not self.local():   # others may look, not steer what everyone sees
+        u = urllib.parse.urlparse(self.path)
+        path, q = u.path, urllib.parse.parse_qs(u.query)   # every route by its exact path: "/clear/" is no way past the check below
+        if path in CONTROLS and not self.local():   # others may look, not steer what everyone sees
             body = json.dumps(dict(note="view only: changed on odin or through the ssh tunnel")).encode()
             self.send_response(403)
             self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body)))
             self.end_headers(); self.wfile.write(body); return
-        if self.path.startswith("/open"):        # FSUDAQ asks us to show the page (it must not spawn anything itself)
-            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        if path == "/open":        # FSUDAQ asks us to show the page (it must not spawn anything itself)
             open_page(f"http://localhost:{self.server.server_address[1]}/", q.get("display", [""])[0])
             self.send_response(204); self.end_headers(); return
-        if self.path.startswith("/runs"):        # the recorded runs, for the page's run list
+        if path == "/runs":        # the recorded runs, for the page's run list
             return self.reply(200, dict(runs=self.online.runs(), inspect=self.online.inspect))
-        if self.path.startswith("/load"):        # the page loads a recorded run for a look
-            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        if path == "/load":        # the page loads a recorded run for a look
             why = self.online.load(q.get("folder", [""])[0])
             if not why:
                 say(f"{time.strftime('%H:%M:%S')} loaded for a look: {self.online.inspect}")
             return self.reply(400 if why else 200, dict(note=why or "loaded"))
-        if self.path.startswith("/live"):        # back to the data being taken
+        if path == "/live":        # back to the data being taken
             self.online.live()
             self.send_response(204); self.end_headers(); return
-        if self.path.startswith("/run"):         # FSUDAQ starts a saving run: follow its folder from now on
-            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        if path == "/run":         # FSUDAQ starts a saving run: follow its folder from now on
             folder = q.get("folder", [""])[0]
             if not folder:
                 self.send_response(400); self.end_headers(); return
             self.online.run_started(folder)
             say(f"{time.strftime('%H:%M:%S')} following run folder {folder}")
             self.send_response(204); self.end_headers(); return
-        if self.path.startswith("/stopped"):     # FSUDAQ stopped a saving run and closed its files
-            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        if path == "/stopped":     # FSUDAQ stopped a saving run and closed its files
             folder = q.get("folder", [""])[0]
             if not folder:
                 self.send_response(400); self.end_headers(); return
             self.online.run_stopped(folder)
             say(f"{time.strftime('%H:%M:%S')} run stopped: {folder}")
             self.send_response(204); self.end_headers(); return
-        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-        if self.path.startswith("/clear"):      # the page's Clear: per-channel and finder histograms start again
+        if path == "/clear":      # the page's Clear: per-channel and finder histograms start again
             self.online.clear()
             self.send_response(204); self.end_headers(); return
-        if self.path.startswith("/window"):     # the page's bunch window [ns]
+        if path == "/window":     # the page's bunch window [ns]
             try:
                 note = self.online.set_window(float(q.get("ns", [""])[0]))
                 code = 200
@@ -1364,23 +1424,23 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(code)
             self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body)))
             self.end_headers(); self.wfile.write(body); return
-        if self.path.startswith("/set"):        # reference channel for the time differences
+        if path == "/set":        # reference channel for the time differences
             try:
                 self.online.set_ref(int(q.get("ref", ["-1"])[0]))
             except ValueError:
                 self.send_response(400); self.end_headers(); return
             self.send_response(204); self.end_headers(); return
-        if self.path.startswith("/state"):
+        if path == "/state":
             body = json.dumps(dict(self.online.state(), can_control=self.local()), allow_nan=False).encode()   # Infinity/NaN are not JSON
             ctype = "application/json"
-        elif self.path.startswith("/channel") or self.path.startswith("/grid") or self.path.startswith("/compare"):
+        elif path == "/channel" or path == "/grid" or path == "/compare":
             try:
                 view = None
                 if "lo" in q:
                     view = (int(q["lo"][0]), int(q["hi"][0]), int(q.get("nb", ["4096"])[0]), q.get("log", ["0"])[0] == "1")
-                if self.path.startswith("/grid"):
+                if path == "/grid":
                     d = self.online.grid(view or (0, 65536, 64, False))
-                elif self.path.startswith("/compare"):
+                elif path == "/compare":
                     slots = [int(x) for x in q.get("slots", [""])[0].split(",") if x.strip()]
                     d = self.online.compare(slots, view)
                 else:
@@ -1391,7 +1451,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(404); self.end_headers(); return
             body = json.dumps(d, allow_nan=False).encode()
             ctype = "application/json"
-        elif urllib.parse.urlparse(self.path).path in ("/", "/index.html") or self.path.startswith("/index"):
+        elif path in ("/", "/index.html"):
             try:                                   # re-read so a page update needs no restart
                 with open(os.path.join(HERE, "dashboard.html"), "rb") as fh:
                     body = fh.read()
@@ -1485,15 +1545,18 @@ def main(argv=None):
                 online.status = f"error: {ex!r}"
                 say(f"step failed: {ex!r}")
             if t0 - last_report > 10:
-                s = online.state()
-                seen = (s['status'], round(s['processed_s'] or 0, 1), s['hits'])
-                if seen != last_seen:    # quiet while nothing happens (between runs, page closed)
-                    say(f"{time.strftime('%H:%M:%S')} {s['status']}: processed {s['processed_s'] or 0:.1f} s of beam, "
-                        f"{s['hits']:,} hits in the finder, {s['late']:,} late, {s['bunches']:,} bunches, "
-                        f"{s['status_counts']['unique'] + s['status_counts']['tracks']:,} accepted, {s['proc_s']:.1f} s worker CPU, "
-                        f"{s['in_flight']} tasks out")
-                    last_seen = seen
                 last_report = t0
+                try:                     # the console report must never end the dashboard
+                    s = online.state()
+                    seen = (s['status'], round(s['processed_s'] or 0, 1), s['hits'])
+                    if seen != last_seen:    # quiet while nothing happens (between runs, page closed)
+                        say(f"{time.strftime('%H:%M:%S')} {s['status']}: processed {s['processed_s'] or 0:.1f} s of beam, "
+                            f"{s['hits']:,} hits in the finder, {s['late']:,} late, {s['bunches']:,} bunches, "
+                            f"{s['status_counts']['unique'] + s['status_counts']['tracks']:,} accepted, {s['proc_s']:.1f} s worker CPU, "
+                            f"{s['in_flight']} tasks out")
+                        last_seen = seen
+                except Exception as ex:  # noqa: BLE001
+                    say(f"report failed: {ex!r}")
             online.wake.wait(max(0.0, a.interval - (time.time() - t0)))
             online.wake.clear()
     finally:

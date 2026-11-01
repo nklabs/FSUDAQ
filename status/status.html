@@ -48,6 +48,9 @@
   #summary.bad, #summary.critical { color:#ff5a4d; text-shadow:0 0 7px rgba(255,90,77,.55); animation:pulse 2s ease-in-out infinite; }
   #summary.critical { background:#2a0705; }
   #summary.stale { color:#9aa3ad; text-shadow:none; }
+  /* not current (no connection, or the server not gathering): every lamp and dot grey, so no colour is read as now */
+  body.stale .dot, body.stale .big, body.stale .bar i { filter:grayscale(1); opacity:.45; }
+  body.stale .row .main { text-decoration:line-through; text-decoration-color:rgba(154,163,173,.6); }
   /* the pilot lamps */
   #overview { display:flex; flex-wrap:wrap; gap:10px 26px; justify-content:center; margin-top:10px; }
   #overview a { display:flex; flex-direction:column; align-items:center; gap:9px; text-decoration:none; width:104px; text-align:center; }
@@ -236,10 +239,16 @@ function rowHTML(g, it){
 }
 function render(S){
   const sm = document.getElementById('summary');
-  const stale = lastOK && (Date.now()-lastOK > 8000);
+  const noConn = lastOK && (Date.now()-lastOK > 8000);
+  // the server answers but has not gathered for a while (a gathering that fails keeps the last one): not current either
+  const notGathered = S.error || (S.updated && S.server_time && S.server_time - S.updated > Math.max(10, 4 * (S.interval || 2)));
+  const stale = noConn || notGathered;
+  document.body.classList.toggle('stale', !!stale);
   sm.className = stale ? 'stale' : S.summary.level;
   const c = S.summary.counts || {};
-  const say = (stale ? `NO CONNECTION to the status server since ${new Date(lastOK).toLocaleTimeString()} — shown as it was then. ` : '') + S.summary.text;
+  const when = S.updated ? new Date(S.updated*1000).toLocaleTimeString([], {hour12:false}) : '–';
+  const say = (noConn ? `NO CONNECTION to the status server since ${new Date(lastOK).toLocaleTimeString()} — shown as it was then. ` :
+               notGathered ? `NOT CURRENT: the status server has not gathered since ${when}${S.error ? ' (' + S.error + ')' : ''} — shown as it was then. ` : '') + S.summary.text;
   sm.innerHTML = `<span class="t" title="${esc(say)}">${esc(say)}</span>` +
     `<span class="counts">${['critical','bad','warn','problem','notice'].filter(k=>c[k]).map(k=>c[k]+' '+({critical:'act now', bad:'safety alarm', warn:'safety warning', problem:'data problem', notice:'to read'})[k]).join(' · ')}</span>`;
   document.getElementById('updated').textContent = S.updated ? new Date(S.updated*1000).toLocaleTimeString([], {hour12:false}) : '--:--:--';

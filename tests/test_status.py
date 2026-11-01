@@ -50,7 +50,7 @@ class Sources:
         self.nodes = ["plc_command", "plc_status", "rosbag2_recorder"]
         self.relay_up = True
         self.online = None
-        self.counting = False                  # the heartbeat goes up by itself (a scenario that does not test it)
+        self.counting = True                   # the heartbeat goes up by itself, like the PLC (scenario_plc moves it by hand)
 
     def fetch(self, url, timeout):
         if "8770" in url or "relay" in url:
@@ -133,8 +133,10 @@ def scenario_rules(tmp):
     good &= check(it["level"] == "ok", f"normal mode after a change: {it['level']}")
     # not assigned, and the unnamed inputs
     it = find(m, "Cherenkov", NAME["isobutane_2"])
-    good &= check(it["level"] == "nodata" and "not assigned" in it["text"], f"unassigned: {it}")
-    good &= check(find(m, "Cherenkov", NAME["tc7"])["level"] == "nodata", "a connected thermocouple reading 3276.7 (open) judged")
+    # a safety input with no value warns: its alarms cannot go off (it was grey, and the summary could say "All well")
+    good &= check(it["level"] == "warn" and "not assigned" in it["text"], f"unassigned: {it}")
+    it = find(m, "Cherenkov", NAME["tc7"])
+    good &= check(it["level"] == "warn" and "open thermocouple" in it["text"], f"a connected thermocouple reading 3276.7 (open): {it}")
     src.plc["tc6"] = 20.6; src.plc["tc2"] = 305.4; src.plc["tc0"] = 20.0; clock.t += 2; m.step()
     good &= check(find(m, "Cherenkov", NAME["tc6"])["level"] == "ok" and find(m, "Cherenkov", NAME["tc6"])["text"] == "20.6 °C",
                   f"Cherenkov thermocouple: {find(m, 'Cherenkov', NAME['tc6'])}")
@@ -209,6 +211,7 @@ def scenario_plc(tmp):
     print("== the PLC: heartbeat stuck, status stale, pion-ros not answering, nodes missing")
     clock, src = Clock(), Sources()
     L = assign(copy.deepcopy(ss.DEFAULT_LIMITS), isobutane_1="plc.ai0")
+    src.counting = False
     m = make(tmp, clock, src, limits=L)
     good = True
     for k in range(3):
@@ -218,16 +221,18 @@ def scenario_plc(tmp):
         clock.t += 2; m.step()
     it = find(m, "PLC", "PLC status")
     good &= check(it["level"] == "bad" and "stuck" in it["text"], f"heartbeat stuck: {it}")   # the safety readings blind: red
+    gas = find(m, "Cherenkov", NAME["isobutane_1"])   # and its readings are not shown as current (they were green, 1 Nov 2026)
+    good &= check(gas["level"] == "warn" and "stuck" in gas["text"], f"readings with the heartbeat stuck: {gas}")
     src.plc["heartbeat"] += 1; src.age = 25; clock.t += 2; m.step()
     it = find(m, "PLC", "PLC status")
     good &= check(it["level"] == "bad" and "old" in it["text"], f"status stale: {it}")
-    good &= check(find(m, "Cherenkov", NAME["isobutane_1"])["level"] == "nodata", "a stale status still judged")
+    good &= check(find(m, "Cherenkov", NAME["isobutane_1"])["level"] == "warn", "a stale status still judged")   # no value: alarms blind
     src.age = 0.5; src.relay_up = False; clock.t += 2; m.step()
     it = find(m, "PLC", "PLC status")
     good &= check(it["level"] == "bad" and "no answer" in it["text"], f"relay down: {it}")
     good &= check(find(m, "ROS", "pion-ros")["level"] == "problem", "pion-ros not pink with the relay down")
     good &= check(find(m, "Trackers", "LED relay live")["level"] == "info" and find(m, "Trackers", "LED relay live")["text"].startswith("NO"), f"relay live with pion-ros down: {find(m, 'Trackers', 'LED relay live')}")
-    good &= check(find(m, "Cherenkov", NAME["isobutane_1"])["level"] == "nodata", "judged without an answer")
+    good &= check(find(m, "Cherenkov", NAME["isobutane_1"])["level"] == "warn", "judged without an answer")
     src.relay_up = True; src.nodes = ["plc_command", "plc_status"]; clock.t += 2; m.step()
     good &= check(find(m, "ROS", "Rosbag recording")["level"] == "problem", f"no recorder: {find(m, 'ROS', 'Rosbag recording')}")
     good &= check(find(m, "PLC", "Outputs")["text"].startswith("DQ1 off"), f"outputs: {find(m, 'PLC', 'Outputs')}")
@@ -250,6 +255,7 @@ def scenario_run_file(tmp):
         f.write(data + "\n")
     procs = [dict(pid=4242, cwd=fs, started=clock.t - 600)]
     src.counting = True
+    src.plc.update(tc6=20.0, tc7=20.0)     # the Cherenkov thermocouples are connected and read the hall
     running = {"on": True}
     m = make(tmp, clock, src, procs=lambda: procs if running["on"] else [])
     good = True
@@ -335,8 +341,9 @@ def scenario_limits_api(tmp):
     srv = ss.ThreadingHTTPServer(("127.0.0.1", 0), ss.Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{srv.server_address[1]}"
-    def post(L, at=None):
-        req = urllib.request.Request((at or base) + "/api/limits", data=json.dumps(L).encode(), method="POST", headers={"Content-Type": "application/json"})
+    def post(L, at=None, version=None):
+        req = urllib.request.Request((at or base) + "/api/limits", data=json.dumps(L).encode(), method="POST",
+                                     headers={"Content-Type": "application/json", "X-Limits-Version": version or ss.limits_version(m.limits)})
         try:
             with urllib.request.urlopen(req) as r:
                 return r.status, json.loads(r.read())
@@ -347,8 +354,23 @@ def scenario_limits_api(tmp):
     L = assign(copy.deepcopy(ss.DEFAULT_LIMITS), isobutane_1="plc.ai0")
     L["modes"]["cherenkov"]["value"] = "full of isobutane"
     src.plc["ai0"] = 12
+    old = ss.limits_version(m.limits)
     code, d = post(L)
     good &= check(code == 200 and "saved" in d, f"good limits: {code} {d}")
+    # a page loaded before that save: refused, nothing changed (it would put the mode back, 1 Nov 2026)
+    L2 = copy.deepcopy(L); L2["modes"]["cherenkov"]["value"] = "normal"
+    code, d = post(L2, version=old)
+    good &= check(code == 409 and m.limits["modes"]["cherenkov"]["value"] == "full of isobutane", f"stale save: {code} {d}")
+    # edits that would silence an alarm or stop the gathering are refused
+    for what, edit in (("scale 0", lambda X: X["channels"][1].update(scale=0)),
+                       ("decimals -1", lambda X: X["channels"][1].update(digits=-1)),
+                       ("plc_stale_s blank", lambda X: X["daq"].update(plc_stale_s=None)),
+                       ("no name", lambda X: X["channels"][1].update(name="")),
+                       ("a rule as text", lambda X: X["channels"][1]["rules"].append("above 3")),
+                       ("when as text", lambda X: X["channels"][1]["rules"].append({"above": 3, "level": "warn", "when": "full"}))):
+        X = copy.deepcopy(L); edit(X)
+        code, d = post(X)
+        good &= check(code == 400, f"{what}: {code} {d}")
     with open(m.a.limits) as f:
         good &= check(json.load(f) == L, "limits.json differs from what was saved")
     with open(os.path.join(tmp, "limits_log.jsonl")) as f:
@@ -382,8 +404,64 @@ def scenario_limits_api(tmp):
         ok("five kinds of wrong limits refused, nothing written; good ones saved, logged, used at once and kept; pages and API served; a remote viewer may look, not save")
 
 
+def scenario_not_current(tmp):
+    print("== never shown as current when it is not: NaN from the PLC, a failing gathering, noise and short history in the change rule, rounding")
+    clock, src = Clock(), Sources()
+    L = copy.deepcopy(ss.DEFAULT_LIMITS)
+    L["modes"]["cherenkov"]["value"] = "full of isobutane"
+    m = make(tmp, clock, src, limits=L)
+    good = True
+    # NaN from the PLC: no value (a warning, its alarms are blind), never into the history, the API stays JSON
+    src.plc["ai1"] = float("nan"); clock.t += 2; m.step()
+    it = find(m, "Cherenkov", NAME["isobutane_1"])
+    good &= check(it["level"] == "warn" and "NaN" in it["text"], f"NaN: {it}")
+    good &= check(all(v == v for _, v in m.hist[L["channels"][1]["id"]]), "a NaN in the history")
+    json.dumps(ss.finite(m.state()), allow_nan=False)
+    src.plc["ai1"] = 0.1
+    # a gathering that fails: the snapshot says so (the page then greys everything)
+    src.plc["ai0"] = 1.0; clock.t += 2; m.step()
+    good_build = m.build
+    m.build = lambda now: 1 / 0
+    clock.t += 2
+    try:
+        m.step()
+    except ZeroDivisionError:
+        pass
+    st = m.state()
+    good &= check(st.get("error", "").startswith("gathering failed") and st["server_time"] - st["updated"] >= 2, f"failed gathering: {st.get('error')}")
+    m.build = good_build
+    clock.t += 2; m.step()
+    good &= check("error" not in m.state(), "the error stays after a good gathering")
+    # steady pressure under +-0.05 psig of noise for over an hour: no change warning (the spread of raw readings was 0.1)
+    import random
+    rnd = random.Random(3)
+    m.hist.clear(); m.mode_since = {}
+    for k in range(1900):
+        src.plc["ai0"] = 1.0 + rnd.uniform(-0.05, 0.05); clock.t += 2; m.step()
+    it = find(m, "Cherenkov", NAME["cherenkov_pressure"])
+    good &= check(it["level"] == "ok" and "history" not in it["text"], f"steady under noise: {it['text']}")
+    # a real leak of 0.06 psig in the hour under the same noise: warned
+    for k in range(1900):
+        src.plc["ai0"] = 1.0 - 0.06 * k / 1800 + rnd.uniform(-0.05, 0.05); clock.t += 2; m.step()
+    it = find(m, "Cherenkov", NAME["cherenkov_pressure"])
+    good &= check(it["level"] == "warn" and "change" in it["text"], f"leak under noise: {it['text']}")
+    # after a restart: the change rule says how little history it has
+    m2 = make(tmp, clock, src)
+    for k in range(150):
+        src.plc["ai0"] = 1.0; clock.t += 2; m2.step()
+    it = find(m2, "Cherenkov", NAME["cherenkov_pressure"])
+    good &= check("only 4 min of history" in it["text"], f"short history: {it['text']}")
+    # rounding never shows a threshold that is not reached
+    src.plc["ai1"] = 4.96; clock.t += 2; m.step()
+    it = find(m, "Cherenkov", NAME["isobutane_1"])
+    good &= check(it["level"] == "ok" and it["text"].startswith("4.96 %LEL"), f"4.96 %LEL: {it['text']}")
+    src.plc["ai1"] = 0.1
+    if good:
+        ok("NaN is no value and warns; a failing gathering is flagged; noise is no change, a leak is; short history said; 4.96 not shown as 5.0")
+
+
 def main():
-    for sc in (scenario_rules, scenario_changes, scenario_plc, scenario_run_file, scenario_limits_api):
+    for sc in (scenario_rules, scenario_changes, scenario_plc, scenario_run_file, scenario_limits_api, scenario_not_current):
         tmp = tempfile.mkdtemp(prefix="fsudaq_test_status_")
         try:
             sc(tmp)

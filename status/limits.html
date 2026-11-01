@@ -54,6 +54,7 @@ Levels: <b>notice</b> = to read, not a safety matter (blue); safety only: <b>war
 <div class="bar"><button class="primary" id="save">Save</button><button id="revert">Discard changes</button><span id="msg"></span></div>
 <script>
 let L = null, INPUTS = {}, SOURCES = [], LEVELS = [], dirty = false;
+let VERSION = null;   // the limits this page loaded: a save is refused if someone saved since (it would undo theirs)
 const KINDS = {at_or_above:'at or above', above:'above', below:'below', change:'changes by at least'};
 const DAQ = {disk_warn_gb:'disk: warn below (GB)', disk_bad_gb:'disk: bad below (GB)', plc_stale_s:'PLC status stale after (s)', analysis_lag_warn_s:'analysis behind: warn after (s of data)'};
 const esc = t => String(t ?? '').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -90,7 +91,7 @@ function drawChannels(){
     <div class="fields">
       <label>name<input class="wide" data-f="name" value="${esc(c.name)}"></label>
       <label>group (card on the status page)<input class="mid" data-f="group" value="${esc(c.group)}"></label>
-      <label title="unticked: shown as not connected (yellow) whatever it reads; an open thermocouple reads believable but meaningless values">connected
+      <label title="unticked: shown as not connected (blue: its alarms are off) whatever it reads; an open thermocouple reads believable but meaningless values">connected
         <input type="checkbox" data-f="connected"${c.connected===false?'':' checked'} style="width:18px;height:18px"></label>
       <label>PLC input<select data-f="source">${opt('', c.source||'', '(not assigned)')}${SOURCES.map(s=>opt(s, c.source, s.replace('plc.',''))).join('')}</select></label>
       <label>scale<input type="number" step="any" data-f="scale" value="${esc(c.scale)}"></label>
@@ -161,9 +162,9 @@ document.body.addEventListener('click', ev=>{
 });
 document.getElementById('save').onclick = async ()=>{
   try {
-    const r = await fetch('/api/limits', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(L)});
+    const r = await fetch('/api/limits', {method:'POST', headers:{'Content-Type':'application/json', 'X-Limits-Version':VERSION||''}, body:JSON.stringify(L)});
     const d = await r.json();
-    if(r.ok){ dirty = false; msg('saved ' + d.saved + ' (and appended to limits_log.jsonl)', 'ok'); }
+    if(r.ok){ dirty = false; VERSION = d.version; msg('saved ' + d.saved + ' (and appended to limits_log.jsonl)', 'ok'); }
     else msg('not saved: ' + (d.errors||[d.error]).join('; '), 'err');
   } catch(e){ msg('not saved: no answer from the status server', 'err'); }
 };
@@ -171,7 +172,7 @@ document.getElementById('revert').onclick = ()=>{ if(!dirty || confirm('Discard 
 window.addEventListener('beforeunload', ev=>{ if(dirty){ ev.preventDefault(); ev.returnValue=''; } });
 async function load(){
   const d = await (await fetch('/api/limits', {cache:'no-store'})).json();
-  L = d.limits; INPUTS = d.inputs; SOURCES = d.sources; LEVELS = d.levels; dirty = false; msg(''); draw();
+  L = d.limits; VERSION = d.version; INPUTS = d.inputs; SOURCES = d.sources; LEVELS = d.levels; dirty = false; msg(''); draw();
   if(d.can_save === false){ document.getElementById('save').disabled = true;
     msg('view only: limits are changed on odin or through the ssh tunnel (http://localhost:8060/limits)'); }
 }

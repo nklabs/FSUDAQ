@@ -654,7 +654,7 @@ def scenario_finished_at_start(tmp):
         online.step()
         wait_tasks(online)
     st = online.state()
-    good = check(st["status"].startswith("last run (finished") and not st["live_start"], f"finished: status '{st['status']}'")
+    good = check(st["status"].startswith("last run (already finished") and not st["live_start"], f"finished: status '{st['status']}'")
     good &= check_daq(online, boards, SERIALS, "finished")
     fin, late, tot = check_partition(online, boards, "finished")
     good &= check(late == 0 and not same_finder(online.acc, offline(online, boards, SERIALS)), "finished: finder not as one pass")
@@ -922,12 +922,77 @@ def scenario_view_only(tmp):
         good &= check(get(there + path)[0] == 200, f"view: remote {path} not served")
     for path in ("/clear", "/window?ns=50", f"/set?ref={online.slots[0]}", "/run?folder=/tmp", "/stopped?folder=" + folder, "/open"):
         good &= check(get(there + path)[0] == 403, f"view: remote {path} not refused")
+    # near misses of a control's path: neither refused-and-done nor done (31 Oct 2026: they went past the check)
+    for path in ("/clear/", "/clearX", "/runx?folder=/tmp", "/stopped/?folder=" + folder, f"/set/?ref={online.slots[0]}",
+                 "/load/?folder=" + folder, "/open/", "/live/", "/window/?ns=50"):
+        good &= check(get(there + path)[0] in (403, 404), f"view: remote {path} answered")
     good &= check(online.state()["hits"] == hits and online.state()["daq"]["ref"] is None, "view: a refused call changed something")
     good &= check(get(here + "/clear")[0] == 204 and online.state()["hits"] == 0, "view: local Clear refused")
     for srv in servers:
         srv.shutdown()
     if good:
         ok("another machine sees the page, state and histograms; Clear, window, reference, /run, /stopped and /open are refused; odin keeps them")
+
+
+def scenario_rollover_backlog(tmp):
+    print("== a finished run with roll-overs, read a little per step (a big recorded run, or a backlog): every hit, none late")
+    # 1 Nov 2026: the files of a board were indexed side by side, so the finder passed the unread rest of the
+    # earlier file (its hits late) and the file was released half read (its rest never counted), while the page
+    # said "everything processed" and blamed the DAQ for missing aggregates
+    good = True
+    for hold in (2, 30):
+        folder = os.path.join(tmp, f"backlog{hold}"); os.makedirs(folder)
+        boards = boards_for(folder, roll=400_000, seed=90 + hold)
+        for t in range(30):
+            for b in boards:
+                b.hits(t * PS, (t + 1) * PS)
+        for b in boards:
+            b.flush(); b.f.close()
+        clock = Clock()
+        online = make_online(folder, SERIALS, EIGHT, clock, extra=["--hold-s", str(hold)])
+        online.run_stopped(folder)
+        saved, od.INDEX_WORDS = od.INDEX_WORDS, 20_000
+        try:
+            for _ in range(600):
+                clock.t += 1
+                online.step()
+                wait_tasks(online)
+                if online.status.endswith("everything processed") and not online.pending:
+                    break
+        finally:
+            od.INDEX_WORDS = saved
+        st = online.state()
+        good &= check(st["status"].endswith("everything processed"), f"backlog {hold}: status '{st['status']}'")
+        good &= check(max(bd["files"] for bd in st["boards"]) > 3, "backlog: no roll-over")
+        good &= check_daq(online, boards, SERIALS, f"backlog {hold}")
+        fin, late, tot = check_partition(online, boards, f"backlog {hold}")
+        good &= check(late == 0 and not same_finder(online.acc, offline(online, boards, SERIALS)), f"backlog {hold}: {late} late, or finder not as one pass")
+        good &= check(not any("missing" in h for h in st["health"]), f"backlog {hold}: false alarm {st['health']}")
+    if good:
+        ok(f"{tot:,} hits over roll-overs, read 80 kB per step: DAQ exact, none late, finder identical to one pass, no false alarm")
+
+
+def scenario_quiet_live_start(tmp):
+    print("== the dashboard started in a pause of a run being taken: not taken for a finished run")
+    folder = os.path.join(tmp, "quietstart"); os.makedirs(folder)
+    clock = Clock(); boards = boards_for(folder, seed=95)
+    for t in range(5):
+        for b in boards:
+            b.hits(t * PS, (t + 1) * PS)
+    for b in boards:
+        b.flush()
+    old = time.time() - 10                   # nothing written for 10 s (more than --stall-s) when it starts
+    for f in os.listdir(folder):
+        os.utime(os.path.join(folder, f), (old, old))
+    online = make_online(folder, SERIALS, EIGHT, clock)
+    clock.t += 1; online.step()
+    modes = []
+    drive(online, clock, boards, 5, 20, each=lambda o: modes.append(o.state()["mode"]))
+    st = online.state()
+    good = check(not st["finished_at_start"] and "running" in modes and st["daq"]["total_rate"] is not None,
+                 f"quiet start: {st['status']}, modes {set(modes)}, rate {st['daq']['total_rate']}")
+    if good:
+        ok(f"read as a run being taken, modes {sorted(set(modes))}, the rate shown")
 
 
 def main():
@@ -937,7 +1002,7 @@ def main():
                    scenario_live_start, scenario_offsets, scenario_replay, scenario_short_hold, scenario_worker_killed,
                    scenario_idle_worker_killed, scenario_falling_behind, scenario_counters, scenario_finished_at_start,
                    scenario_long_pause, scenario_offsets_dense, scenario_missing_board, scenario_boundaries, scenario_x725,
-                   scenario_window, scenario_run_file, scenario_view_only):
+                   scenario_window, scenario_run_file, scenario_view_only, scenario_rollover_backlog, scenario_quiet_live_start):
             sc(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

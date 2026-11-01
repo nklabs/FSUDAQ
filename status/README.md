@@ -51,13 +51,25 @@ The defaults (the PLC as labelled on 31 Oct 2026):
   100 critical; expected range 0-100.
 - Cherenkov pressure (WIKA WUC-10, ai0, psig): above 2 warn, always; in "full of isobutane", also below 0.3,
   or a change of 0.05 or more within an hour; expected range -14.7 to 100.
-- Thermocouples (°C): expected range -40 to 80 (an open input reads a noisy staircase of 120-520, or 3276.7);
-  no rules yet. Trumeters (ai5-ai7): expected range 0-5. ai3 and ai4 unused.
+- Thermocouples (°C): expected range -50 to 1300, above 80 bad (an open input reads 3276.7); the six on the
+  trackers are marked not connected for now. Trumeters (ai5-ai7): expected range 0-5. ai3 and ai4 unused.
+
+A safety input with no value (the PLC status missing or stale, the heartbeat stuck, NaN from the PLC, an
+open thermocouple, or not assigned to an input) is a warning, not grey: its alarms cannot go off. The
+limits page refuses what would silence an alarm or stop the gathering (scale 0, blank thresholds or
+settings, decimals outside 0-6, a rule that is not a rule), and a save from a page loaded before someone
+else's save (it would undo theirs, the mode included): reload and make the change again. A reading is
+shown with as many decimals as it takes not to look like a threshold it has not reached (4.96, not 5.0).
+If the gathering fails, or the page loses the server, every lamp and dot turns grey with the time of
+the last good gathering.
 
 Saving writes `status/limits.json` and appends the whole set with the time to
 `status/limits_log.jsonl`, so what was in force when stays on record. The monitor keeps each input's
-values for an hour (more if a rule looks further back) in memory: after a restart, a change rule
-sees only what came since. A change of an input's source or scaling starts its history again.
+values for an hour (more if a rule looks further back) in memory. A change rule compares the mean of
+the latest 60 s with the mean of 60 s one rule interval earlier (single readings are noisy: the pressure's
+spread is about 0.1 psig at rest), and looks only at the time since its mode was set. After a restart,
+a mode change, or a change of an input's source or scaling, it has less history than its interval and
+says so on the line ("only N min of history so far").
 
 Each named input also shows its change over 10 s, 1 min and 10 min (Δ10s, Δ1m, Δ10m), each the mean of the
 latest 4 / 12 / 60 s against the mean of the same span one interval earlier, so a noisy reading does not

@@ -94,6 +94,15 @@ def validate_limits(L: dict) -> list:
     for k, m in modes.items():
         if not isinstance(m, dict) or not isinstance(m.get("choices"), list) or m.get("value") not in m.get("choices", []):
             bad.append(f"mode {k}: needs choices and a value among them")
+    daq = L.get("daq", {})
+    if not isinstance(daq, dict):
+        bad.append("daq: not an object")
+    else:
+        for k, v in daq.items():
+            if not _num(v) or v <= 0:
+                bad.append(f"daq {k}: needs a number above 0 (it is {v!r})")
+    if not isinstance(L.get("channels", []), list):
+        return bad + ["channels: not a list"]
     ids = set()
     for i, c in enumerate(L.get("channels", [])):
         where = f"channel {i + 1} ({c.get('name') or c.get('id') or '?'})" if isinstance(c, dict) else f"channel {i + 1}"
@@ -102,24 +111,38 @@ def validate_limits(L: dict) -> list:
         if not c.get("id") or c["id"] in ids:
             bad.append(f"{where}: needs an id of its own")
         ids.add(c.get("id"))
+        if not isinstance(c.get("name"), str) or not c["name"].strip():
+            bad.append(f"{where}: needs a name")
         if c.get("source") not in [None, ""] + [f"plc.{s}" for s in PLC_INPUTS]:
             bad.append(f"{where}: source {c.get('source')!r} is not a PLC input")
         for k in ("scale", "offset"):
-            if not isinstance(c.get(k, 0), (int, float)) or not math.isfinite(c.get(k, 0)):
+            if not _num(c.get(k, 0)):
                 bad.append(f"{where}: {k} is not a number")
+        if _num(c.get("scale", 1)) and c.get("scale", 1) == 0:     # a cleared scale box: every reading 0, its alarms silent
+            bad.append(f"{where}: scale 0 makes every reading 0 (its alarms could never go off)")
+        if "digits" in c and not (isinstance(c["digits"], int) and not isinstance(c["digits"], bool) and 0 <= c["digits"] <= 6):
+            bad.append(f"{where}: decimals must be a whole number 0 to 6")
         if not isinstance(c.get("connected", True), bool):
             bad.append(f"{where}: connected must be true or false")
         rg = c.get("range")
-        if rg is not None and not (isinstance(rg, list) and len(rg) == 2 and all(isinstance(x, (int, float)) for x in rg) and rg[0] < rg[1]):
+        if rg is not None and not (isinstance(rg, list) and len(rg) == 2 and all(_num(x) for x in rg) and rg[0] < rg[1]):
             bad.append(f"{where}: range must be [min, max] with min < max")
+        if not isinstance(c.get("rules", []), list):
+            bad.append(f"{where}: rules must be a list"); continue
         for j, r in enumerate(c.get("rules", [])):
+            if not isinstance(r, dict):
+                bad.append(f"{where}, rule {j + 1}: not an object"); continue
             kinds = [k for k in ("at_or_above", "above", "below", "change") if k in r]
-            if len(kinds) != 1 or not isinstance(r[kinds[0]], (int, float)):
+            if len(kinds) != 1 or not _num(r[kinds[0]]):
                 bad.append(f"{where}, rule {j + 1}: needs one of at_or_above / above / below / change, with a number")
             if r.get("level") not in RULE_LEVELS:
                 bad.append(f"{where}, rule {j + 1}: level must be one of {', '.join(RULE_LEVELS)}")
-            if "change" in r and not (isinstance(r.get("within_s"), (int, float)) and r["within_s"] > 0):
+            if "change" in r and not (_num(r.get("within_s")) and r["within_s"] > 0):
                 bad.append(f"{where}, rule {j + 1}: a change needs within_s > 0")
+            if "change" in r and _num(r.get("change")) and r["change"] <= 0:
+                bad.append(f"{where}, rule {j + 1}: a change must be above 0")
+            if not isinstance(r.get("when") or {}, dict):
+                bad.append(f"{where}, rule {j + 1}: when must be an object"); continue
             for mk, mv in (r.get("when") or {}).items():
                 if mk not in modes or mv not in modes[mk].get("choices", []):
                     bad.append(f"{where}, rule {j + 1}: when {mk} = {mv!r} is not a mode")
@@ -129,22 +152,53 @@ def validate_limits(L: dict) -> list:
     return bad
 
 
-def load_limits(path: str) -> dict:
+def finite(o):
+    """o with every NaN or infinity as the text "NaN" / "inf": JSON has none, and one from the PLC must not
+    make every GET /api/status fail (it stayed in the history for an hour)."""
+    if isinstance(o, float) and not math.isfinite(o):
+        return "NaN" if o != o else ("inf" if o > 0 else "-inf")
+    if isinstance(o, dict):
+        return {k: finite(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [finite(v) for v in o]
+    return o
+
+
+def _num(v) -> bool:
+    """A finite number (not true/false)."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def load_limits(path: str, why: list = None) -> dict:
+    """The limits in path, or the defaults (then why, if given, gets the reason: the page says it)."""
+    problem = None
     try:
         with open(path) as f:
             L = json.load(f)
-        if not validate_limits(L):
+        errors = validate_limits(L)
+        if not errors:
             return L
-        print(f"{path}: {'; '.join(validate_limits(L))}: the defaults are used")
+        problem = "; ".join(errors)
     except FileNotFoundError:
         pass
-    except (OSError, ValueError) as ex:
-        print(f"{path}: {ex}: the defaults are used")
+    except Exception as ex:         # noqa: BLE001  anything: the defaults, said on the page
+        problem = str(ex)
+    if problem:
+        print(f"{path}: {problem}: the defaults are used")
+        if why is not None:
+            why.append(f"{os.path.basename(path)} could not be used ({problem}): the DEFAULT limits and modes are in force")
     return copy.deepcopy(DEFAULT_LIMITS)
 
 
+def limits_version(L: dict) -> str:
+    """Names the limits document: the limits page sends it back with a save, so a save made from a page loaded
+    before someone else's save is refused instead of quietly undoing it (the mode included)."""
+    import hashlib
+    return hashlib.sha1(json.dumps(L, sort_keys=True).encode()).hexdigest()[:16]
+
+
 def save_limits(path: str, L: dict, who: str, clock=time.time):
-    tmp = path + ".tmp"
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
     with open(tmp, "w") as f:
         json.dump(L, f, indent=2)
         f.write("\n")
@@ -175,9 +229,41 @@ def changes(history, now):
     return out
 
 
-def evaluate(channel: dict, value, history, modes: dict, now: float):
-    """(level, reasons) of one channel's value against its rules; history: [(t, value)], oldest first."""
+CHANGE_AVG_S = 60          # the change rule compares 60 s means: the noise of single readings is not a change
+
+
+def change_over(history, now, within_s, since=None):
+    """(change, span_s) for the change rule: the mean of the last CHANGE_AVG_S against the mean of the same span
+    within_s earlier, or as far back as the history goes (then span_s < within_s says so); history before
+    since (the rule's mode began) is not used. None when there is too little."""
+    lo = now - within_s if since is None else max(now - within_s, since)
+    h = [(t, v) for t, v in history if t >= lo - CHANGE_AVG_S]
+    if len(h) < 2:
+        return None, 0.0
+    t0 = max(h[0][0], lo - CHANGE_AVG_S)
+    past = [v for t, v in h if t <= t0 + CHANGE_AVG_S]
+    recent = [v for t, v in h if t > now - CHANGE_AVG_S]
+    span = now - CHANGE_AVG_S - t0
+    if not past or not recent or span <= 0:
+        return None, 0.0
+    return sum(recent) / len(recent) - sum(past) / len(past), min(span, within_s)
+
+
+def applies(r: dict, modes: dict) -> bool:
+    return not any(modes.get(k, {}).get("value") != v for k, v in (r.get("when") or {}).items())
+
+
+def has_safety(channel: dict, modes: dict) -> bool:
+    """A safety rule (warn, bad, critical) is in force for this channel in the present modes."""
+    return any(r.get("level") in SAFETY and applies(r, modes) for r in channel.get("rules", []))
+
+
+def evaluate(channel: dict, value, history, modes: dict, now: float, mode_since: dict = None):
+    """(level, reasons) of one channel's value against its rules; history: [(t, value)], oldest first.
+    No value on a channel with a safety rule in force is a warning: its alarm cannot go off."""
     if value is None:
+        if has_safety(channel, modes):
+            return "warn", ["no value: its safety alarms cannot be checked"]
         return "nodata", []
     level, why = "ok", []
     rg = channel.get("range")
@@ -186,15 +272,19 @@ def evaluate(channel: dict, value, history, modes: dict, now: float):
         level = "warn" if any(r.get("level") in SAFETY for r in channel.get("rules", [])) else "notice"
         why = [f"outside {rg[0]:g} to {rg[1]:g}: not connected? (or wiring, scaling)"]
     for r in channel.get("rules", []):
-        if any(modes.get(k, {}).get("value") != v for k, v in (r.get("when") or {}).items()):
+        if not applies(r, modes):
             continue
         hit = False
         if "at_or_above" in r: hit = value >= r["at_or_above"]
         elif "above" in r: hit = value > r["above"]
         elif "below" in r: hit = value < r["below"]
         elif "change" in r:
-            recent = [v for t, v in history if now - t <= r["within_s"]]
-            hit = len(recent) >= 2 and max(recent) - min(recent) >= r["change"]
+            since = max([(mode_since or {}).get(k, 0) for k in (r.get("when") or {})] + [0]) or None
+            d, span = change_over(history, now, r["within_s"], since)
+            hit = d is not None and abs(d) >= r["change"]
+            if span < r["within_s"]:   # after a restart, a mode change or a scale change: said, not hidden
+                why.append(f"{rule_text(r)}: only {span / 60:.0f} min of history so far"
+                           + (f" (change {d:+.3g})" if d is not None else ""))
         if hit:
             why.append(f"{rule_text(r)} [{r['level']}]")
             if RANK[r["level"]] > RANK[level]:
@@ -228,7 +318,11 @@ class Monitor:
         self.fetch = fetch or self._fetch                # (url, timeout) -> dict; raises on failure
         self.procs = procs or fsudaq_processes
         self.lock = threading.Lock()
-        self.limits = load_limits(a.limits)
+        self.step_lock = threading.RLock()             # one gathering (or limits save) at a time
+        self.limits_problem = []
+        self.limits = load_limits(a.limits, self.limits_problem)
+        self.mode_since = {}                           # mode -> when its present value was set (unknown before the start)
+        self.error = None                              # the last gathering's failure (the page says it)
         self.hist = collections.defaultdict(collections.deque)   # channel id -> (t, value), the last hour or more
         self.plc = self.plc_err = None; self.plc_t = None          # GET /status of the relay
         self.hb = None                                             # (heartbeat, when it last changed)
@@ -265,13 +359,34 @@ class Monitor:
             self.online, self.online_err = None, str(getattr(ex, "reason", ex))
 
     def step(self):
-        now = self.clock()
-        self.poll_plc(now)
-        self.poll_online(now)
-        items = self.build(now)
-        with self.lock:
-            self.snapshot = dict(items=items, updated=now, modes=self.limits.get("modes", {}),
-                                 summary=summarize(items))
+        with self.step_lock:
+            now = self.clock()
+            try:
+                self.poll_plc(now)
+                self.poll_online(now)
+                items = self.build(now)
+            except Exception as ex:    # the page must not show the last good gathering as current
+                with self.lock:
+                    self.snapshot = dict(self.snapshot, error=f"gathering failed at {hms(now)}: {ex!r}")
+                raise
+            with self.lock:
+                self.snapshot = dict(items=items, updated=now, modes=self.limits.get("modes", {}),
+                                     summary=summarize(items), interval=self.a.interval)
+
+    def plc_stale(self, now):
+        """Why the PLC values are not current (None: they are): no answer, no status, the status too old,
+        or the heartbeat not moving (the relay may keep getting frames of a PLC that stopped)."""
+        d = self.plc
+        lim = self.limits.get("daq", {}).get("plc_stale_s", 10)
+        if self.plc_err is not None or d is None:
+            return "no answer from pion-ros"
+        if d.get("plc") is None:
+            return "pion-ros has no PLC status"
+        if d.get("age_s") is None or d["age_s"] > lim:
+            return f"the PLC status is {d.get('age_s') or 0:.0f} s old"
+        if self.hb is not None and now - self.hb[1] > lim:
+            return f"the PLC heartbeat is stuck at {self.hb[0]} for {now - self.hb[1]:.0f} s"
+        return None
 
     # -------- the items
     def build(self, now):
@@ -288,6 +403,8 @@ class Monitor:
         out += self.plc_items(now)
         out += collapse(self.channel_items(now), "Tracker temperatures", "Trackers")
         out += self.led_items(now, rf)
+        for p in self.limits_problem:
+            out.append(item("PLC", "Limits file", "warn", p))
         return out
 
     def daq_items(self, now, procs, fsudaq_dir, data_path, folder, rf, rf_err, running):
@@ -450,16 +567,21 @@ class Monitor:
         L = self.limits
         modes = L.get("modes", {})
         plc = (self.plc or {}).get("plc") if self.plc_err is None else None
-        stale = (self.plc or {}).get("age_s") is None or (self.plc or {}).get("age_s") > L.get("daq", {}).get("plc_stale_s", 10)
+        stale = self.plc_stale(now)
         used = set()
         for c in L.get("channels", []):
             src = (c.get("source") or "").removeprefix("plc.")
             if not src:
-                out.append(item(c.get("group") or "Inputs", c["name"], "nodata", "not assigned to a PLC input (limits page)",
+                safety = has_safety(c, modes)
+                out.append(item(c.get("group") or "Inputs", c["name"], "warn" if safety else "nodata",
+                                "not assigned to a PLC input (limits page)" + (": its safety alarms cannot go off" if safety else ""),
                                 dict(rules=[rule_text(r) + f" [{r['level']}]" for r in c.get("rules", [])])))
                 continue
             used.add(src)
             raw = None if plc is None or stale else plc.get(src)
+            nan = raw is not None and not _num(raw)    # NaN, infinity or not a number: no value (and never into the history)
+            if nan:
+                raw = None
             if c.get("connected") is False:   # marked not plugged in: what it reads means nothing
                 out.append(item(c.get("group") or "Inputs", c["name"], "notice",
                                 "not connected" + (f"; reads {raw:.4g}" if raw is not None else ""),
@@ -474,10 +596,17 @@ class Monitor:
                 while h and now - h[0][0] > keep:
                     h.popleft()
             h = list(self.hist[c["id"]])
-            level, why = evaluate(c, value, h, modes, now)
-            fmt = lambda v: f"{v:.{int(c.get('digits', 2))}f} {c.get('unit', '')}".strip()
+            level, why = evaluate(c, value, h, modes, now, self.mode_since)
+            # enough decimals that a reading is never shown as a threshold it has not reached (4.96 as "5.0")
+            thr = [r[k] for r in c.get("rules", []) for k in ("at_or_above", "above", "below") if k in r]
+            dg = lambda v: next((k for k in range(int(c.get('digits', 2)), int(c.get('digits', 2)) + 4)
+                                 if all(round(v, k) != t or v == t for t in thr)), int(c.get('digits', 2)) + 4)
+            fmt = lambda v: f"{v:.{dg(v)}f} {c.get('unit', '')}".strip()
             if value is None:
-                txt = "no value: " + ("PLC status missing or stale" if raw is None else "input not connected")
+                txt = "no value: " + ("the PLC sent no number (NaN)" if nan else stale or "PLC status missing" if raw is None
+                                      else "input not connected (open thermocouple)")
+                if why:
+                    txt += "  —  " + "; ".join(why)
             else:
                 txt = fmt(value) + ("  —  " + "; ".join(why) if why else "")
             span = (now - h[0][0]) if h else 0
@@ -498,7 +627,7 @@ class Monitor:
             if src in used or f"plc.{src}" in L.get("unused", []):
                 continue
             raw = None if plc is None else plc.get(src)
-            if raw is None:
+            if raw is None or not _num(raw):
                 continue
             open_tc = src.startswith("tc") and raw >= TC_OPEN
             out.append(item("PLC inputs (not named)", src, "info", "not connected" if open_tc else f"{raw:.4g} (raw)", dict(raw=raw)))
@@ -618,7 +747,7 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def send(self, code, body, ctype="application/json"):
-        data = body if isinstance(body, bytes) else json.dumps(body, allow_nan=False).encode()
+        data = body if isinstance(body, bytes) else json.dumps(finite(body), allow_nan=False).encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype); self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
@@ -641,8 +770,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, self.mon.state())
         if p == "/api/limits":
             m = self.mon
-            plc = (m.plc or {}).get("plc") or {}
-            return self.send(200, dict(limits=m.limits, inputs={k: plc.get(k) for k in PLC_INPUTS}, levels=list(RULE_LEVELS),
+            stale = m.plc_stale(m.clock())
+            plc = {} if stale else (m.plc or {}).get("plc") or {}
+            return self.send(200, dict(limits=m.limits, version=limits_version(m.limits), inputs={k: plc.get(k) for k in PLC_INPUTS},
+                                       inputs_stale=stale, levels=list(RULE_LEVELS),
                                        sources=[f"plc.{s}" for s in PLC_INPUTS], can_save=self.local()))
         self.send(404, {"error": "not here"})
 
@@ -662,16 +793,28 @@ class Handler(BaseHTTPRequestHandler):
         if errors:
             return self.send(400, {"errors": errors})
         m = self.mon
-        save_limits(m.a.limits, L, self.headers.get("X-Who") or "the limits page", m.clock)
-        with m.lock:
-            old = {c["id"]: c for c in m.limits.get("channels", [])}
-            for c in L.get("channels", []):     # a channel whose source or scaling changed starts its history again
-                o = old.get(c["id"])
-                if not o or any(o.get(k) != c.get(k) for k in ("source", "scale", "offset")):
-                    m.hist.pop(c["id"], None)
-            m.limits = L
-        m.step()
-        self.send(200, {"saved": iso(m.clock())})
+        with m.step_lock:
+            if self.headers.get("X-Limits-Version") != limits_version(m.limits):
+                return self.send(409, {"errors": ["the limits were changed (by someone else, or in another tab) since this page "
+                                                  "loaded them: nothing saved. Reload the page and make the change again."]})
+            save_limits(m.a.limits, L, self.headers.get("X-Who") or "the limits page", m.clock)
+            now = m.clock()
+            with m.lock:
+                old = {c["id"]: c for c in m.limits.get("channels", [])}
+                for c in L.get("channels", []):     # a channel whose source or scaling changed starts its history again
+                    o = old.get(c["id"])
+                    if not o or any(o.get(k) != c.get(k) for k in ("source", "scale", "offset")):
+                        m.hist.pop(c["id"], None)
+                for k, md in L.get("modes", {}).items():   # a change rule of a mode looks only at the time since it began
+                    if (m.limits.get("modes", {}).get(k) or {}).get("value") != md.get("value"):
+                        m.mode_since[k] = now
+                m.limits = L
+                m.limits_problem = []
+            try:
+                m.step()
+            except Exception:           # noqa: BLE001  saved; the page shows the failure (snapshot error)
+                pass
+        self.send(200, {"saved": iso(m.clock()), "version": limits_version(L)})
 
 
 def parse_args(argv=None):

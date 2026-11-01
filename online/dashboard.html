@@ -204,7 +204,7 @@ function message(id, text){ const {g,w,h}=setupCanvas(id); g.fillStyle=css('--mu
 // spec: {xlog, ylog, x0, x1, xfmt, yfmt, xticks, series:[{kind:'bars'|'step'|'line', edges|x, y, color, colors, width, gap}], marks:[{x, color, label}], ylabel, empty}
 function plot(id, spec){
   const {g,w,h}=setupCanvas(id); const L=Math.round(50*K),B=Math.round(24*K),T=8,R=10;   // room for the labels at this size
-  const own = spec.series.flatMap(s=>s.y).filter(v=>isFinite(v) && (spec.ylog ? v>0 : true));
+  const own = spec.series.flatMap(s=>s.y).filter(v=>v!=null && isFinite(v) && (spec.ylog ? v>0 : true));
   if(!own.length || (!spec.ylog && !own.some(v=>v>0))){ message(id, spec.empty || 'no entries yet'); PLOTS[id]=null; return null; }
   // spec.yall: the values of several plots that share one y scale
   const ys = spec.yall ? spec.yall.filter(v=>isFinite(v) && (spec.ylog ? v>0 : true)) : own;
@@ -233,7 +233,7 @@ function plot(id, spec){
       for(let i=0;i<s.y.length;i++){ const v=s.y[i]; const yv = (spec.ylog && !(v>0)) ? base : Y(v); const xa=X(s.edges[i]), xb=X(s.edges[i+1]);
         if(!started){ g.moveTo(xa,yv); started=true; } else g.lineTo(xa,yv); g.lineTo(xb,yv); } g.stroke(); }
     else { g.lineWidth=s.width||1.6; g.beginPath(); let started=false;
-      for(let i=0;i<s.x.length;i++){ const v=s.y[i]; if(!isFinite(v) || (spec.ylog && !(v>0))){ started=false; continue; }
+      for(let i=0;i<s.x.length;i++){ const v=s.y[i]; if(v==null || !isFinite(v) || (spec.ylog && !(v>0))){ started=false; continue; }   // null: not known, a gap
         if(!started){ g.moveTo(X(s.x[i]),Y(v)); started=true; } else g.lineTo(X(s.x[i]),Y(v)); } g.stroke(); } }
   g.restore();
   for(const m of (spec.marks||[])){ if(!(m.x>=x0 && m.x<=x1)) continue;
@@ -334,7 +334,7 @@ document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>showTab(b.dat
 function fillSelects(){
   const slots = S.daq.slots, chSel=document.getElementById('sel_ch'), refSel=document.getElementById('sel_ref');
   const opts = slots.map(s=>`<option value="${s.slot}">${slotName(s)}</option>`).join('');
-  if(chSel.options.length !== slots.length){ chSel.innerHTML = opts; refSel.innerHTML = '<option value="-1">none</option>' + opts; }
+  if(chSel.dataset.k !== opts){ chSel.innerHTML = opts; refSel.innerHTML = '<option value="-1">none</option>' + opts; chSel.dataset.k = opts; }   // also when only the names changed (cabling)
   if(selSlot===null || !slots.some(s=>s.slot===selSlot)) selSlot = slots.length ? slots[0].slot : null;
   chSel.value = selSlot; refSel.value = S.daq.ref===null ? -1 : S.daq.ref;
 }
@@ -355,21 +355,28 @@ winIn.onkeydown = e=>{ if(e.key==='Enter') applyWindow(); };
 document.getElementById('btn_clear').onclick = async ()=>{ await fetch('/clear'); document.getElementById('clear_note').textContent='cleared at '+new Date().toLocaleTimeString(); await tick(); fetchChannel(); };
 ['occ_mode','occ_log','q_log','dt_log','spec_which','grid_log'].forEach(id=>document.getElementById(id).onchange=()=>{ if(id==='spec_which') fetchChannel(); else draw(); });
 
-let lastOK = null, PREV = null, MBPS = null;   // when /state last answered; the previous answer, for the MB/s
+let lastOK = null, MBPS = null, BYTES = [];   // when /state last answered; the MB/s, from (server time, run bytes) of the last ~10 s
 async function tick(){
   let r = null;
   try { const res = await fetch('/state', {cache:'no-store', signal:AbortSignal.timeout(5000)}); if(res.ok) r = await res.json(); } catch(e){ r = null; }
   if(!r){ document.body.classList.add('stale'); banner(); return; }
   document.body.classList.remove('stale');
+  if(S && !(r.server_time > S.server_time)) return;   // an older answer that came late: never over a newer one
   if(r.can_control===false && !document.body.classList.contains('viewonly')){   // another machine: look, not steer
     document.body.classList.add('viewonly');
     ['sel_ref','btn_clear','win_ns','win_apply'].forEach(id=>{ const e=document.getElementById(id); e.disabled=true; e.title='view only: changed on odin or through the ssh tunnel'; }); }
-  if(S && r.folder!==S.folder) document.getElementById('clear_note').textContent = '';   // a new run: nothing cleared in it yet
-  if(S && r.folder===S.folder && r.server_time>S.server_time){
-    const db = r.daq.run_bytes - S.daq.run_bytes, dt = r.server_time - S.server_time;
-    MBPS = db>=0 ? db/dt/1e6 : null; }
-  else MBPS = null;
+  const newRun = S && r.folder!==S.folder;
+  if(newRun){   // another run: nothing cleared in it yet, and no histogram of the one before stays up under its name
+    document.getElementById('clear_note').textContent = '';
+    CH = SPEC_ALL = GRID = CMPD = null; BYTES = []; }
+  // MB/s over ~10 s: the size is taken when the analysis reads the files, not when the page asks, so two
+  // answers 1 s apart could show the same size (0 MB/s) and then two steps' growth (twice the rate)
+  BYTES.push([r.server_time, r.daq.run_bytes]);
+  while(BYTES.length > 1 && BYTES[0][0] < r.server_time - 12) BYTES.shift();
+  const [t0b, b0] = BYTES[0];
+  MBPS = r.server_time - t0b >= 5 && r.daq.run_bytes >= b0 ? (r.daq.run_bytes - b0) / (r.server_time - t0b) / 1e6 : null;
   S = r; lastOK = new Date();
+  if(newRun) fetchChannel();
   fillSelects(); draw();
 }
 // what must be seen first: no connection, a stalled analysis, data problems, placeholders in the setup
@@ -380,8 +387,10 @@ function banner(){
   if(S){
     if(S.in_flight>0 && S.last_result_s!=null && S.last_result_s>15)
       out.push(['bad', `No analysis result for ${S.last_result_s.toFixed(0)} s (${S.in_flight} tasks out): the plots are not updating.`]);
-    for(const h of S.health) out.push(['bad', h]);
-    for(const p of S.problems) out.push(['bad', 'Setup: '+p]);
+    if(chOK && Date.now() - chOK > 10000)
+      out.push(['bad', `The channel histograms have not updated since ${new Date(chOK).toLocaleTimeString()}: those shown are from then.`]);
+    for(const h of S.health) out.push(['bad', esc(h)]);
+    for(const p of S.problems) out.push(['bad', 'Setup: '+esc(p)]);
     const ev = ((S.run_file||{}).led||{}).events||[];
     const mayBeOn = ev.some(e=>e.what==='on' && e.switched!=='no');   // an "on" that may have reached the PLC (also one not answered yet)
     for(const e of ev) if(e.ok===false)
@@ -392,21 +401,28 @@ function banner(){
       out.push(['bad', `Board clock lost during this run: ${esc(CK.stop.lost_since_last_check.join(', '))} — its times may be a 16 ns clock cycle off against the other boards from then on. Check the clock cables.`]);
     if(CK.start && CK.start.lost_since_last_check.length)
       out.push(['ph', `Board clock lost before this run and locked again: ${esc(CK.start.lost_since_last_check.join(', '))} — its 16 ns phase against the other boards may have changed (the LED hits show it).`]);
-    if(S.warnings.length) out.push(['ph', `Placeholders (${S.warnings.length}): ` + S.warnings.join('; ') + ' — fill online/experiment.json.']);
+    if(S.warnings.length) out.push(['ph', `Placeholders (${S.warnings.length}): ` + esc(S.warnings.join('; ')) + ' — fill online/experiment.json.']);
     if(S.live_start) out.push(['', `Started while this run was going (${new Date(S.since_wall*1000).toLocaleTimeString()}): counts and histograms are from then on` +
       (S.early ? `; ${S.early.toLocaleString()} hits from before then reached the disk later (counted on the DAQ tab, not in the finder, not as late).` : '.')]);
   }
   document.getElementById('banner').innerHTML = out.map(([c,t])=>`<div class="${c}">${t}</div>`).join('');
 }
+let chSeq = 0, chOK = null;   // the newest channel request, and when one last came back whole
 async function fetchChannel(){
   if(selSlot===null) return;
-  try { CH = await (await fetch(`/channel?slot=${selSlot}&${viewQuery()}`)).json();
-        if(document.getElementById('spec_which').value==='all') SPEC_ALL = await (await fetch('/channel?slot=-1')).json();
+  // only the newest request is drawn, and only for the run it was asked for: a late answer for an older
+  // zoom or run would be drawn on the axes and under the name of the current one
+  const my = ++chSeq, folder = S ? S.folder : null;
+  let ch, spec = SPEC_ALL, cmp = CMPD, grid = GRID;
+  try { ch = await (await fetch(`/channel?slot=${selSlot}&${viewQuery()}`)).json();
+        if(document.getElementById('spec_which').value==='all') spec = await (await fetch('/channel?slot=-1')).json();
         const cc = document.getElementById('cmp').closest('.card');
         if(tab==='daq' && CMP.length && !cc.classList.contains('collapsed')){   // on its own: an analysis older than the page has no /compare
-          try { const r = await fetch(`/compare?slots=${CMP.join(',')}&${viewQuery()}`); CMPD = r.ok ? await r.json() : null; } catch(e){ CMPD = null; } }
+          try { const r = await fetch(`/compare?slots=${CMP.join(',')}&${viewQuery()}`); cmp = r.ok ? await r.json() : null; } catch(e){ cmp = null; } }
         const gc = document.getElementById('c_grid').closest('.card');
-        if(tab==='daq' && !gc.classList.contains('collapsed')) GRID = await (await fetch('/grid?'+viewQuery(64))).json(); } catch(e){ return; }
+        if(tab==='daq' && !gc.classList.contains('collapsed')) grid = await (await fetch('/grid?'+viewQuery(64))).json(); } catch(e){ return; }
+  if(my !== chSeq || !S || S.folder !== folder) return;
+  CH = ch; SPEC_ALL = spec; CMPD = cmp; GRID = grid; chOK = Date.now();
   draw();
 }
 
@@ -460,8 +476,9 @@ function drawDaq(){
       'A channel pair whose buffer fills slowly writes late; fewer events per aggregate on the board shortens it.') : '');
   // total rate over time, and per board: hits in each second of data time
   const secs=D.seconds, ser=[];
-  ser.push({kind:'line', x:secs.map(s=>s.t), y:secs.map(s=>s.boards.reduce((a,b)=>a+b,0)), color:css('--fg'), width:2});
-  S.boards.forEach((bd,i)=>ser.push({kind:'line', x:secs.map(s=>s.t), y:secs.map(s=>s.boards[i]||0), color:BOARD_COLOR[i%BOARD_COLOR.length]}));
+  // a board's second not known yet (a slow channel pair has not written up to it) is null: a gap, not a dip
+  ser.push({kind:'line', x:secs.map(s=>s.t), y:secs.map(s=>s.boards.some(b=>b==null) ? null : s.boards.reduce((a,b)=>a+b,0)), color:css('--fg'), width:2});
+  S.boards.forEach((bd,i)=>ser.push({kind:'line', x:secs.map(s=>s.t), y:secs.map(s=>s.boards[i]===undefined ? 0 : s.boards[i]), color:BOARD_COLOR[i%BOARD_COLOR.length]}));
   if(secs.length>1) plot('c_total', {x0:secs[0].t, x1:secs[secs.length-1].t, xfmt:v=>sinum(v)+' s', series:ser, marks:ledMarks(), ylabel:'Hz'}); else message('c_total','no data yet');
   legend('leg_total', [{name:'all channels', color:css('--fg')}].concat(S.boards.map((b,i)=>({name:'Digi-'+b.serial, color:BOARD_COLOR[i%BOARD_COLOR.length]}))));
   drawGrid();
@@ -484,7 +501,7 @@ function drawDaq(){
       (pn ? `Not shown: Qshort saturated (32767) or larger than Qlong in ${(100*P.out/pn).toFixed(1)} % of hits with 0 < Q < 65535. ` : '') + 'Zooms with the pulse-height plot.';
     plot('c_iat', {x0:1, x1:1e9, xlog:true, ylog:true, xfmt:nsfmt, series:[{kind:'bars', edges:CH.iat.edges, y:CH.iat.counts, color:'#9467bd', gap:0}], empty:'no hits on this channel yet', ylabel:'hits'});
     const refName = D.ref===null ? null : slotName(D.slots.find(s=>s.slot===D.ref));
-    document.getElementById('dt_ref').textContent = refName ? 'reference: '+refName : '';
+    document.getElementById('dt_ref').textContent = refName ? 'reference: '+refName+(S.finder.timing==='offsets file' ? ' · time offsets removed' : ' · no time offsets file: raw board times') : '';
     if(refName) plot('c_dt', {x0:-200, x1:200, ylog:document.getElementById('dt_log').checked, series:[{kind:'bars', edges:CH.dt.edges, y:CH.dt.counts, color:'#2a9d8f', gap:0}],
                               empty:'no pairs within ±200 ns yet', ylabel:'pairs per 0.5 ns'});
     else message('c_dt', 'pick a timing reference channel above');
