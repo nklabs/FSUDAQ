@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import re
 import copy
 import glob
 import json
@@ -601,7 +602,15 @@ class Monitor:
             thr = [r[k] for r in c.get("rules", []) for k in ("at_or_above", "above", "below") if k in r]
             dg = lambda v: next((k for k in range(int(c.get('digits', 2)), int(c.get('digits', 2)) + 4)
                                  if all(round(v, k) != t or v == t for t in thr)), int(c.get('digits', 2)) + 4)
-            fmt = lambda v: f"{v:.{dg(v)}f} {c.get('unit', '')}".strip()
+            # an input that can read below 0 keeps a sign position: a figure space (a digit's width) where the
+            # minus goes, so its digits stay put when it crosses 0; and never "-0.000"
+            signed = not c.get("range") or c["range"][0] < 0
+
+            def fmt(v):
+                s = f"{v:.{dg(v)}f}"
+                if float(s) == 0:
+                    s = s.lstrip("-")
+                return (("\u2007" if signed and not s.startswith("-") else "") + s + " " + c.get("unit", "")).strip()
             if value is None:
                 txt = "no value: " + ("the PLC sent no number (NaN)" if nan else stale or "PLC status missing" if raw is None
                                       else "input not connected (open thermocouple)")
@@ -655,7 +664,7 @@ def collapse(items, group, into):
         except (ValueError, IndexError):
             pass
     flagged = [i for i in mine if RANK[i["level"]] >= RANK["warn"]]   # safety first, by name
-    parts = [f"{i['name']}: {i['text']}" for i in flagged]
+    parts = [f"{i['name']}: {i['text'].lstrip(chr(0x2007))}" for i in flagged]
     if vals:
         unit = read[0]["text"].split()[1] if len(read[0]["text"].split()) > 1 else ""
         parts.append((f"{min(vals):g} to {max(vals):g} {unit}" if len(vals) > 1 else f"{vals[0]:g} {unit}") + f" ({len(vals)} reading)")
@@ -740,6 +749,9 @@ def read_run_file(folder):
 
 
 # ---------------------------------------------------------------- HTTP
+LAMP_FILE = re.compile(r"/img/lamp_(ok|notice|problem|warn|bad|off)_[0-2]\.png")   # the only files served besides the pages
+
+
 class Handler(BaseHTTPRequestHandler):
     mon: Monitor = None
 
@@ -766,6 +778,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.page("status.html")
         if p == "/limits":
             return self.page("limits.html")
+        if LAMP_FILE.fullmatch(p):          # the Console skin's raytraced lamps (status/img; render_lamps.py)
+            try:
+                with open(os.path.join(HERE, "img", p.rsplit("/", 1)[1]), "rb") as f:
+                    return self.send(200, f.read(), "image/png")
+            except OSError:
+                return self.send(404, {"error": "no such lamp"})
         if p == "/api/status":
             return self.send(200, self.mon.state())
         if p == "/api/limits":

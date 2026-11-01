@@ -92,7 +92,7 @@
   .age { grid-column:5; grid-row:1; color:var(--soft); font-size:11px; white-space:nowrap; }
   .trend { grid-column:4; grid-row:1; display:grid; grid-template-columns:repeat(3, 4.5ch 8ch); justify-content:start; column-gap:4px; font-size:12px; color:var(--muted); line-height:inherit; padding-top:1px; font-variant-numeric:tabular-nums; }
   @container (max-width: 640px) { .trend { grid-column:2 / -1; grid-row:auto; margin-top:-2px; padding-top:0; } }   /* a narrow card: the changes on their own line */
-  .trend i { font-style:normal; } .trend b { font-weight:500; text-align:left; }   /* each value right after its label */
+  .trend i { font-style:normal; } .trend b { font-weight:500; text-align:right; padding-right:1ch; }   /* right-aligned in its slot: the digits stay put as the sign comes and goes */
   .dot { width:10px; height:10px; border-radius:50%; margin-top:4px; background:var(--nodata); }
   .dot.ok { background:var(--ok); } .dot.info { background:var(--info); } .dot.idle { background:var(--info); } .dot.notice { background:var(--idle); } .dot.problem { background:var(--problem); } .dot.warn { background:var(--warn); }
   .dot.bad { background:var(--bad); animation:pulse 2s ease-in-out infinite; } .dot.critical { background:var(--crit); animation:pulse 2s ease-in-out infinite; box-shadow:0 0 0 3px color-mix(in srgb, var(--crit) 30%, transparent); }
@@ -157,6 +157,12 @@
                         box-shadow:inset 0 0 16px color-mix(in srgb, var(--acc) 10%, transparent), inset 0 2px 6px rgba(0,0,0,.95), 0 1px 0 rgba(255,255,255,.07); }
   /* pilot lamps: machined rings, engraved plates */
   body.console #overview .bezel { background:conic-gradient(from 210deg, #c9ced4, #3d434a, #9aa1a9, #2a2f35, #c9ced4); box-shadow:0 0 0 2px #000, 0 3px 6px rgba(0,0,0,.6); }
+  /* the raytraced lamps (img/, render_lamps.py), once all have loaded: the image is the bezel and the lens */
+  body.console.lamps-img #overview .bezel { width:54px; height:54px; padding:0; background:none; box-shadow:none; }
+  body.console.lamps-img #overview .bezel:has(.critical) { box-shadow:0 0 0 4px rgba(255,59,47,.45); }
+  body.console.lamps-img #overview .big { background-color:transparent; background-position:center; background-size:100% 100%; background-repeat:no-repeat;
+                                          box-shadow:0 0 22px 3px color-mix(in srgb, var(--lamp) 60%, transparent); }
+  body.console.lamps-img #overview .big.info, body.console.lamps-img #overview .big.idle, body.console.lamps-img #overview .big.nodata { box-shadow:none; }
   body.console #overview span { background:#0b0d10; color:var(--r-ink); border:1px solid #000; border-radius:3px; letter-spacing:.12em;
                               box-shadow:inset 0 1px 2px rgba(0,0,0,.9), 0 1px 0 rgba(255,255,255,.08); }
   /* screens: recessed in the metal */
@@ -282,8 +288,11 @@ function render(S){
   const worstOf = g => groups[g].reduce((w,x)=>RANK[x.level]>RANK[w]?x.level:w, groups[g][0].level);
   // the big picture: one big circle per card, always in the fixed ORDER (dragging the cards does not move them)
   const fixed = Object.keys(groups).sort((a,b)=>{ const ia=ORDER.indexOf(a), ib=ORDER.indexOf(b); return (ia<0?99:ia)-(ib<0?99:ib) || a.localeCompare(b); });
-  document.getElementById('overview').innerHTML = fixed.map(g =>
-    `<a href="#" data-go="${esc(g)}" title="${esc(g)}: ${worstOf(g)}"><div class="bezel"><div class="big ${worstOf(g)}"></div></div><span>${esc(g)}</span></a>`).join('');
+  const lampImg = document.body.classList.contains('console') && LAMPS_READY;
+  document.getElementById('overview').innerHTML = fixed.map((g, i) =>
+    `<a href="#" data-go="${esc(g)}" title="${esc(g)}: ${worstOf(g)}"><div class="bezel"><div class="big ${worstOf(g)}"` +
+    (lampImg ? ` style="background-image:url(img/lamp_${LAMP_OF[worstOf(g)] || 'off'}_${i % 3}.png)"` : '') +   // neighbours: other variants
+    `></div></div><span>${esc(g)}</span></a>`).join('');
   for(const g of Object.keys(cards)) if(!groups[g]){ cards[g].remove(); delete cards[g]; }
   names.forEach((g, i)=>{
     const card = cardFor(g), its = groups[g];
@@ -327,6 +336,15 @@ grid.addEventListener('dragend', e=>{
   all[g] = [...box.children].map(x=>x.dataset.name); store.set(ROWKEY, all);
   dragRow.classList.remove('dragging'); dragRow = null; if(last) render(last);
 });
+// the Console skin's raytraced lamps: three variants per state (real lamps are not all alike); used once all
+// have loaded, so a missing one never leaves a lamp blank (the drawn lamps stay)
+const LAMP_OF = {ok:'ok', notice:'notice', problem:'problem', warn:'warn', bad:'bad', critical:'bad', info:'off', idle:'off', nodata:'off'};
+let LAMPS_READY = false;
+{ const files = ['ok', 'notice', 'problem', 'warn', 'bad', 'off'].flatMap(s => [0, 1, 2].map(v => `img/lamp_${s}_${v}.png`));
+  let n = 0;
+  files.forEach(f => { const im = new Image();
+    im.onload = () => { if(++n === files.length){ LAMPS_READY = true; document.body.classList.add('lamps-img'); if(last) render(last); } };
+    im.src = f; }); }
 // the skin switch, kept in this browser
 const SKINS = ['panel', 'console', 'minimal'];
 function setSkin(s){
@@ -335,6 +353,7 @@ function setSkin(s){
   document.body.classList.toggle('console', s === 'console'); document.body.classList.toggle('minimal', s === 'minimal');
   document.querySelectorAll('.skins input').forEach(x=>{ x.checked = x.value === s; });
   store.set('status-skin', s);
+  if(typeof last !== 'undefined' && last) render(last);   // the lamps: images in Console, drawn otherwise
 }
 { const q = new URLSearchParams(location.search).get('skin');   // ?skin=panel / console / minimal sets it (a bookmark)
   setSkin(q || store.get('status-skin', 'panel') || 'panel'); }

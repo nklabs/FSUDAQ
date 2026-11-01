@@ -34,6 +34,7 @@
   .big { font-size:calc(22px * var(--k, 1)); font-weight:600; font-variant-numeric:tabular-nums; }
   .tiles { display:flex; gap:22px; flex-wrap:wrap; margin-bottom:10px; }
   .tile small { display:block; color:var(--muted); }
+  .tile { min-width:calc(120px * var(--k, 1)); } .tile .big { display:inline-block; min-width:6ch; }   /* a number that grows does not push the tiles beside it */
   .warn { color:var(--heavy); font-weight:600; }
   .big.good { color:var(--good); }
   .warnbox { border:1px solid var(--heavy); border-radius:6px; padding:6px 10px; margin:0 0 10px; background:var(--card); }

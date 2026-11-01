@@ -386,6 +386,15 @@ def scenario_limits_api(tmp):
     for page in ("/", "/limits"):
         with urllib.request.urlopen(base + page) as r:
             good &= check(r.status == 200 and b"<title>" in r.read(), f"{page} not served")
+    # the lamp images, and nothing else from the folder (no other name, no path out of img/)
+    with urllib.request.urlopen(base + "/img/lamp_ok_0.png") as r:
+        good &= check(r.status == 200 and r.headers["Content-Type"] == "image/png" and r.read(8) == b"\x89PNG\r\n\x1a\n", "lamp image not served")
+    for bad_path in ("/img/lamp_ok_3.png", "/img/../status_server.py", "/img/%2e%2e/status_server.py", "/img/render_lamps.py", "/status_server.py"):
+        try:
+            urllib.request.urlopen(base + bad_path); code = 200
+        except urllib.error.HTTPError as e:
+            code = e.code
+        good &= check(code == 404, f"{bad_path} answered {code}")
     class Remote(ss.Handler):           # a viewer on another machine: may look, may not save
         def local(self):
             return False
