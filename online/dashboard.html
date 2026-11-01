@@ -77,6 +77,7 @@
   body.stale .tiles, body.stale section, body.stale h1 .st { opacity:.45; filter:grayscale(1); }
   .sizer { display:inline-flex; align-items:center; gap:6px; font:calc(12px * var(--k, 1)) system-ui, sans-serif; color:var(--muted); font-weight:normal; }
   .sizer input { width:110px; cursor:pointer; }
+  .sizer .sizenum { width:4.2em; cursor:text; font:inherit; text-align:right; background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:4px; padding:0 2px; }
   .runs { position:absolute; z-index:30; left:16px; right:16px; max-width:900px; max-height:70vh; overflow:auto; padding:10px 12px;
           background:var(--card); border:1px solid var(--line); border-radius:6px; box-shadow:0 8px 24px rgba(0,0,0,.25); }
   .runs .row { display:flex; gap:8px; align-items:center; margin:0 0 8px; flex-wrap:wrap; }
@@ -92,7 +93,7 @@
   <button id="runs_btn" title="Load a recorded run for a look (the run being taken is not analysed meanwhile)">runs ▾</button>
   <button id="live_btn" hidden title="Back to the run being taken">back to live</button>
   <button id="layout_reset" title="Put every card back to its original place and size">reset layout</button>
-  <label class="sizer" title="Text and plot size (kept in this browser)">size <input type="range" id="size" min="0.7" max="2" step="0.05"><output id="sizeval"></output></label></h1>
+  <label class="sizer" title="Text and plot size (kept in this browser)">size <input type="range" id="size" min="0.7" max="2" step="0.05"><input type="number" class="sizenum" id="sizeval" min="70" max="200" step="1" title="type a size in %, then Enter">%</label></h1>
 <div class="runs" id="runs_panel" hidden>
   <div class="row"><b>Recorded runs</b><span class="note">newest first; loading one reads it whole, and a run FSUDAQ starts takes the dashboard back to live</span></div>
   <div class="row"><input id="runs_path" placeholder="or any run folder on odin, e.g. /home/beamtime/FSUDAQ_data/.../test_042"><button id="runs_go">load</button><button id="runs_close">close</button></div>
@@ -276,13 +277,19 @@ try { K = Math.min(2, Math.max(0.7, +localStorage.getItem('fsudaq-size') || 1));
 { const q = +new URLSearchParams(location.search).get('size'); if(q) K = Math.min(2, Math.max(0.7, q)); }
 const cfont = px => `${Math.round(px * K * 10) / 10}px system-ui`;
 function setTextSize(k, keep){
-  K = k; document.getElementById('size').value = k; document.getElementById('sizeval').textContent = Math.round(k * 100) + '%';
+  K = k; document.getElementById('size').value = k; document.getElementById('sizeval').value = Math.round(k * 100);
   document.documentElement.style.setProperty('--k', k);
   if(keep){ try { localStorage.setItem('fsudaq-size', k); } catch(e){} }
 }
 setTextSize(K, false);
-document.getElementById('size').oninput = e=>setTextSize(+e.target.value, false);
+// applied on release (as on the status and topic pages): while it is held only the number follows it
+document.getElementById('size').oninput = e=>{ document.getElementById('sizeval').value = Math.round(e.target.value * 100); };
 document.getElementById('size').onchange = e=>{ setTextSize(+e.target.value, true); draw(); };
+// or typed (in %): applied on Enter or leaving the box; kept within 70-200 %, anything else puts the size back
+document.getElementById('sizeval').onchange = e=>{
+  const v = parseFloat(e.target.value);
+  if(!isFinite(v) || v <= 0){ setTextSize(K, false); return; }
+  setTextSize(Math.min(2, Math.max(0.7, v / 100)), true); draw(); };
 const store = { get(k,d){ try { const v=localStorage.getItem(k); return v===null?d:JSON.parse(v); } catch(e){ return d; } },
                 set(k,v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} } };
 
