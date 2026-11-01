@@ -70,8 +70,11 @@
                    padding:3px 7px; border-radius:2px; background:#1c1f23; border:1px solid #0f1113; box-shadow:inset 0 1px 2px rgba(0,0,0,.6), 0 1px 0 rgba(255,255,255,.07); }
   @media (max-width: 480px) { #overview .bezel { width:54px; height:54px; padding:5px; } #overview a { width:80px; } .panel { padding:12px 14px 16px; } }
   /* the cards */
-  .grid { column-width:460px; column-gap:12px; }   /* cards stacked in columns, top to bottom then left to right */
-  @media (max-width: 480px) { .grid { grid-template-columns:1fr; } }
+  /* three fixed columns (COLUMNS below): Cherenkov | DAQ over Trackers | Online analysis over PLC over ROS;
+     one column, in that order, on a narrow window */
+  .grid { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); column-gap:12px; align-items:start; }
+  .grid .col { min-width:0; } .grid .col .card { display:block; }
+  @media (max-width: 1100px) { .grid { display:block; } }
   .card { container-type:inline-size; break-inside:avoid; display:inline-block; width:100%; margin:0 0 12px; background:var(--card); border-radius:10px; padding:9px 12px 5px; min-width:0; box-shadow:0 1px 2px rgba(0,0,0,.06), 0 0 0 1px var(--line); }
   .card.dragging { opacity:.4; } .card.drop { outline:2px dashed var(--soft); outline-offset:2px; }
   .card.flash { outline:3px solid var(--idle); outline-offset:2px; }
@@ -90,7 +93,6 @@
   .trend { grid-column:4; grid-row:1; display:grid; grid-template-columns:repeat(3, 4.5ch 8ch); justify-content:start; column-gap:4px; font-size:12px; color:var(--muted); line-height:inherit; padding-top:1px; font-variant-numeric:tabular-nums; }
   @container (max-width: 640px) { .trend { grid-column:2 / -1; grid-row:auto; margin-top:-2px; padding-top:0; } }   /* a narrow card: the changes on their own line */
   .trend i { font-style:normal; } .trend b { font-weight:500; text-align:left; }   /* each value right after its label */
-  body.retro .trend { color:#62b3a8; }
   .dot { width:10px; height:10px; border-radius:50%; margin-top:4px; background:var(--nodata); }
   .dot.ok { background:var(--ok); } .dot.info { background:var(--info); } .dot.idle { background:var(--info); } .dot.notice { background:var(--idle); } .dot.problem { background:var(--problem); } .dot.warn { background:var(--warn); }
   .dot.bad { background:var(--bad); animation:pulse 2s ease-in-out infinite; } .dot.critical { background:var(--crit); animation:pulse 2s ease-in-out infinite; box-shadow:0 0 0 3px color-mix(in srgb, var(--crit) 30%, transparent); }
@@ -113,8 +115,6 @@
   .sizer .sizenum { width:4.2em; cursor:text; font:inherit; letter-spacing:normal; text-align:right; font-variant-numeric:tabular-nums;
                    background:transparent; color:inherit; border:1px solid currentColor; border-radius:3px; padding:0 2px; accent-color:auto; }
   .panel nav .sizer button.on { color:#ff9a3c; }
-  body.retro .sizer { color:#3a2a1a; }
-  body.retro .panel nav .sizer button.on { color:#fff3e0; }
   body.minimal .sizer { color:var(--soft); }
   body.minimal .panel nav .sizer button.on { color:var(--fg); text-decoration:underline; }
   .skins input { position:absolute; opacity:0; width:0; height:0; }
@@ -122,43 +122,62 @@
   .skins input:checked + span { color:#1d2126; background:linear-gradient(180deg, #e9ecef, #a6adb5); box-shadow:0 1px 2px rgba(0,0,0,.6); }
   .skins input:focus-visible + span { outline:2px solid #ff7a1a; outline-offset:1px; }
 
-  /* ------------------------------------------------ the retro-future skin: a 1970s control room, CRT screens */
-  body.retro { --bg:#0a0f1a; --card:#0c1a1f; --fg:#b8fff0; --muted:#5fd1bd; --soft:#3e8f86; --line:#123a3d;
-               --ok:#39ff88; --info:#4f7c7a; --idle:#3fb8ff; --warn:#ffb000; --bad:#ff3d2e;
-               background:radial-gradient(ellipse at 50% -10%, #1b2b4a 0%, #0a0f1a 55%, #05070c 100%) fixed; }
-  body.retro::after { content:""; position:fixed; inset:0; pointer-events:none; z-index:50;   /* scanlines and a vignette over everything */
-                      background:repeating-linear-gradient(0deg, rgba(0,0,0,.18) 0 1px, transparent 1px 3px),
-                                 radial-gradient(ellipse at center, transparent 60%, rgba(0,0,0,.45) 100%); }
-  body.retro .panel { background:linear-gradient(180deg, #e9dcc0 0%, #d8c8a4 55%, #c4b38c 100%); border:2px solid #6b5a3c; border-radius:22px;
-                      box-shadow:inset 0 2px 0 rgba(255,255,255,.6), inset 0 -4px 0 rgba(0,0,0,.18), 0 0 0 6px #2b2116, 0 10px 24px rgba(0,0,0,.6); color:#2b2116; }
-  body.retro .panel::before { content:""; position:absolute; left:22px; right:22px; top:0; height:6px; border-radius:0 0 6px 6px;
-                              background:repeating-linear-gradient(90deg, #ff7a1a 0 40px, #f2c230 40px 80px, #1fb6a8 80px 120px); }
-  body.retro .panel .screw { background:radial-gradient(circle at 35% 35%, #fff4d6, #8a7550 70%); }
-  body.retro .panel h1 { background:#2b2116; color:#ffb000; border-color:#120d08; text-shadow:0 0 8px rgba(255,176,0,.6); border-radius:12px; letter-spacing:.24em; }
-  body.retro .readout { color:#ffb000; text-shadow:0 0 8px rgba(255,176,0,.7); background:#120d08; border-radius:10px; }
-  body.retro .panel nav a, body.retro .panel nav button { background:linear-gradient(180deg, #ff9a3c, #e0620c); color:#2b1404; border:1px solid #7a3405;
-                      border-radius:14px; box-shadow:inset 0 1px 0 rgba(255,255,255,.45), 0 2px 0 #7a3405; }
-  body.retro .panel nav a:hover, body.retro .panel nav button:hover { background:linear-gradient(180deg, #ffad5c, #ee7020); }
-  body.retro .skins { background:#2b2116; } body.retro .skins input:checked + span { background:linear-gradient(180deg, #ff9a3c, #e0620c); color:#2b1404; }
-  body.retro #summary { background:#071512; border-radius:14px; border:2px solid #2b2116; box-shadow:inset 0 0 18px rgba(57,255,136,.12), inset 0 2px 6px rgba(0,0,0,.9); }
-  body.retro #overview .bezel { background:conic-gradient(from 210deg, #fff1cf, #a88a55, #f0dcae, #7a6238, #fff1cf); }
-  body.retro #overview span { background:#2b2116; color:#ffd27a; border-color:#120d08; border-radius:8px; }
-  body.retro .card { border-radius:22px; padding:12px 16px 8px; background:radial-gradient(ellipse at 50% 40%, #10262b 0%, #0a1619 80%);
-                     box-shadow:inset 0 0 40px rgba(0,0,0,.75), inset 0 0 0 2px #1d4a4a, 0 0 0 5px #2b2116, 0 0 0 7px #6b5a3c, 0 8px 18px rgba(0,0,0,.6); }
-  body.retro .card h2 { color:#ffb000; text-shadow:0 0 8px rgba(255,176,0,.55); letter-spacing:.14em; }
-  body.retro .name { color:#b8fff0; text-shadow:0 0 6px rgba(120,255,220,.35); }
-  body.retro .text { color:#5fd1bd; text-shadow:0 0 5px rgba(95,209,189,.3); }
-  body.retro .row { border-top-color:#123a3d; }
-  body.retro .row:hover { background:rgba(57,255,136,.06); }
-  body.retro .dot { box-shadow:0 0 8px currentColor; }
-  body.retro .dot.ok { box-shadow:0 0 8px #39ff88; } body.retro .dot.notice { box-shadow:0 0 8px #3fb8ff; } body.retro .dot.problem { box-shadow:0 0 8px #ff5fae; } body.retro .dot.idle { box-shadow:none; }
-  body.retro .dot.warn { box-shadow:0 0 8px #ffb000; } body.retro .dot.bad { box-shadow:0 0 10px #ff3d2e; }
-  body.retro .dot.info, body.retro .dot.nodata { box-shadow:none; }
-  body.retro .details { background:rgba(0,0,0,.35); color:#7fe8d4; border:1px solid #123a3d; }
-  body.retro .mode { background:#123a3d; color:#ffb000; }
-  body.retro .bar { background:#123a3d; } body.retro .bar b { background:#0c1a1f; }
-  body.retro footer { color:#3e8f86; }
-  body.retro .grid { column-gap:24px; padding:0 7px; } body.retro .card { margin-bottom:22px; } body.retro .panel { margin:0 7px 20px; }
+/* ------------------------------------------------ the console skin: a modern control panel. Machined dark metal,
+   raised keycaps with a lit strip, engraved label plates, recessed screens; one accent colour (--acc), no scanlines.
+   Graphite and amber; the colours are the variables on body.console. */
+  body.console { --bg:var(--r-bg); --card:var(--r-screen); --fg:var(--r-ink); --muted:var(--r-ink2); --soft:var(--r-ink3); --line:var(--r-rule);
+               --ok:#39e07a; --info:#5b6b73; --idle:#3fa9ff; --warn:#ffb000; --bad:#ff3d2e;
+               background:radial-gradient(ellipse at 50% -20%, var(--r-bg-hi) 0%, var(--r-bg) 60%) fixed; }
+  body.console::after { content:""; position:fixed; inset:0; pointer-events:none; z-index:50;   /* a soft vignette only */
+                      background:radial-gradient(ellipse at center, transparent 65%, rgba(0,0,0,.35) 100%); }
+  body.console .panel { background:linear-gradient(180deg, var(--r-metal-hi) 0%, var(--r-metal) 45%, var(--r-metal-lo) 100%);
+                      border:1px solid #000; border-radius:14px; color:var(--r-panel-ink, var(--r-ink));
+                      box-shadow:inset 0 1px 0 rgba(255,255,255,.14), inset 0 -2px 0 rgba(0,0,0,.45), 0 0 0 3px var(--r-frame), 0 0 0 4px rgba(255,255,255,.06), 0 12px 28px rgba(0,0,0,.7); }
+  body.console .panel::before { content:""; position:absolute; left:18px; right:18px; top:0; height:2px; border-radius:0 0 2px 2px;   /* one thin lit edge */
+                              background:linear-gradient(90deg, transparent, var(--acc) 20%, var(--acc) 80%, transparent); opacity:.55; box-shadow:0 0 10px var(--acc); }
+  body.console .panel .screw { background:radial-gradient(circle at 35% 35%, #d9dde2, #4a5058 70%); box-shadow:inset 0 0 0 1px rgba(0,0,0,.6); }
+  body.console .panel h1 { background:#07090b; color:var(--acc); border:1px solid #000; border-radius:6px; letter-spacing:.24em;
+                         text-shadow:0 0 8px color-mix(in srgb, var(--acc) 55%, transparent);
+                         box-shadow:inset 0 2px 4px rgba(0,0,0,.9), 0 1px 0 rgba(255,255,255,.08); }
+  body.console .readout { color:var(--acc); background:#07090b; border-radius:6px; text-shadow:0 0 8px color-mix(in srgb, var(--acc) 60%, transparent);
+                        box-shadow:inset 0 2px 4px rgba(0,0,0,.9), 0 1px 0 rgba(255,255,255,.08); }
+  /* keycaps: raised, with a lit strip under the label; pressed when on */
+  body.console .panel nav a, body.console .panel nav button {
+    background:linear-gradient(180deg, var(--r-key-hi), var(--r-key)); color:var(--r-key-ink); border:1px solid #000; border-radius:5px;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.18), inset 0 -3px 0 color-mix(in srgb, var(--acc) 70%, #000), 0 2px 0 #000, 0 3px 6px rgba(0,0,0,.5); }
+  body.console .panel nav a:hover, body.console .panel nav button:hover { background:linear-gradient(180deg, color-mix(in srgb, var(--r-key-hi) 85%, #fff), var(--r-key-hi)); }
+  body.console .panel nav a:active, body.console .panel nav button:active { transform:translateY(1px); box-shadow:inset 0 1px 3px rgba(0,0,0,.7), inset 0 -2px 0 var(--acc), 0 1px 0 #000; }
+  body.console .skins { background:#07090b; box-shadow:inset 0 2px 4px rgba(0,0,0,.9); }
+  body.console .skins span { color:var(--r-ink3); }
+  body.console .skins input:checked + span { background:linear-gradient(180deg, var(--r-key-hi), var(--r-key)); color:var(--acc);
+                                           box-shadow:inset 0 -2px 0 var(--acc), 0 1px 0 #000; text-shadow:0 0 6px color-mix(in srgb, var(--acc) 60%, transparent); }
+  body.console .sizer { color:var(--r-panel-ink2, var(--r-ink2)); } body.console .sizer input { accent-color:var(--acc); }
+  body.console .panel nav .sizer button.on { color:var(--acc); }
+  body.console #summary { background:#050708; border-radius:8px; border:1px solid #000;
+                        box-shadow:inset 0 0 16px color-mix(in srgb, var(--acc) 10%, transparent), inset 0 2px 6px rgba(0,0,0,.95), 0 1px 0 rgba(255,255,255,.07); }
+  /* pilot lamps: machined rings, engraved plates */
+  body.console #overview .bezel { background:conic-gradient(from 210deg, #c9ced4, #3d434a, #9aa1a9, #2a2f35, #c9ced4); box-shadow:0 0 0 2px #000, 0 3px 6px rgba(0,0,0,.6); }
+  body.console #overview span { background:#0b0d10; color:var(--r-ink); border:1px solid #000; border-radius:3px; letter-spacing:.12em;
+                              box-shadow:inset 0 1px 2px rgba(0,0,0,.9), 0 1px 0 rgba(255,255,255,.08); }
+  /* screens: recessed in the metal */
+  body.console .card { border-radius:12px; padding:12px 16px 8px; background:linear-gradient(180deg, var(--r-screen-hi), var(--r-screen));
+                     box-shadow:inset 0 0 30px rgba(0,0,0,.6), inset 0 0 0 1px rgba(255,255,255,.04), 0 0 0 4px var(--r-frame), 0 0 0 5px rgba(255,255,255,.05), 0 8px 18px rgba(0,0,0,.55); }
+  body.console .card h2 { color:var(--acc); letter-spacing:.16em; text-shadow:0 0 8px color-mix(in srgb, var(--acc) 45%, transparent); }
+  body.console .name { color:var(--r-ink); }
+  body.console .text { color:var(--r-ink2); }
+  body.console .trend { color:var(--r-ink3); }
+  body.console .row { border-top-color:var(--r-rule); }
+  body.console .row:hover { background:color-mix(in srgb, var(--acc) 6%, transparent); }
+  body.console .dot { box-shadow:0 0 7px currentColor; }
+  body.console .dot.ok { box-shadow:0 0 7px #39e07a; } body.console .dot.notice { box-shadow:0 0 7px #3fa9ff; } body.console .dot.problem { box-shadow:0 0 7px #ff5fae; } body.console .dot.idle { box-shadow:none; }
+  body.console .dot.warn { box-shadow:0 0 8px #ffb000; } body.console .dot.bad { box-shadow:0 0 10px #ff3d2e; }
+  body.console .dot.info, body.console .dot.nodata { box-shadow:none; }
+  body.console .details { background:rgba(0,0,0,.4); color:var(--r-ink2); border:1px solid var(--r-rule); }
+  body.console .mode { background:#07090b; color:var(--acc); }
+  body.console .bar { background:var(--r-rule); } body.console .bar b { background:var(--r-screen); }
+  body.console footer { color:var(--r-ink3); }
+  body.console .grid { column-gap:22px; padding:0 6px; } body.console .card { margin-bottom:20px; } body.console .panel { margin:0 6px 20px; }
+  body.console { --acc:#ffb000; --r-bg:#0b0d10; --r-bg-hi:#1c2229; --r-metal-hi:#3a4048; --r-metal:#2a2f35; --r-metal-lo:#1d2126; --r-frame:#0e1013; --r-key-hi:#3b4148; --r-key:#262b31; --r-key-ink:#e8ecf0; --r-screen-hi:#10161a; --r-screen:#0a0e11; --r-ink:#e9eef2; --r-ink2:#aeb9c2; --r-ink3:#6f7b85; --r-rule:#1c252b; }
   /* ------------------------------------------------ the minimal skin: just the facts */
   body.minimal { --bg:#fff; --card:#fff; --fg:#111; --muted:#555; --soft:#999; --line:#eee; background:#fff; }
   @media (prefers-color-scheme: dark) { body.minimal { --bg:#000; --card:#000; --fg:#eee; --muted:#aaa; --soft:#666; --line:#1a1a1a; background:#000; } }
@@ -196,7 +215,7 @@
 <body>
 <section class="panel"><i class="screw tl"></i><i class="screw tr"></i><i class="screw bl"></i><i class="screw br"></i>
   <header><h1>Experiment status</h1><span class="readout" id="updated">--:--:--</span>
-    <nav><span class="skins" title="Skin (kept in this browser)"><label><input type="radio" name="skin" value="panel"><span>Panel</span></label><label><input type="radio" name="skin" value="retro"><span>Retro</span></label><label><input type="radio" name="skin" value="minimal"><span>Minimal</span></label></span>
+    <nav><span class="skins" title="Skin (kept in this browser)"><label><input type="radio" name="skin" value="panel"><span>Panel</span></label><label><input type="radio" name="skin" value="console"><span>Console</span></label><label><input type="radio" name="skin" value="minimal"><span>Minimal</span></label></span>
       <span class="sizer" title="Size (kept in this browser). Fit: as large as still fits the window."><span>Size</span><input type="range" id="size" min="0.7" max="2.2" step="0.05"><input type="number" class="sizenum" id="sizeval" min="70" max="220" step="1" title="type a size in %, then Enter">%<button id="sizefit">Fit</button></span>
       <a href="/limits" target="_blank">Limits</a><button id="reset" title="Put the lines in each card back in their original order">Reset lines</button></nav></header>
   <div id="summary"><span class="t">connecting…</span></div>
@@ -206,7 +225,9 @@
 <footer><i style="background:var(--ok);margin-left:0"></i>as it should be<i style="background:var(--info)"></i>a plain fact, not running, or no data<i style="background:var(--idle)"></i>to read<i style="background:var(--problem)"></i>data problem (not safety)<i style="background:var(--warn)"></i>safety warning<i style="background:var(--bad)"></i>safety alarm (flashing; a ring: act now)<br>
 Click a line for the rest of it; drag a line within its card to move it. Read-only.</footer>
 <script>
-const ORDER = ['Cherenkov', 'DAQ', 'Online analysis', 'Trackers', 'PLC', 'ROS'];   // the lamps and the cards, always in this order
+const ORDER = ['Cherenkov', 'DAQ', 'Trackers', 'Online analysis', 'PLC', 'ROS'];   // the lamps and the cards, always in this order
+const COLUMNS = [['Cherenkov'], ['DAQ', 'Trackers'], ['Online analysis', 'PLC', 'ROS']];   // the cards: left to right, each top to bottom
+const colOf = g => { const i = COLUMNS.findIndex(c => c.includes(g)); return i < 0 ? COLUMNS.length - 1 : i; };   // any other card: right
 const RANK = {info:0, idle:0, ok:1, nodata:2, notice:3, problem:4, warn:5, bad:6, critical:7};   // yellow, red: safety only; pink: a data problem; blue: to read
 const KEY = 'status-card-order', ROWKEY = 'status-row-order';   // ROWKEY: group -> line names in the order dragged to
 const esc = t => String(t ?? '').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -214,6 +235,7 @@ const store = { get(k,d){ try { const v=localStorage.getItem(k); return v===null
                 set(k,v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} } };
 const open = new Set();   // the lines whose details are shown, by group/name
 const grid = document.getElementById('grid'), cards = {};   // group -> its card element
+const cols = COLUMNS.map(() => { const d = document.createElement('div'); d.className = 'col'; grid.appendChild(d); return d; });
 let last = null, lastOK = null, dragging = null, dragRow = null;   // the card, or the line, being dragged
 function ago(s){ if(s==null) return ''; if(s<90) return s.toFixed(0)+' s'; if(s<5400) return (s/60).toFixed(0)+' min'; return (s/3600).toFixed(1)+' h'; }
 function detailText(d){ return Object.entries(d||{}).map(([k,v]) => k + ': ' + (typeof v==='object' && v!==null ? JSON.stringify(v, null, 1) : v)).join('\n'); }
@@ -272,7 +294,8 @@ function render(S){
     const saved = (store.get(ROWKEY, {})[g] || []);   // the lines in the order dragged to, new ones after
     const pos = it => { const i = saved.indexOf(it.name); return i < 0 ? 1e6 + its.indexOf(it) : i; };
     card.querySelector('.rows').innerHTML = its.slice().sort((a, b)=>pos(a) - pos(b)).map(it=>rowHTML(g, it)).join('');
-    if(grid.children[i] !== card) grid.insertBefore(card, grid.children[i] || null);
+    const col = cols[colOf(g)], k = names.filter(x => colOf(x) === colOf(g)).indexOf(g);   // names is in ORDER
+    if(col.children[k] !== card) col.insertBefore(card, col.children[k] || null);
   });
 }
 grid.addEventListener('click', ev=>{
@@ -305,14 +328,15 @@ grid.addEventListener('dragend', e=>{
   dragRow.classList.remove('dragging'); dragRow = null; if(last) render(last);
 });
 // the skin switch, kept in this browser
-const SKINS = ['panel', 'retro', 'minimal'];
+const SKINS = ['panel', 'console', 'minimal'];
 function setSkin(s){
+  if(s === 'retro') s = 'console';   // its old name (1 Nov 2026): bookmarks and saved choices keep working
   s = SKINS.includes(s) ? s : 'panel';
-  document.body.classList.toggle('retro', s === 'retro'); document.body.classList.toggle('minimal', s === 'minimal');
+  document.body.classList.toggle('console', s === 'console'); document.body.classList.toggle('minimal', s === 'minimal');
   document.querySelectorAll('.skins input').forEach(x=>{ x.checked = x.value === s; });
   store.set('status-skin', s);
 }
-{ const q = new URLSearchParams(location.search).get('skin');   // ?skin=panel / retro / minimal sets it (a bookmark)
+{ const q = new URLSearchParams(location.search).get('skin');   // ?skin=panel / console / minimal sets it (a bookmark)
   setSkin(q || store.get('status-skin', 'panel') || 'panel'); }
 document.querySelectorAll('.skins input').forEach(x=>{ x.onchange = ()=>setSkin(x.value); });
 document.getElementById('reset').onclick = ()=>{ store.set(ROWKEY, {}); if(last) render(last); };

@@ -12,8 +12,10 @@ the online dashboard or pion-ros.
 | pink | a data problem that is not a safety matter: run problems, board clocks, a board not writing, the analysis, disk, the LED, ROS |
 | yellow, red (flashing; a ring = act now) | **safety only**: the gas sensors, the Cherenkov pressure and the temperatures by their rules; a safety sensor reading outside its range (yellow); the PLC status, which carries those readings, missing or stale (red) |
 
-A big lamp per card on top (fixed order: Cherenkov, DAQ, Online analysis, Trackers, PLC, ROS), the
-cards below in the same order. Skins: Panel, Retro, Minimal.
+A big lamp per card on top (fixed order: Cherenkov, DAQ, Trackers, Online analysis, PLC, ROS), the
+cards below in three columns: Cherenkov | DAQ over Trackers | Online analysis over PLC over ROS (one
+column on a narrow window). Skins: Panel, Console (graphite and amber), Minimal; `?skin=console` in
+the link sets it.
 
     python3 status/status_server.py          # on odin; standard library only
 
