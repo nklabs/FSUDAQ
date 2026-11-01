@@ -7,7 +7,8 @@ https://discord.gg/xVsRhNZF8G
 Prepared for data taking with six DPP-PSD boards on optical links (Oct 2026). Differences from
 upstream that matter at the console:
 
-- **Settings.** "w/ settings" (the default) loads `Digi-<serial>_<DPP>.bin` from the settings path,
+- **Settings.** Kept in named settings sets (see [Settings sets](#settings-sets)). "w/ settings set"
+  (the default) loads `Digi-<serial>_<DPP>.bin` from the active set,
   writes every register that shapes the acquisition and reads every one back. A board whose file is
   missing or refused, or a register that does not read back as the file has it, blocks Start (the
   dialog names it). Removed because they did not do what they said: "default Program", Program
@@ -88,7 +89,9 @@ When programSettings.txt is presented in the same folder as the FSUDAQ_Qt, the p
 - (line 7) the elog logbook name
 - (line 8) elog user name
 - (line 9) elog user password
-- then `key=value` lines, in any order: `settingsPath` (folder of the `Digi-*.bin` files),
+- then `key=value` lines, in any order: `settingsPath` (the active settings set: a folder of
+  `Digi-*.bin` files; empty = the data path, as in older versions), `runLengthMin`, `repeatRun`
+  (written for the record only: FSUDAQ always starts with Repeat off),
   `autoIncrementRunID`, `maxFileSizeMB` (roll-over size, up to 4000), `repeatPauseSec`,
   `autoDashboard`, `boardOrder`, and the LED trigger's `ledTrigger`, `ledDelaySec`, `ledHoldSec`,
   `ledRelayURL`, `ledOnCommand`, `ledOffCommand` (see below). FSUDAQ writes the file back when
@@ -116,8 +119,16 @@ User must setup the data path for data take. Without the data path, user still c
 - lastRun.sh <- some data for bash script
 - `<prefix>_<run>/` <- one folder per run, with
   - `<prefix>_<run>_<serial>_<DPP>_<tick>_<index>.fsu` <- data files, a new index at the roll-over size
-  - `<prefix>_<run>_<serial>_<DPP>.bin` <- each board's settings, read back from the board at the start
+  - `<prefix>_<run>_<serial>_<DPP>.bin` <- each board's settings as the run used them, read back from the
+    board just before it starts (after the ADC calibration and what FSUDAQ derives at each start)
+  - `<prefix>_<run>_run_protocol.json` <- the run protocol this run was taken with (see Settings sets)
+  - `<prefix>_<run>_programSettings.txt` <- programSettings.txt as it was, the influx token and the elog
+    password masked
   - `<prefix>_<run>_run.json` <- the run file: everything about the run that is not data (below)
+
+All of these are written for every saved run, whatever is answered at Start; a file that cannot be
+written stops the start. The snapshots and copies are never written again (Save refuses a run snapshot;
+loading one leaves the board's settings file in the set); only the run file is rewritten, as below.
 
 The `.bin` snapshots are the boards' register memory as FSUDAQ loads it; the run file is the same
 read-back in words, with the rest of the run's settings, so a run can be understood later without
@@ -128,12 +139,48 @@ FSUDAQ. It is written when the run starts, again at each LED answer and at the s
 | `run`, `prefix`, `folder` | which run |
 | `start`, `stop` | times (ISO 8601 with the UTC offset), comments, run time in ms, problems found at the stop, bytes saved per board; `stop` is `null` while the run is going (or if FSUDAQ died in it) |
 | `led` | the LED trigger's settings, and each command sent: when (`sent`, and `run_ms` since the boards started), the PLC's `reply`, whether it was `ok`, and whether it could have `switched` the LED (`yes`; `no`: refused or never reached the PLC; `unknown`: e.g. no answer in time) |
-| `run_control` | run length, repeat and pause, file size, settings path, board order, elog |
+| `run_control` | run length, repeat and pause, file size, board order, elog; `settings_set` (name, path), `opened_with` ("settings set …", "settings from run …", "no settings"), `run_protocol` (= the run's protocol copy) |
 | `fsudaq` | the branch and commit of the source tree FSUDAQ ran from, and when its binary was built |
-| `boards` | per board in rack order: serial, model, DPP, channels, its `.bin` snapshot, and every register as `"<address> [chNN] <name>": "0x<hex> <decimal>"` |
+| `boards` | per board in rack order: serial, model, DPP, channels, its `.bin` snapshot, `settings_file` (its file in the set), `programmed_from` (the file last loaded into it), and every register as `"<address> [chNN] <name>": "0x<hex> <decimal>"` |
 
 About 25 kB per 16-channel board. Read it with `less`, or e.g.
 `python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["led"])' <file>`.
+
+## Settings sets
+
+A settings set is a folder of `Digi-<serial>_<DPP>.bin` files (one per board) and a `run_protocol.json`,
+for one purpose: e.g. `…/PSI_2026_DAQtest_settings/{cosmics,noise_run,test_pulse}`. The active set is
+`settingsPath`; the folders beside it that hold `Digi-*.bin` files are the other sets ("Settings set"
+on the main window; Set Path picks a set folder anywhere).
+
+Opening the digitizers:
+
+- **w/ settings set: <name>** (default): each board is programmed from its file in the set and every
+  register is read back; the set's run protocol is loaded. A board without a file, or one that does
+  not read back, blocks Start.
+- **w/ settings from a run…**: choose a run (newest first); each board is programmed from that run's
+  snapshot, and the run's protocol goes into the window. A board without a snapshot is programmed
+  from the set instead, with a warning. The run folder is never written.
+- **w/o settings**: the boards keep what they hold; not compared with the set at Start.
+
+Whatever was loaded, a board's settings file stays its file in the active set: Save (Digitizer
+Settings) and Live Setting Update write there; Save to another path writes a copy. **Save as new
+set…** writes every open board (read back) and the run protocol into a new folder beside the set and
+makes it the active set; the old set is not touched. **Save protocol to set** writes only
+`run_protocol.json`.
+
+Run protocol (`run_protocol.json`): run length, repeat, pause, file size, run numbering, board order,
+LED trigger. Run length, pause, numbering and the LED on/delay/hold are per run: loaded as defaults,
+never asked about at Start, recorded in each run's copy. File size, board order and the LED relay and
+commands belong to the set. **Repeat is never restored** (from a set, a run or programSettings.txt): a
+Start never begins a series unasked. Changes in the window reach the set only when saved.
+
+At Start (Save Data on), the boards and the set fields of the protocol are compared with the set
+(read-only registers, the trace bit and what FSUDAQ derives at each start are left out). If they
+differ, the log lists every register (file → board) and FSUDAQ asks: **Start anyway (this run only)**
+(the default: Enter starts), **Save to set and start** (written only once nothing can cancel the
+start, put back if the start then fails), or Cancel. The same differences are not asked about again
+until the boards are reopened or the set is saved; runs of a repeated series never ask, they log.
 
 ## LED trigger
 

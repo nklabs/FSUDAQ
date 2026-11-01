@@ -19,8 +19,14 @@ class DigiSettingsPanel : public QMainWindow{
   Q_OBJECT
 
 public:
-  DigiSettingsPanel(Digitizer ** digi, unsigned int nDigi, QString rawDataPath, QMainWindow * parent = nullptr);
+  DigiSettingsPanel(Digitizer ** digi, unsigned int nDigi, QString settingsDir, QMainWindow * parent = nullptr);
   ~DigiSettingsPanel();
+
+  /// where Save and Load start: the board's settings file if it has one (the file it is loaded from, or
+  /// its target after a load from a run snapshot), else <settingsDir>/<defaultName>
+  static QString DefaultSettingsFile(const QString & boardFile, const QString & settingsDir, const QString & defaultName);
+  void SetSettingsDir(const QString & dir) { settingsDir = dir; }   // the active settings set changed (Save as new set)
+  QString BoardSetFile() const;   // the shown board's file in the active set
 
   unsigned short GetTabID() const {return ID;}
   
@@ -33,6 +39,8 @@ public slots:
 
   void SaveSetting(int opt);
   void LoadSetting();
+  bool SaveSettingFile(QString filePath, int opt); // Save after its dialog: the active set's file, else a copy (the board keeps its file)
+  bool LoadSettingFile(const QString & fileName);  // Load after its dialog: programs the board; its settings file stays in the active set
 
   void EnableButtons(bool enable);
 
@@ -93,7 +101,7 @@ private:
   QCheckBox * chkCh[MaxRegChannel]; // Copy to Ch
   QPushButton * bnCopyChannel;
 
-  QString rawDataPath;
+  QString settingsDir;   // the active settings set's folder
   bool enableSignalSlot;
 
   QTabWidget * tabWidget;

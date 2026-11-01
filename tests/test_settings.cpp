@@ -12,6 +12,7 @@
 
 #include <dirent.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <algorithm>
 #include <set>
 
@@ -308,6 +309,256 @@ static void CheckADCCalibration(const std::string & dir) {
   fake_caen_set_spi_busy_ms(2);
 }
 
+static std::vector<uint32_t> ReadImage(const std::string & path){
+  std::vector<uint32_t> w(SETTINGSIZE, 0);
+  FILE * f = fopen(path.c_str(), "rb");
+  if( !f || fread(w.data(), 4, SETTINGSIZE, f) != SETTINGSIZE ){ printf("cannot read %s\n", path.c_str()); nFail++; }
+  if( f ) fclose(f);
+  return w;
+}
+static bool CopyFile(const std::string & from, const std::string & to){
+  std::vector<uint32_t> w = ReadImage(from);
+  FILE * f = fopen(to.c_str(), "wb");
+  if( !f ) return false;
+  bool ok = fwrite(w.data(), 4, SETTINGSIZE, f) == SETTINGSIZE;
+  return (fclose(f) == 0) && ok;
+}
+
+// every read-only (status, identity) register of the DPP type's lists
+static std::vector<std::pair<Reg, int>> ReadOnlyRegisters(int dpp, int nCh){
+  std::vector<std::pair<Reg, int>> list;
+  const std::vector<Reg> & board = dpp == V1740_DPP_QDC_CODE ? RegisterBoardList_QDC : RegisterBoardList_PHAPSD;
+  const std::vector<Reg> & chans = dpp == V1740_DPP_QDC_CODE ? RegisterChannelList_QDC : dpp == V1730_DPP_PSD_CODE ? RegisterChannelList_PSD : RegisterChannelList_PHA;
+  for( const Reg & r : board ) if( r.GetRWType() == RW::ReadONLY ) list.push_back({r, 0});
+  for( int ch = 0; ch < nCh; ch++ ) for( const Reg & r : chans ) if( r.GetRWType() == RW::ReadONLY ) list.push_back({r, ch});
+  return list;
+}
+
+// a board's identity set by hand, to run the settings comparison of every DPP type without a board
+class OfflineDigitizer : public Digitizer {
+public:
+  OfflineDigitizer(int dpp, int nCh, int nRegCh){ DPPType = dpp; NumInputCh = nCh; NumRegChannel = nRegCh; ModelType = ModelTypeCode::VME; }
+  std::vector<std::pair<Reg, int>> Programmed(){ return ProgrammedRegisters(); }
+};
+
+// The check at Start: the board's settings against its settings file, the read-only registers left out (they are
+// the board's to report: temperatures, status, firmware), for every DPP type
+static void CheckSettingsDifferences(const std::string & dir) {
+  printf("== board settings against the settings file, read-only registers left out\n");
+  struct { int dpp; int nCh, nRegCh; const char * name; } types[] = {{V1730_DPP_PHA_CODE, 16, 16, "DPP-PHA"}, {V1730_DPP_PSD_CODE, 16, 16, "DPP-PSD"}, {V1740_DPP_QDC_CODE, 64, 8, "DPP-QDC"}};
+  for( auto & t : types ){
+    OfflineDigitizer d(t.dpp, t.nCh, t.nRegCh);
+    std::vector<unsigned int> ref(SETTINGSIZE, 0);
+    std::set<unsigned short> programmedIdx;
+    auto programmed = d.Programmed();
+    for( auto & [r, ch] : programmed ){ Reg x = r; programmedIdx.insert(x.Index(ch < 0 ? 0 : ch)); }
+    int nRO = 0, roShown = 0;
+    for( auto & [r, ch] : ReadOnlyRegisters(t.dpp, t.nRegCh) ){
+      Reg x = r;
+      if( programmedIdx.count(x.Index(ch)) ) continue;   // the same word as a setting: compared as that setting
+      d.SetSettingToMemory(r, 0x5A5A5A5A, ch);
+      auto diff = d.SettingsDifferences(ref);
+      if( !diff.empty() ){ roShown++; CHECK(false, "%s: read-only %s ch%d listed: %s", t.name, r.GetNameChar(), ch, diff[0].c_str()); }
+      d.SetSettingToMemory(r, 0, ch);
+      nRO++;
+    }
+    int nRW = 0, rwMissed = 0;
+    for( auto & [r, ch] : programmed ){
+      if( r.GetRWType() != RW::ReadWrite || r == DPP::LVDSIOData ) continue;
+      if( t.dpp == V1740_DPP_QDC_CODE && r == DPP::QDC::OverThresholdWidth ) continue;   // this offline board's firmware lacks it
+      d.SetSettingToMemory(r, 0x00A50000, ch < 0 ? 0 : ch);
+      auto diff = d.SettingsDifferences(ref);
+      bool named = diff.size() == 1 && diff[0].find(r.GetName()) != std::string::npos;
+      if( !named ){ rwMissed++; CHECK(false, "%s: read/write %s ch%d: %zu line(s)%s%s", t.name, r.GetNameChar(), ch, diff.size(), diff.empty() ? "" : ": ", diff.empty() ? "" : diff[0].c_str()); }
+      d.SetSettingToMemory(r, 0, ch < 0 ? 0 : ch);
+      nRW++;
+    }
+    if( roShown == 0 && rwMissed == 0 ) printf("   ok    %s: %d read-only registers never listed, each of %d read/write settings listed by name\n", t.name, nRO, nRW);
+  }
+
+  //---- a real (fake) board: a temperature and a status changing are no edit; a threshold is, named with both values
+  const int serial = 30595, port = 4, node = 1;
+  fake_caen_add_board(1, port, node, serial, "DT5730", (dir + "/Digi-30508_PSD.bin").c_str());
+  Digitizer digi(node, port);
+  CHECK(digi.IsConnected(), "Digi-%d did not open", serial);
+  if( !digi.IsConnected() ) return;
+  std::vector<std::string> problems;
+  CHECK(digi.LoadAndProgramSettings(dir + "/Digi-30508_PSD.bin", problems) == 0, "loading reported problems");
+  std::vector<unsigned int> image;
+  CHECK(Digitizer::ReadSettingsImage(dir + "/Digi-30508_PSD.bin", image) == 0, "ReadSettingsImage failed");
+  fake_caen_set_reg(serial, 0x10A8, 0x3C);   // ch0 ADC temperature
+  fake_caen_set_reg(serial, 0x812C, 1234);   // events stored
+  digi.ReadAllSettingsFromBoard(true);
+  auto diff = digi.SettingsDifferences(image);
+  CHECK(diff.empty(), "temperature/status changes listed: %s", diff.empty() ? "" : diff[0].c_str());
+  Reg thr = DPP::PSD::TriggerThreshold;
+  uint32_t fileThr = image[thr.Index(3)];
+  digi.WriteRegister(DPP::PSD::TriggerThreshold, fileThr + 7, 3);
+  digi.ReadAllSettingsFromBoard(true);
+  diff = digi.SettingsDifferences(image);
+  char want[120]; snprintf(want, sizeof want, "TriggerThreshold ch3: file 0x%08X, board 0x%08X", fileThr, fileThr + 7);
+  CHECK(diff.size() == 1 && diff[0].find(want) != std::string::npos, "threshold edit: %zu line(s): %s", diff.size(), diff.empty() ? "" : diff[0].c_str());
+  if( diff.size() == 1 ) printf("   ok    a board: temperature and status ignored, the edit named: %s\n", diff[0].c_str());
+  std::string why;
+  std::vector<unsigned int> none;
+  CHECK(Digitizer::ReadSettingsImage(dir + "/none.bin", none, &why) == -1 && !why.empty(), "a missing file read as an image");
+}
+
+// Live Setting Update writes settings, never status registers; a load (from a run snapshot) never writes the file
+// it loads; a snapshot is recognised and a board's settings file can be pointed elsewhere without writing it
+static void CheckSettingsFileWrites(const std::string & dir) {
+  printf("== what reaches the settings file\n");
+  std::string tmp = "/tmp/fsudaq_test_files_" + std::to_string(getpid());
+  mkdir(tmp.c_str(), 0755);
+  mkdir((tmp + "/run_007").c_str(), 0755);
+  const std::string file = tmp + "/Digi-30594_PSD.bin";
+  const std::string snapshot = tmp + "/run_007/run_007_30594_PSD.bin";
+  CopyFile(dir + "/Digi-30508_PSD.bin", file);
+  CopyFile(dir + "/Digi-30508_PSD.bin", snapshot);
+
+  const int serial = 30594, port = 4, node = 2;
+  fake_caen_add_board(1, port, node, serial, "DT5730", (dir + "/Digi-30508_PSD.bin").c_str());
+  Digitizer digi(node, port);
+  CHECK(digi.IsConnected(), "Digi-%d did not open", serial);
+  if( !digi.IsConnected() ) return;
+
+  //---- a load with Live Setting Update on: the file loaded is not written (the board's temperatures differ from it)
+  fake_caen_set_reg(serial, 0x10A8, 0x41);
+  digi.SetSettingFileUpdate(true);
+  std::vector<std::string> problems;
+  std::vector<uint32_t> before = ReadImage(snapshot);
+  CHECK(digi.LoadAndProgramSettings(snapshot, problems) == 0, "loading the snapshot reported problems");
+  CHECK(ReadImage(snapshot) == before, "the snapshot was written while it was loaded (Live Setting Update on)");
+  CHECK(digi.GetLoadedFromFile() == snapshot, "loaded-from not recorded");
+
+  //---- pointed at the settings folder: Live Setting Update goes off, nothing is written
+  std::vector<uint32_t> fileBefore = ReadImage(file);
+  digi.SetSettingFileTarget(file);
+  CHECK(digi.GetSettingFileName() == file && digi.IsSettingFileExist(), "target not set");
+  CHECK(!digi.IsSettingFileUpdate() && !digi.SettingFileProblem().empty(), "Live Setting Update still on after the target moved");
+  CHECK(ReadImage(file) == fileBefore && ReadImage(snapshot) == before, "a file was written when the target moved");
+  CHECK(digi.GetLoadedFromFile() == snapshot, "loaded-from changed by the target");
+  if( nFail == 0 ) printf("   ok    loaded from a snapshot with Live Setting Update on: snapshot untouched; target moved, update off\n");
+
+  //---- Live Setting Update on: a setting reaches the file, a status read does not
+  digi.SetSettingFileUpdate(true);
+  Reg thr = DPP::PSD::TriggerThreshold, temp = DPP::ChannelADCTemperature_R, stored = DPP::EventStored_R;
+  digi.WriteRegister(DPP::PSD::TriggerThreshold, 0x123, 1);
+  fake_caen_set_reg(serial, 0x11A8, 0x42);   // ch1 temperature
+  fake_caen_set_reg(serial, 0x812C, 99);
+  uint32_t t = digi.ReadRegister(DPP::ChannelADCTemperature_R, 1);
+  digi.ReadAllSettingsFromBoard(true);
+  std::vector<uint32_t> now = ReadImage(file);
+  CHECK(t == 0x42 && digi.GetSettingFromMemory(DPP::ChannelADCTemperature_R, 1) == 0x42, "the temperature read did not reach memory");
+  CHECK(now[thr.Index(1)] == 0x123, "Live Setting Update did not write the threshold (0x%X)", now[thr.Index(1)]);
+  bool roKept = true;
+  for( auto & [r, ch] : ReadOnlyRegisters(V1730_DPP_PSD_CODE, digi.GetNumInputCh()) ){
+    Reg x = r;
+    if( now[x.Index(ch)] != fileBefore[x.Index(ch)] ){ roKept = false; CHECK(false, "read-only %s ch%d written to the file: 0x%X -> 0x%X", r.GetNameChar(), ch, fileBefore[x.Index(ch)], now[x.Index(ch)]); }
+  }
+  CHECK(now[temp.Index(1)] == fileBefore[temp.Index(1)] && now[stored.Index(0)] == fileBefore[stored.Index(0)], "temperature or events stored in the file");
+  CHECK(ReadImage(snapshot) == before, "the snapshot was written");
+  if( roKept ) printf("   ok    Live Setting Update: the threshold written, no read-only register (temperatures, status, firmware)\n");
+
+  //---- run snapshots recognised by name and folder
+  struct { const char * path; bool is; } names[] = {
+    {"/d/run_007/run_007_30594_PSD.bin", true}, {"/d/test_054/test_054_1443_PHA.bin", true}, {"/d/a_b_12/a_b_12_15880_PSD.bin", true},
+    {"/d/settings/Digi-30594_PSD.bin", false}, {"/d/run_007/Digi-30594_PSD.bin", false}, {"/d/run_007/run_008_30594_PSD.bin", false},
+    {"/d/run/run_30594_PSD.bin", false}, {"/d/run_007/run_007_30594_PSD.fsu", false}, {"/d/run_007/run_007_x_PSD.bin", false}, {"run_007_1_PSD.bin", false}};
+  bool namesOk = true;
+  for( auto & n : names ) if( Digitizer::IsRunSnapshotPath(n.path) != n.is ){ namesOk = false; CHECK(false, "IsRunSnapshotPath(%s) = %d", n.path, !n.is); }
+  if( namesOk ) printf("   ok    run snapshots recognised: <run>/<run>_<serial>_<DPP>.bin only\n");
+
+  //---- a settings file behind a symlink, with its own mode: replaced through the link, which stays; the mode kept
+  const std::string real = tmp + "/real.bin", link = tmp + "/link.bin";
+  CopyFile(file, real);
+  chmod(real.c_str(), 0640);
+  CHECK(symlink(real.c_str(), link.c_str()) == 0, "cannot make the symlink");
+  bool saved = digi.SaveAllSettingsAsBin(link);
+  struct stat ls, rs;
+  lstat(link.c_str(), &ls); stat(real.c_str(), &rs);
+  CHECK(saved && S_ISLNK(ls.st_mode) && (rs.st_mode & 07777) == 0640 && ReadImage(real) == std::vector<uint32_t>(digi.GetSettings(), digi.GetSettings() + SETTINGSIZE),
+        "save through a symlink: link kept %d, mode %o", S_ISLNK(ls.st_mode), rs.st_mode & 07777);
+  if( saved && S_ISLNK(ls.st_mode) && (rs.st_mode & 07777) == 0640 ) printf("   ok    a settings file behind a symlink: written through it, the link and the mode kept\n");
+  remove(link.c_str()); remove(real.c_str());
+
+  remove(file.c_str()); remove(snapshot.c_str()); rmdir((tmp + "/run_007").c_str()); rmdir(tmp.c_str());
+}
+
+// At Start the comparison leaves out what is not the file's to set: the trace bit (every open switches it off)
+// and what FSUDAQ derives at each start (DPP-PHA trapezoid rescaling and fine gain, DPP-QDC aggregate
+// organization); write-only registers are compared as last written, a register the firmware lacks not at all
+static void CheckDerivedAtStart(const std::string & dir) {
+  printf("== at Start: traces and derived registers are not differences, write-only ones are compared as written\n");
+  int nFail0 = nFail;
+  std::vector<unsigned int> ref(SETTINGSIZE, 0);
+  auto Lines = [&](OfflineDigitizer & d, bool atStart){ return d.SettingsDifferences(ref, atStart).size(); };
+  {
+    OfflineDigitizer d(V1730_DPP_PHA_CODE, 16, 16);
+    d.SetSettingToMemory(DPP::PHA::FineGain, 0x1234, 0);
+    CHECK(Lines(d, true) == 0 && Lines(d, false) == 1, "PHA fine gain: %zu at Start, %zu at a load", Lines(d, true), Lines(d, false));
+    d.SetSettingToMemory(DPP::PHA::FineGain, 0, 0);
+    d.SetSettingToMemory(DPP::DPPAlgorithmControl, 0x3F, 3);
+    CHECK(Lines(d, true) == 0 && Lines(d, false) == 1, "PHA trapezoid rescaling bits listed at Start");
+    d.SetSettingToMemory(DPP::DPPAlgorithmControl, 0x13F, 3);
+    CHECK(Lines(d, true) == 1, "PHA: another bit of DPP Algorithm Control not listed");
+    d.SetSettingToMemory(DPP::DPPAlgorithmControl, 0, 3);
+    d.SetSettingToMemory(DPP::BoardConfiguration, 1u << 16, 0);   // traces on, on the board
+    CHECK(Lines(d, true) == 0 && Lines(d, false) == 1, "traces on listed at Start");
+  }
+  {
+    OfflineDigitizer d(V1740_DPP_QDC_CODE, 64, 8);
+    d.SetSettingToMemory(DPP::AggregateOrganization, 5, 0);
+    CHECK(Lines(d, true) == 0 && Lines(d, false) == 1, "QDC aggregate organization listed at Start");
+    d.SetSettingToMemory(DPP::AggregateOrganization, 0, 0);
+    d.SetSettingToMemory(DPP::QDC::RecordLength_W, 0x40, 0);
+    auto diff = d.SettingsDifferences(ref, true);
+    CHECK(diff.size() == 1 && diff[0].find("write-only") != std::string::npos, "QDC record length (write-only) not compared as written");
+    d.SetSettingToMemory(DPP::QDC::RecordLength_W, 0, 0);
+    d.SetSettingToMemory(DPP::QDC::OverThresholdWidth, 7, 2);
+    CHECK(Lines(d, true) == 0, "QDC over-threshold width compared on firmware without it");
+  }
+
+  //---- a DPP-PHA board started twice: the derived registers change on the board, never a difference; the run's
+  //     snapshot (memory after the derivation) is what the board runs with
+  std::vector<uint32_t> image = ReadImage(dir + "/Digi-30508_PSD.bin");
+  Reg amc = DPP::AMCFirmwareRevision_R, rise = DPP::PHA::TrapezoidRiseTime, decay = DPP::PHA::DecayTime, fg = DPP::PHA::FineGain;
+  for( int ch = 0; ch < 8; ch++ ){
+    image[amc.Index(ch)] = (image[amc.Index(ch)] & ~0xFF00u) | (0x8Bu << 8);
+    image[rise.Index(ch)] = 100;
+    image[decay.Index(ch)] = 5000;
+    image[fg.Index(ch)] = 0;
+  }
+  const std::string pha = "/tmp/fsudaq_test_pha_" + std::to_string(getpid()) + ".bin";
+  { FILE * f = fopen(pha.c_str(), "wb"); fwrite(image.data(), 4, SETTINGSIZE, f); fclose(f); }
+  const int serial = 30593, port = 4, node = 3;
+  fake_caen_add_board(1, port, node, serial, "DT5730", pha.c_str());
+  for( int ch = 0; ch < 8; ch++ ) fake_caen_set_reg(serial, 0x1040 + (ch << 8), 0);   // the fake takes 0x1n40 as the PSD flush and keeps no value: as the file
+  Digitizer digi(node, port);
+  CHECK(digi.IsConnected() && digi.GetDPPType() == V1730_DPP_PHA_CODE, "the DPP-PHA board did not open as PHA");
+  if( !digi.IsConnected() ){ remove(pha.c_str()); return; }
+  std::vector<std::string> problems;
+  int n = digi.LoadAndProgramSettings(pha, problems);
+  CHECK(n == 0, "loading the PHA file: %d problem(s)%s%s", n, problems.empty() ? "" : ": ", problems.empty() ? "" : problems[0].c_str());
+  const uint32_t want = (uint32_t) (0xFFFF * pow(2, 18) / 100 / 5000);   // SHF = floor(log2(100 * 5000)) = 18
+  for( int start = 1; start <= 2; start++ ){
+    CHECK(digi.ApplyDerivedSettings() == 0, "start %d: derived writes failed", start);
+    digi.ReadAllSettingsFromBoard(true);
+    auto diff = digi.SettingsDifferences(image, true);
+    CHECK(diff.empty(), "start %d: %zu difference(s): %s", start, diff.size(), diff.empty() ? "" : diff[0].c_str());
+    CHECK(digi.GetSettingFromMemory(DPP::PHA::FineGain, 0) == want && fake_caen_reg(serial, fg.ActualAddress(0)) == want
+          && (digi.GetSettingFromMemory(DPP::DPPAlgorithmControl, 0) & 0x3F) == 18, "start %d: fine gain 0x%X (want 0x%X), rescaling %u", start,
+          digi.GetSettingFromMemory(DPP::PHA::FineGain, 0), want, digi.GetSettingFromMemory(DPP::DPPAlgorithmControl, 0) & 0x3F);
+  }
+  digi.WriteRegister(DPP::PHA::TrapezoidRiseTime, 200, 1);   // an edit: listed; the fine gain it changes is not
+  digi.ApplyDerivedSettings();
+  digi.ReadAllSettingsFromBoard(true);
+  auto diff = digi.SettingsDifferences(image, true);
+  CHECK(diff.size() == 1 && diff[0].find("TrapezoidRiseTime ch1") != std::string::npos, "PHA edit: %zu line(s)%s%s", diff.size(), diff.empty() ? "" : ": ", diff.empty() ? "" : diff[0].c_str());
+  remove(pha.c_str());
+  if( nFail == nFail0 ) printf("   ok    traces and derived fields ignored at Start (PHA, QDC), write-only compared as written; a PHA board started twice: no difference, snapshot = derived values\n");
+}
+
 int main(int argc, char ** argv) {
   Digitizer::programPauseMs = 0; // the fake boards need no pause between register writes
   std::string dir = argc > 1 ? argv[1] : "tests/data/odin-runB";
@@ -329,6 +580,9 @@ int main(int argc, char ** argv) {
   CheckSPIWait(dir);
   CheckPerChannelCouple(dir);
   CheckADCCalibration(dir);
+  CheckSettingsDifferences(dir);
+  CheckSettingsFileWrites(dir);
+  CheckDerivedAtStart(dir);
 
   printf("\n%s: %d problem(s) in %zu board(s)\n", nFail ? "FAILED" : "PASSED", nFail, files.size());
   return nFail ? 1 : 0;

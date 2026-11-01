@@ -65,6 +65,7 @@ class Digitizer{
     bool         hasOverThresholdWidth;  /// for QDC
     bool         programmedFromFile;       /// a settings file was written to the board and every register reads back as in the file
     std::string  settingFileProblem;       /// why Live Setting Update stopped writing the file
+    std::string  loadedFromFile;           /// the file the board was last loaded from (may be a run snapshot, never written)
     unsigned int setting[SETTINGSIZE];     /// Setting, 4bytes x 2048 = 8192 bytes
 
     /// the registers ProgramSettingsToBoard() writes, in the order it writes them, as (register, channel)
@@ -184,6 +185,20 @@ class Digitizer{
     /// registers that differ from the file after programming (listed in problems).
     int            LoadAndProgramSettings    (std::string fileName, std::vector<std::string> & problems);
     bool           IsProgrammedFromFile()    const {return programmedFromFile;}
+    /// the registers LoadAndProgramSettings() programs (not the LVDS pins, not the run bit, not a register this
+    /// firmware lacks) whose value in memory differs from reference, a settings file's image: one line each,
+    /// "0x1080 TriggerThreshold ch3: file 0x..., board 0x...". Read-only registers are never compared; a
+    /// write-only one is compared as FSUDAQ last wrote it. atStart: also leave out what is not the file's to set,
+    /// the trace bit (every open switches it off) and what ApplyDerivedSettings() computes at each start
+    std::vector<std::string> SettingsDifferences(const std::vector<unsigned int> & reference, bool atStart = false);
+    /// what FSUDAQ derives from the settings at each start, before the board runs (DPP-PHA: trapezoid rescaling
+    /// and fine gain from rise and decay time; DPP-QDC: the aggregate organization): the number of failed writes
+    int            ApplyDerivedSettings();
+    /// a settings file's 8192 bytes, without loading them; -1 (why says why) if it cannot be read or has another size
+    static int     ReadSettingsImage(std::string fileName, std::vector<unsigned int> & image, std::string * why = nullptr);
+    /// <prefix>_<run>_<serial>_<DPP>.bin inside its run folder <prefix>_<run>: a run's snapshot, never to be written
+    static bool    IsRunSnapshotPath(std::string path);
+    std::string    GetLoadedFromFile()       const {return loadedFromFile;}
 
     /// simply read settings from memory
     void           SetSettingToMemory        (Reg registerAddress, unsigned int value, unsigned short ch = 0);
@@ -209,6 +224,9 @@ class Digitizer{
     /// tell the digitizer where to look at the setting file.
     /// if not exist, call SaveAllSettinsAsBin();
     void         SetSettingBinaryPath        (std::string fileName);
+    /// make fileName the file Save and Live Setting Update write to, without loading or writing it (after a
+    /// load from a run snapshot). Live Setting Update goes off: the file may not hold what the board holds.
+    void         SetSettingFileTarget        (std::string fileName, bool holdsBoard = false); /// holdsBoard: the file was just written from the board (Live Setting Update stays as it is)
     /// load setting file to memory
     /// if problem, return -1 (and the reason in *why); load without problem, return 0;
     int          LoadSettingBinaryToMemory   (std::string fileName, std::string * why = nullptr);

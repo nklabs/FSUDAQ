@@ -1,6 +1,11 @@
 #include "ClassDigitizer.h"
 
 #include <chrono>
+#include <cctype>
+#include <climits>
+#include <cstdlib>
+#include <sys/stat.h>
+#include <unistd.h>
 
 int Digitizer::clockSettleTimeoutMs = 5000;
 int Digitizer::spiWaitTimeoutMs = 1000;
@@ -57,6 +62,7 @@ void Digitizer::Initalization(){
   settingFile = NULL;
   hasOverThresholdWidth = false;
   programmedFromFile = false;
+  loadedFromFile = "";
   memset(setting, 0, sizeof(setting));
 
   ret = -1;
@@ -719,6 +725,32 @@ int Digitizer::ProgramChannel_QDC(short group){
   return ret;
 }
 
+int Digitizer::ApplyDerivedSettings(){
+  if( softwareDisable || AcqRun || !isConnected ) return 0;
+  int nFailed = 0;
+  if( DPPType == DPPTypeCode::DPP_PHA_CODE ) {
+
+    printf(" Setting Trapzoid Scaling Factor and Fine Gain \n");
+    for( int ch = 0; ch < NumRegChannel; ch++){
+      unsigned int riseTime = GetSettingFromMemory(DPP::PHA::TrapezoidRiseTime, ch);
+      unsigned int decayTime = GetSettingFromMemory(DPP::PHA::DecayTime, ch);
+      if( riseTime == 0 || decayTime == 0 ) continue;   // nothing to scale by
+      unsigned int SHF = std::floor(std::log2(riseTime * decayTime));
+      SetBits(DPP::DPPAlgorithmControl, DPP::Bit_DPPAlgorithmControl_PHA::TrapRescaling, SHF, ch);
+      if( ret != 0 ) nFailed++;
+
+      //Always fix the fineGate = fg = 1
+      unsigned int f = 0xFFFF * pow(2, SHF)/ riseTime / decayTime;
+      WriteRegister(DPP::PHA::FineGain, f, ch);
+      if( ret != 0 ) nFailed++;
+
+    }
+
+  }
+  if( DPPType == DPPTypeCode::DPP_QDC_CODE ) SetQDCOptimialAggOrg();
+  return nFailed;
+}
+
 //========================================================= ACQ control
 bool Digitizer::StartACQ(){
   DebugPrint("%s", "Digitizer");
@@ -756,28 +788,12 @@ bool Digitizer::StartACQ(){
     }
   }
 
-  if( DPPType == DPPTypeCode::DPP_PHA_CODE ) {
-
-    printf(" Setting Trapzoid Scaling Factor and Fine Gain \n");
-    for( int ch = 0; ch < NumRegChannel; ch++){
-      unsigned int riseTime = GetSettingFromMemory(DPP::PHA::TrapezoidRiseTime, ch);
-      unsigned int decayTime = GetSettingFromMemory(DPP::PHA::DecayTime, ch); 
-      unsigned int SHF = std::floor(std::log2(riseTime * decayTime));
-      SetBits(DPP::DPPAlgorithmControl, DPP::Bit_DPPAlgorithmControl_PHA::TrapRescaling, SHF, ch);
-
-      //Always fix the fineGate = fg = 1
-      unsigned int f = 0xFFFF * pow(2, SHF)/ riseTime / decayTime;
-      WriteRegister(DPP::PHA::FineGain, f, ch);
-
-    }
-
-  }
+  ApplyDerivedSettings();   // FSUDAQ's StartACQ has done it before the run's snapshot; the same values again
 
   data->ClearTriggerRate();
   data->ClearData();
   data->SaveFailed = 0;            // a previous run's write failure is not this run's
   data->SaveError[0] = '\0';
-  if( DPPType == DPPTypeCode::DPP_QDC_CODE ) SetQDCOptimialAggOrg();
 
   printf("    ACQ mode : %s (%d), TRG-OUT mode : %s (%d) \n", acqStr.c_str(), acqID, trgOutStr.c_str(), trgOutID);
 
@@ -1252,31 +1268,81 @@ int Digitizer::LoadAndProgramSettings(std::string fileName, std::vector<std::str
     return -1;
   }
   std::vector<unsigned int> fromFile(setting, setting + SETTINGSIZE);
+  loadedFromFile = fileName;
 
   programmedFromFile = false;            // from here the board is being written
+  // the read-back goes to memory only: with Live Setting Update on it would write the board's values into
+  // the file just loaded (a run snapshot, or a file whose registers do not read back, hiding the difference)
+  const bool held = settingFileHeld;
+  settingFileHeld = true;
   int nFailed = ProgramSettingsToBoard();
   if( nFailed > 0 ) problems.push_back(std::to_string(nFailed) + " register write(s) failed");
   int nReadFailed = ReadAllSettingsFromBoard(true);
   if( nReadFailed > 0 ) problems.push_back(std::to_string(nReadFailed) + " register read(s) failed");
+  settingFileHeld = held;
 
   /// every register written must now read back as the file has it
-  for( auto & [reg, ch] : ProgrammedRegisters() ){
-    if( reg.GetRWType() != RW::ReadWrite ) continue; // write-only (QDC record length): nothing to read back
-    if( reg == DPP::LVDSIOData ) continue;            // reads the LVDS pins when they are inputs
-    int c = ch < 0 ? 0 : ch;
-    unsigned short index = reg.Index(c);
-    uint32_t want = fromFile[index];
-    if( reg == DPP::AcquisitionControl ) want &= ~0x4u;  // written without the run bit
-    if( setting[index] == want ) continue;
-    char msg[160];
-    snprintf(msg, sizeof msg, "0x%04X %s%s: file 0x%08X, board 0x%08X", reg.ActualAddress(ch), reg.GetNameChar(),
-             ch < 0 ? "" : (" ch" + std::to_string(ch)).c_str(), fromFile[index], setting[index]);
-    problems.push_back(msg);
-  }
+  for( auto & d : SettingsDifferences(fromFile) ) problems.push_back(d);
 
   // the board holds the file only if every write and read went through and every register reads back
   programmedFromFile = problems.empty();
   return (int) problems.size();
+}
+
+std::vector<std::string> Digitizer::SettingsDifferences(const std::vector<unsigned int> & reference, bool atStart){
+  std::vector<std::string> list;
+  if( reference.size() != SETTINGSIZE ) return list;
+  const bool pha = DPPType == DPPTypeCode::DPP_PHA_CODE, qdc = DPPType == DPPTypeCode::DPP_QDC_CODE;
+  for( auto & [reg, ch] : ProgrammedRegisters() ){
+    if( reg.GetRWType() == RW::ReadONLY ) continue;   // the board's to report
+    if( reg == DPP::LVDSIOData ) continue;            // reads the LVDS pins when they are inputs
+    if( qdc && !hasOverThresholdWidth && reg == DPP::QDC::OverThresholdWidth ) continue;   // not on this firmware: never written
+    if( atStart && pha && reg == DPP::PHA::FineGain ) continue;              // derived at each start
+    if( atStart && qdc && reg == DPP::AggregateOrganization ) continue;      // derived at each start
+    int c = ch < 0 ? 0 : ch;
+    unsigned short index = reg.Index(c);
+    uint32_t want = reference[index], have = setting[index];
+    if( reg == DPP::AcquisitionControl ){ want &= ~0x4u; have &= ~0x4u; }  // the run bit: never programmed
+    if( atStart && reg == DPP::BoardConfiguration ){ want &= ~(1u << 16); have &= ~(1u << 16); }   // traces: off at every open, the run's snapshot has them
+    if( atStart && pha && reg == DPP::DPPAlgorithmControl ){ want &= ~0x3Fu; have &= ~0x3Fu; }       // trapezoid rescaling [5:0]: derived at each start
+    if( have == want ) continue;
+    char msg[200];
+    snprintf(msg, sizeof msg, "0x%04X %s%s: file 0x%08X, board 0x%08X%s", reg.ActualAddress(ch), reg.GetNameChar(),
+             ch < 0 ? "" : (" ch" + std::to_string(ch)).c_str(), reference[index], setting[index],
+             reg.GetRWType() == RW::WriteONLY ? " (write-only: as FSUDAQ last wrote it)" : "");
+    list.push_back(msg);
+  }
+  return list;
+}
+
+int Digitizer::ReadSettingsImage(std::string fileName, std::vector<unsigned int> & image, std::string * why){
+  image.assign(SETTINGSIZE, 0);
+  FILE * file = fopen(fileName.c_str(), "rb");
+  if( file == NULL ){ if( why ) *why = fileName + " does not exist or cannot be read."; return -1; }
+  size_t nRead = fread(image.data(), sizeof(unsigned int), SETTINGSIZE, file);
+  bool longer = fgetc(file) != EOF;
+  fclose(file);
+  if( nRead != SETTINGSIZE || longer ){ if( why ) *why = fileName + " is not a settings file (it is not " + std::to_string(SETTINGSIZE * sizeof(unsigned int)) + " bytes)."; return -1; }
+  return 0;
+}
+
+bool Digitizer::IsRunSnapshotPath(std::string path){
+  size_t slash = path.find_last_of('/');
+  if( slash == std::string::npos || slash == 0 ) return false;
+  std::string name = path.substr(slash + 1);
+  size_t up = path.find_last_of('/', slash - 1);
+  std::string folder = path.substr(up == std::string::npos ? 0 : up + 1, slash - (up == std::string::npos ? 0 : up + 1));
+  // the run folder <prefix>_<digits>, and the name <run folder>_<serial>_<DPP>.bin
+  size_t us = folder.find_last_of('_');
+  if( us == std::string::npos || us == 0 || us + 1 >= folder.size() ) return false;
+  for( size_t i = us + 1; i < folder.size(); i++ ) if( !isdigit((unsigned char) folder[i]) ) return false;
+  if( name.size() <= folder.size() + 5 || name.compare(0, folder.size() + 1, folder + "_") != 0 ) return false;
+  if( name.compare(name.size() - 4, 4, ".bin") != 0 ) return false;
+  std::string rest = name.substr(folder.size() + 1, name.size() - folder.size() - 5);   // <serial>_<DPP>
+  size_t u = rest.find('_');
+  if( u == std::string::npos || u == 0 || u + 1 >= rest.size() ) return false;
+  for( size_t i = 0; i < u; i++ ) if( !isdigit((unsigned char) rest[i]) ) return false;
+  return true;
 }
 
 void Digitizer::SetSettingToMemory(Reg registerAddress,  unsigned int value, unsigned short ch ){
@@ -1317,7 +1383,22 @@ void Digitizer::SetSettingBinaryPath(std::string fileName){
     fclose(settingFile);
     printf("setting file already exist. do nothing. Should program the digitizer\n");
   }
-  
+
+}
+
+void Digitizer::SetSettingFileTarget(std::string fileName, bool holdsBoard){
+  if( fileName == settingFileName ) return;
+  settingFileName = fileName;
+  FILE * f = fopen(fileName.c_str(), "rb");
+  isSettingFileExist = (f != NULL);
+  if( f ) fclose(f);
+  if( holdsBoard ){ settingFileProblem.clear(); return; }
+  if( isSettingFileUpdate ){
+    // writing single registers into a file that holds other settings would make a mix of both
+    isSettingFileUpdate = false;
+    settingFileProblem = fileName + " may not hold what the board holds: Live Setting Update is off (switching it on writes the board's settings to the file)";
+    printf("Digi-%d: %s\n", GetSerialNumber(), settingFileProblem.c_str());
+  }
 }
 
 int Digitizer::LoadSettingBinaryToMemory(std::string fileName, std::string * why){
@@ -1398,7 +1479,10 @@ void Digitizer::SaveSettingToFile(Reg registerAddress, unsigned int value, unsig
 
   unsigned short index = registerAddress.Index(ch);
   setting[index] = value;
-  
+  // status and identity registers (temperatures, counters, firmware) are the board's to report, not settings:
+  // the file keeps those it was saved with (its firmware and channel count are checked when it is loaded)
+  if( registerAddress.GetRWType() == RW::ReadONLY ) return;
+
   settingFile = fopen (settingFileName.c_str(),"r+");
   if( settingFile == NULL ){
     // a file that cannot be written (read-only, moved): Live Setting Update ends, and says so
@@ -1428,14 +1512,30 @@ bool Digitizer::SaveAllSettingsAsTextForRun (std::string fileName){
   DebugPrint("%s", "Digitizer");
   if( !isSettingFilledinMemeory ) return false;
   
-  FILE * binFile = fopen(fileName.c_str(), "w+");
+  // written whole to a temporary file next to it, then renamed over it: a reader (or a crash) never sees half a file.
+  // A symlink is followed (the file it points to is replaced, the link stays); the file keeps its mode and group.
+  std::string target = fileName;
+  char resolved[PATH_MAX];
+  if( realpath(fileName.c_str(), resolved) != NULL ) target = resolved;
+  struct stat old;
+  const bool existed = stat(target.c_str(), &old) == 0;
+  const std::string tmp = target + ".tmp-" + std::to_string(getpid());
+  FILE * binFile = fopen(tmp.c_str(), "w");
   if( binFile == NULL ) {
-    printf("Cannot open %s.\n", fileName.c_str());
+    printf("Cannot open %s.\n", tmp.c_str());
     return false;
   }
-  
+
   bool ok = fwrite(setting, SETTINGSIZE * sizeof(unsigned int), 1, binFile) == 1;
+  ok = (fflush(binFile) == 0) && ok;
+  if( existed ){
+    fchmod(fileno(binFile), old.st_mode & 07777);
+    if( fchown(fileno(binFile), (uid_t) -1, old.st_gid) != 0 ){ /* not a member of that group: kept as made */ }
+  }
+  ok = (fsync(fileno(binFile)) == 0) && ok;
   ok = (fclose(binFile) == 0) && ok;
+  ok = ok && rename(tmp.c_str(), target.c_str()) == 0;
+  if( !ok ) remove(tmp.c_str());
   printf("%s file : %s\n", ok ? "Created" : "FAILED to write", fileName.c_str());
   return ok;
 

@@ -32,12 +32,12 @@ std::vector<std::pair<std::pair<QString, QString>, unsigned short>> ReadoutToolT
                                                                                       {{"No Bus Error", "Bus Error"}, 2},
                                                                                       {{"FIFO not empty", "FIFO is empty"}, 3}};
 
-DigiSettingsPanel::DigiSettingsPanel(Digitizer ** digi, unsigned int nDigi, QString rawDataPath, QMainWindow *parent): QMainWindow(parent){
+DigiSettingsPanel::DigiSettingsPanel(Digitizer ** digi, unsigned int nDigi, QString settingsDir, QMainWindow *parent): QMainWindow(parent){
   DebugPrint("%s", "DigiSettingsPanel");;
   this->digi = digi;
   this->nDigi = nDigi;
 
-  this->rawDataPath = rawDataPath;
+  this->settingsDir = settingsDir;
 
   enableSignalSlot = false;
 
@@ -265,7 +265,7 @@ DigiSettingsPanel::DigiSettingsPanel(Digitizer ** digi, unsigned int nDigi, QStr
       chkCoupledSettingFile->setCheckState(Qt::CheckState::Unchecked);
       connect(chkCoupledSettingFile, &QCheckBox::stateChanged, this, [=](int state){
         digi[ID]->SetSettingFileUpdate(state);
-        if( state && digi[ID]->IsSettingFileExist() ) {
+        if( state && !digi[ID]->GetSettingFileName().empty() ) {   // the whole file first: it holds what the board holds from then on
           std::string filePath = digi[ID]->GetSettingFileName();
           if( !digi[ID]->SaveAllSettingsAsBin(filePath) ){
             digi[ID]->SetSettingFileUpdate(false);
@@ -4174,47 +4174,65 @@ void DigiSettingsPanel::ReadSettingsFromBoard(){
 
 }
 
+QString DigiSettingsPanel::DefaultSettingsFile(const QString & boardFile, const QString & settingsDir, const QString & defaultName){
+  if( !boardFile.isEmpty() ) return boardFile;
+  return settingsDir + "/" + defaultName;
+}
+
+QString DigiSettingsPanel::BoardSetFile() const {
+  return settingsDir + "/Digi-" + QString::number(digi[ID]->GetSerialNumber()) + "_" + QString::fromStdString(digi[ID]->GetData()->DPPTypeStr) + ".bin";
+}
+
 void DigiSettingsPanel::SaveSetting(int opt){
   DebugPrint("%s", "DigiSettingsPanel");
-  QDir dir(rawDataPath);
+  QString defaultPath = DefaultSettingsFile(QString::fromStdString(digi[ID]->GetSettingFileName()), settingsDir, QFileInfo(BoardSetFile()).fileName());
+  if( opt == 1 ) defaultPath = QFileInfo(defaultPath).absolutePath() + "/" + QFileInfo(defaultPath).completeBaseName() + ".txt";
+  QDir dir(QFileInfo(defaultPath).absolutePath());
   if( !dir.exists() ) dir.mkpath(".");
 
-  QString defaultFileName = "Digi-" +  QString::number(digi[ID]->GetSerialNumber()) + "_" + QString::fromStdString(digi[ID]->GetData()->DPPTypeStr) + ".bin";
-
-  QString filePath = QFileDialog::getSaveFileName(this, 
-                                                  "Save Settings File", 
-                                                  QDir::toNativeSeparators(rawDataPath + "/" + defaultFileName), 
+  QString filePath = QFileDialog::getSaveFileName(this,
+                                                  "Save Settings File",
+                                                  QDir::toNativeSeparators(defaultPath),
                                                   opt == 0 ? "Binary (*.bin)" : "Text file (*.txt)");
+  if( !filePath.isEmpty() ) SaveSettingFile(filePath, opt);
+}
 
-  if (!filePath.isEmpty()) {
-      
-    QFileInfo  fileInfo(filePath);
-    QString ext = fileInfo.suffix();
-    if( opt == 0 ){
-      if( ext.isEmpty() ) filePath += ".bin";
-      if( !digi[ID]->SaveAllSettingsAsBin(filePath.toStdString()) ){
-        SendLogMsg("<font style=\"color: red;\">Cannot write <b>" + filePath + "</b>; nothing saved.</font>");
-        QMessageBox::warning(this, "Settings not saved", "Cannot write\n" + filePath);
-        return;
-      }
-      leSaveFilePath[ID]->setText(filePath);
-    }
-    if( opt == 1 ){
-      if( ext.isEmpty() ) filePath += ".txt";
-      digi[ID]->SaveAllSettingsAsText(filePath.toStdString());
-      leSaveFilePath[ID]->setText(filePath + " | not loadable!!");
-    }
-
-    SendLogMsg("Saved setting file <b>" +  filePath + "</b>.");
-
+bool DigiSettingsPanel::SaveSettingFile(QString filePath, int opt){
+  QFileInfo  fileInfo(filePath);
+  QString ext = fileInfo.suffix();
+  if( opt == 0 && ext.isEmpty() ) filePath += ".bin";
+  if( opt == 1 && ext.isEmpty() ) filePath += ".txt";
+  // a run's snapshot records what the board held in that run: never rewritten, in either format
+  if( Digitizer::IsRunSnapshotPath(QFileInfo(filePath).absoluteFilePath().toStdString()) ){
+    SendLogMsg("<font style=\"color: red;\"><b>" + filePath + "</b> is a run's settings snapshot; nothing saved.</font>");
+    QMessageBox::warning(this, "Settings not saved", filePath + "\nis a run's settings snapshot: it keeps what the board held in that run and is never rewritten.\n\nSave to the settings set instead.");
+    return false;
   }
-
+  if( opt == 0 ){
+    // the board's file in the active set is its settings file; any other file is a copy, the board keeps writing the set
+    const bool toSet = QFileInfo(filePath).absoluteFilePath() == QFileInfo(BoardSetFile()).absoluteFilePath();
+    const bool ok = toSet ? digi[ID]->SaveAllSettingsAsBin(BoardSetFile().toStdString()) : digi[ID]->SaveAllSettingsAsTextForRun(filePath.toStdString());
+    if( !ok ){
+      SendLogMsg("<font style=\"color: red;\">Cannot write <b>" + filePath + "</b>; nothing saved.</font>");
+      QMessageBox::warning(this, "Settings not saved", "Cannot write\n" + filePath);
+      return false;
+    }
+    leSaveFilePath[ID]->setText(QString::fromStdString(digi[ID]->GetSettingFileName()));
+    SendLogMsg(toSet ? "Saved setting file <b>" + filePath + "</b>." : "Saved a copy of the settings to <b>" + filePath + "</b>; the board's settings file stays " + QString::fromStdString(digi[ID]->GetSettingFileName()) + ".");
+    return true;
+  }
+  digi[ID]->SaveAllSettingsAsText(filePath.toStdString());
+  leSaveFilePath[ID]->setText(filePath + " | not loadable!!");
+  SendLogMsg("Saved setting file <b>" +  filePath + "</b>.");
+  return true;
 }
 
 void DigiSettingsPanel::LoadSetting(){
   DebugPrint("%s", "DigiSettingsPanel");
+  QString defaultPath = DefaultSettingsFile(QString::fromStdString(digi[ID]->GetSettingFileName()), settingsDir, QFileInfo(BoardSetFile()).fileName());
   QFileDialog fileDialog(this);
-  fileDialog.setDirectory(rawDataPath);
+  fileDialog.setDirectory(QFileInfo(defaultPath).absolutePath());
+  fileDialog.selectFile(QFileInfo(defaultPath).fileName());
   fileDialog.setFileMode(QFileDialog::ExistingFile);
   fileDialog.setNameFilter("Binary (*.bin);;");
   int result = fileDialog.exec();
@@ -4223,28 +4241,36 @@ void DigiSettingsPanel::LoadSetting(){
 
   if( fileDialog.selectedFiles().size() == 0 ) return; // when no file selected.
 
-  QString fileName = fileDialog.selectedFiles().at(0);
+  LoadSettingFile(fileDialog.selectedFiles().at(0));
+}
 
+bool DigiSettingsPanel::LoadSettingFile(const QString & fileName){
   // a file saved from another board: say so (copying one board's settings to another is allowed)
   int fileSN = Digitizer::SerialInSettingsFile(fileName.toStdString());
   if( fileSN > 0 && fileSN != digi[ID]->GetSerialNumber() ){
     if( QMessageBox::question(this, "Settings of another board", fileName + "\nwas saved from Digi-" + QString::number(fileSN) +
-          ". Load it into Digi-" + QString::number(digi[ID]->GetSerialNumber()) + "?\n\n(With Live Setting Update on, this board's changes would then be written to that file.)",
-          QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes ) return;
+          ". Load it into Digi-" + QString::number(digi[ID]->GetSerialNumber()) + "?",
+          QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes ) return false;
   }
 
   // the same load, program and read-back as opening "w/ settings"; memory and panel then show the board
   std::vector<std::string> problems;
   int nProblem = digi[ID]->LoadAndProgramSettings(fileName.toStdString(), problems);
   QString digiName = "Digi-" + QString::number(digi[ID]->GetSerialNumber());
+  // whatever was loaded (a run snapshot, another set, a copy), the board's settings file stays its file in the active set
+  const QString target = BoardSetFile();
+  digi[ID]->SetSettingFileTarget(target.toStdString());
   if( nProblem < 0 ){
     SendLogMsg("<font style=\"color: red;\">" + digiName + ": settings file not loaded: " + QString::fromStdString(problems.front()) + "</font>");
     QMessageBox::warning(this, "Settings not loaded", digiName + ": the settings file was not loaded.\n\n" + QString::fromStdString(problems.front()));
-    return;
+    return false;
   }
+  if( QFileInfo(fileName).absoluteFilePath() != QFileInfo(target).absoluteFilePath() )
+    SendLogMsg(digiName + ": loaded from " + fileName + "; its settings file (Save, Live Setting Update) stays <b>" + target + "</b>.");
   if( digi[ID]->IsRecordTrace() ) SendLogMsg("<font style=\"color: orange;\">" + digiName + ": waveform recording switched off, as at open.</font>");
   digi[ID]->SetTrace(false); // as at open
-  leSaveFilePath[ID]->setText(fileName);
+  { QSignalBlocker block(chkCoupledSettingFile); chkCoupledSettingFile->setChecked(digi[ID]->IsSettingFileUpdate()); }
+  leSaveFilePath[ID]->setText(QString::fromStdString(digi[ID]->GetSettingFileName()));
   UpdatePanelFromMemory();
   UpdateOtherPanels();
   if( nProblem == 0 ){
@@ -4254,5 +4280,6 @@ void DigiSettingsPanel::LoadSetting(){
     for( auto & p : problems ){ SendLogMsg("<font style=\"color: red;\">" + digiName + ": " + QString::fromStdString(p) + "</font>"); list += QString::fromStdString(p) + "\n"; }
     QMessageBox::warning(this, "Settings differ", digiName + ": after loading " + fileName + ", the board does not hold the file's settings:\n\n" + list);
   }
+  return true;
 }
 
