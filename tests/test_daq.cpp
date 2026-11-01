@@ -1500,7 +1500,7 @@ public:
       CHECK(Dialogs("Settings not saved") == 1, "a start that went back remembered the answer: %s", qPrintable(dialogs.join(" | ")));
     }
     //---- Save to set chosen but a set file cannot be read (to keep it): not saved, no run, what was saved put back
-    answers["Settings not saved"] = "Save to set and start";
+    answers["Settings not saved"] = "Save to current set (settings) and start";
     {
       const QByteArray protoNow = FileBytes(proto);
       chmod(qPrintable(proto), 0200);
@@ -1511,7 +1511,7 @@ public:
       CHECK(FileBytes(proto) == protoNow && FileBytes(file0) == fileBefore, "an unreadable set file was written over, or the board file not put back");
     }
     //---- Save to set chosen, then "Go back" at the run-number question: the set untouched
-    answers["Settings not saved"] = "Save to set and start";
+    answers["Settings not saved"] = "Save to current set (settings) and start";
     w->digi[0]->WriteRegister(DPP::PSD::TriggerThreshold, 0x56, 3);
     const QByteArray protoBefore = FileBytes(proto);
     {
@@ -1566,6 +1566,38 @@ public:
     Pump(1500);
     w->sbRunTimeMin->setValue(0);
     w->chkRepeatRun->setChecked(false);
+    //---- Save to new set: made only once the start is certain, removed if the start fails, active after a start
+    answers["Settings not saved"] = "Save to new set... and start";
+    answers["Save as new set"] = "edited";
+    w->sbRunTimeMin->setValue(0);
+    w->chkRepeatRun->setChecked(false);
+    w->digi[0]->WriteRegister(DPP::PSD::TriggerThreshold, 0x71, 8);
+    const QString edited = work + "/edited";
+    {
+      const unsigned int last = w->runID;
+      w->runID = last - 1; w->leRunID->setText(QString::number(last - 1));   // "Go back" at the run-number question
+      dialogs.clear();
+      w->AutoRun();
+      CHECK(!w->inDataRun && Dialogs("Run number already used") == 1 && !QFileInfo::exists(edited) && w->settingsPath == settingsPath, "new set + Go back: folder %d, set %s", QFileInfo::exists(edited), qPrintable(w->settingsPath));
+      w->runID = last; w->leRunID->setText(QString::number(last));
+    }
+    fake_caen_fail(1443, "malloc");
+    dialogs.clear();
+    w->AutoRun();
+    fake_caen_fail(1443, "");
+    for( int s : Serials ) fake_caen_forget(s);
+    CHECK(!w->inDataRun && !QFileInfo::exists(edited) && w->settingsPath == settingsPath && w->openSettingsDir == settingsPath
+          && QString::fromStdString(w->digi[0]->GetSettingFileName()) == file0 && Log().contains("The new set " + edited + " is removed"), "new set + failed start: folder %d, set %s", QFileInfo::exists(edited), qPrintable(w->settingsPath));
+    dialogs.clear();
+    runDir = StartStop();
+    CHECK(w->settingsPath == edited && w->openSettingsDir == edited && Word(edited + "/Digi-15880_PSD.bin", thr, 8) == 0x71 && QFileInfo::exists(edited + "/run_protocol.json")
+          && QString::fromStdString(w->digi[0]->GetSettingFileName()) == edited + "/Digi-15880_PSD.bin" && Word(file0, thr, 8) != 0x71
+          && RunFile(runDir, QFileInfo(runDir).fileName() + "_run.json")["run_control"].toObject()["settings_set"].toObject()["name"].toString() == "edited",
+          "new set at Start: set %s", qPrintable(w->settingsPath));
+    dialogs.clear();
+    StartStop();
+    CHECK(dialogs.isEmpty(), "asked again after the new set: %s", qPrintable(dialogs.join(" | ")));
+    answers.clear();
     w->CloseDigitizers();
     if( nFail == nFail0 ) OK("default Start anyway; same changes not asked again; per-run field never; new ones asked (Cancel keeps the number); Live Setting Update compared; saved only once sure, put back if the start fails");
   }
@@ -1633,7 +1665,7 @@ public:
     CHECK(Word(settingsPath + "/Digi-15880_PSD.bin", thr, 1) == 0x39
           && FileBytes(settingsPath + "/Digi-15880_PSD.bin") == QByteArray((const char *) w->digi[0]->GetSettings(), SETTINGSIZE * 4), "Live Setting Update: the set's file is not the board's whole image");
     //---- the board the set lacks: compared with its snapshot, offered to the set
-    answers["Settings not saved"] = "Save to set and start";
+    answers["Settings not saved"] = "Save to current set (settings) and start";
     dialogs.clear();
     w->AutoRun();
     const QString run3 = w->RunFolder();

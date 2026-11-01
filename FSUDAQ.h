@@ -146,6 +146,8 @@ private:
   static QStringList SettingsSets(const QString & root);   // the subfolders holding a Digi-*.bin, by name
   void UpdateSettingsSetView();
   bool SaveAsNewSet(const QString & name, QString & why);  // the open boards (read back) and the run protocol into <root>/<name>, made active
+  bool NewSetNameOk(const QString & name, QString & why) const; // a plain name, not yet a folder beside the active set
+  bool MakeNewSet(const QString & name, QString & why);    // SaveAsNewSet without its run checks (at Start, once the start is certain)
   void PromptSaveAsNewSet();
   QString openSettingsDir;      // the set the open boards were opened with (or saved to as a new set)
   QString openedFromRun;        // opened "w/ settings from a run": that run folder's name

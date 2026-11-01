@@ -615,18 +615,31 @@ void FSUDAQ::PromptSaveAsNewSet(){
   if( !SaveAsNewSet(dlg.textValue().trimmed(), why) ) QMessageBox::warning(this, "Set not saved", why);
 }
 
-bool FSUDAQ::SaveAsNewSet(const QString & name, QString & why){
-  why.clear();
+bool FSUDAQ::NewSetNameOk(const QString & name, QString & why) const {
   const QString root = SettingsRoot();
   if( root.isEmpty() || !QFileInfo(root).isDir() ){ why = "There is no settings root: the settings are in the data path. Choose a settings set folder with Set Path first; new sets go beside it."; return false; }
-  if( digi == nullptr ){ why = "No digitizer is open."; return false; }
-  if( inDataRun || series.active || pauseTimer->isActive() || scopeShown ){ why = "Not while a run, a series or the scope is going."; return false; }
   if( name.isEmpty() || name.contains('/') || name.contains('\\') || name.startsWith(".") || name.contains("..") ){
     why = "\"" + name + "\" is not a set name: give a plain folder name (no slashes, not starting with a dot, no \"..\").";
     return false;
   }
   const QString target = QDir::cleanPath(root + "/" + name);
   if( QFileInfo::exists(target) ){ why = target + " already exists: a set is never written over."; return false; }
+  return true;
+}
+
+bool FSUDAQ::SaveAsNewSet(const QString & name, QString & why){
+  why.clear();
+  if( !NewSetNameOk(name, why) ) return false;
+  if( digi == nullptr ){ why = "No digitizer is open."; return false; }
+  if( inDataRun || series.active || pauseTimer->isActive() || scopeShown ){ why = "Not while a run, a series or the scope is going."; return false; }
+  return MakeNewSet(name, why);
+}
+
+bool FSUDAQ::MakeNewSet(const QString & name, QString & why){
+  why.clear();
+  if( !NewSetNameOk(name, why) ) return false;   // again: a folder may have appeared since the name was asked
+  const QString root = SettingsRoot();
+  const QString target = QDir::cleanPath(root + "/" + name);
 
   // written into a hidden folder, renamed into place at the end: there is never a half-made set
   const QString tmp = root + "/." + name + ".partial-" + QString::number(QCoreApplication::applicationPid());
@@ -2291,8 +2304,9 @@ void FSUDAQ::StartACQ(){
   // late read-back). Nothing has to be saved for a run to start: its snapshots and copies record what it used either
   // way; the question only offers to put it into the set, and is not asked again for changes answered "this run only"
   struct SetFileBefore { QString path; QByteArray bytes; bool existed; };
-  std::vector<unsigned int> saveAtStart;   // "Save to set and start": saved once nothing can cancel the start
+  std::vector<unsigned int> saveAtStart;   // "Save to current set and start": saved once nothing can cancel the start
   bool saveProtocolAtStart = false;
+  QString newSetAtStart;                    // "Save to new set and start": made once nothing can cancel the start
   QSet<QString> acceptOnStart;              // "Start anyway": remembered once the run has started
   bool acceptWhenStarted = false;
   if( save && needManualComment ){
@@ -2310,7 +2324,8 @@ void FSUDAQ::StartACQ(){
         box.setInformativeText("The run's snapshot and copies record what this run uses either way. Save them into the set, or keep them for this run only (not asked again for the same changes).");
         box.setDetailedText(c.details.join("\n"));
         QPushButton * bnAnyway = box.addButton("Start anyway (this run only)", QMessageBox::AcceptRole);
-        QPushButton * bnSave = box.addButton("Save to set and start", QMessageBox::ApplyRole);
+        QPushButton * bnSave = box.addButton("Save to current set (" + QFileInfo(openSettingsDir).fileName() + ") and start", QMessageBox::ApplyRole);
+        QPushButton * bnNewSet = box.addButton("Save to new set... and start", QMessageBox::ApplyRole);
         QPushButton * bnCancel = box.addButton("Cancel", QMessageBox::RejectRole);
         box.setDefaultButton(bnAnyway);
         box.setEscapeButton(bnCancel);
@@ -2318,6 +2333,19 @@ void FSUDAQ::StartACQ(){
         if( box.clickedButton() == bnSave ){
           saveAtStart = c.toSave;
           saveProtocolAtStart = true;
+        }else if( box.clickedButton() == bnNewSet ){
+          QInputDialog dlg(this);
+          dlg.setWindowTitle("Save as new set");
+          dlg.setLabelText("Name of the new settings set (a folder in " + SettingsRoot() + "); it is made when the run starts:");
+          dlg.setTextValue("");
+          QString why;
+          if( dlg.exec() != QDialog::Accepted ){ LogMsg("Run not started (no name for the new set)."); return; }
+          if( !NewSetNameOk(dlg.textValue().trimmed(), why) ){
+            LogMsg("<font style=\"color: red;\">Run not started: " + why + "</font>");
+            QMessageBox::warning(this, "Run not started", why);
+            return;
+          }
+          newSetAtStart = dlg.textValue().trimmed();
         }else if( box.clickedButton() == bnAnyway ){
           acceptOnStart = now;
           acceptWhenStarted = true;
@@ -2451,6 +2479,13 @@ void FSUDAQ::StartACQ(){
     }
     if( saveProtocolAtStart ) acceptedDiffs.remove(openSettingsDir);
   }
+  QString newSetDir, setBeforeNew;   // the set made at this start, and the one active before it
+  if( problems.isEmpty() && !newSetAtStart.isEmpty() ){
+    QString why;
+    setBeforeNew = openSettingsDir;
+    if( MakeNewSet(newSetAtStart, why) ) newSetDir = openSettingsDir;
+    else problems << "the new set " + newSetAtStart + " was not made: " + why;
+  }
 
   //---- what FSUDAQ derives from the settings at each start, before the snapshot: the snapshot is what the run uses
   for( unsigned int i = 0; i < nDigi; i++ ){
@@ -2545,10 +2580,24 @@ void FSUDAQ::StartACQ(){
     }else if( elogID > 0 && chkElog->isChecked() && save ){
       AppendElog("Run-" + runIDStr + " was not started.<p>");
     }
-    // the set as it was before "Save to set and start"
+    // the set as it was before "Save to current set and start"
     for( auto it = setBefore.rbegin(); it != setBefore.rend(); ++it ){
       const bool ok = it->existed ? WriteFileAtomic(it->path, it->bytes) : (!QFileInfo::exists(it->path) || QFile::remove(it->path));
       LogMsg(ok ? it->path + " put back as before the start." : "<font style=\"color: red;\">Cannot put back " + it->path + " as before the start.</font>");
+    }
+    // the set made by "Save to new set and start" goes, the one before is active again
+    if( !newSetDir.isEmpty() ){
+      if( QDir(newSetDir).removeRecursively() ) LogMsg("The new set " + newSetDir + " is removed: the run did not start.");
+      else LogMsg("<font style=\"color: red;\">The run did not start, but the new set " + newSetDir + " could not be removed; " + setBeforeNew + " is the active set again.</font>");
+      for( unsigned int i = 0; i < nDigi; i++ ){
+        const QString base = "Digi-" + QString::number(digi[i]->GetSerialNumber()) + "_" + QString::fromStdString(digi[i]->GetData()->DPPTypeStr) + ".bin";
+        digi[i]->SetSettingFileTarget((setBeforeNew + "/" + base).toStdString(), true);   // as before the start
+      }
+      settingsPath = setBeforeNew;
+      openSettingsDir = setBeforeNew;
+      if( digiSettings ){ digiSettings->SetSettingsDir(setBeforeNew); digiSettings->UpdatePanelFromMemory(); }
+      UpdateSettingsSetView();
+      SaveProgramSettings();
     }
     if( save ) QDir().rmdir(runDir); // only if empty
     for( const QString & p : problems ) LogMsg("<font style=\"color: red;\">" + p + "</font>");

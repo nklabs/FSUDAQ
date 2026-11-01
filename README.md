@@ -178,9 +178,12 @@ Start never begins a series unasked. Changes in the window reach the set only wh
 At Start (Save Data on), the boards and the set fields of the protocol are compared with the set
 (read-only registers, the trace bit and what FSUDAQ derives at each start are left out). If they
 differ, the log lists every register (file → board) and FSUDAQ asks: **Start anyway (this run only)**
-(the default: Enter starts), **Save to set and start** (written only once nothing can cancel the
-start, put back if the start then fails), or Cancel. The same differences are not asked about again
-until the boards are reopened or the set is saved; runs of a repeated series never ask, they log.
+(the default: Enter starts), **Save to current set (<name>) and start**, **Save to new set… and
+start** (asks for the name; the new set becomes the active one), or Cancel. Either save happens only
+once nothing can cancel the start any more (comment, run-number question); if the start then fails,
+the current set's files are put back, or the new set's folder is removed and the previous set is
+active again. The same differences are not asked about again until the boards are reopened or a set
+is saved; runs of a repeated series never ask, they log.
 
 ## LED trigger
 

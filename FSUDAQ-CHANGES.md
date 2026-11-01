@@ -29,3 +29,9 @@ now also holds `<prefix>_<run>_run_protocol.json` and `<prefix>_<run>_programSet
 password masked); snapshots are read back after calibration and derived registers (PHA fine gain,
 QDC aggregation). Settings files are written atomically (through symlinks, mode kept). Live Setting
 Update no longer writes read-only registers into the file. Check on the hardware: tests/README.md item 8.
+
+### 1 Nov (later): "Save to new set... and start" in the Start check
+The question at Start now offers "Save to current set (<name>) and start" and "Save to new set... and
+start" besides "Start anyway (this run only)" (default) and Cancel. The new set (name checked as for
+Save as new set) is made only once the start is certain; if the start fails its folder is removed and
+the previous set is active again. After a start it is the active set, named in the log and run.json.
