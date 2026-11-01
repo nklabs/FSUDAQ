@@ -14,6 +14,7 @@
 #include <QLabel>
 #include <QFileInfo>
 #include <QMessageBox>
+#include <QInputDialog>
 #include <QPushButton>
 #include <QTextStream>
 #include <QTimer>
@@ -104,7 +105,9 @@ public:
     }
   }
 
-  void NewWorkDir(){
+  void NewWorkDir(const QString & keys = ""){
+    delete w;   // first: its destructor saves programSettings.txt and the run protocol into the folders made here
+    w = nullptr;
     work = QDir::tempPath() + "/fsudaq_test_daq_" + QString::number(getpid());
     QDir(work).removeRecursively();
     dataPath = work + "/data";
@@ -116,7 +119,7 @@ public:
     f.open(QIODevice::WriteOnly | QIODevice::Text);
     QTextStream out(&f);
     out << dataPath << "\n\n\n\n\n\n\n\n\n";   // data path; no influx, no elog
-    out << "settingsPath=" << settingsPath << "\nautoIncrementRunID=1\nautoDashboard=0\n";
+    out << "settingsPath=" << settingsPath << "\nautoIncrementRunID=1\nautoDashboard=0\n" << keys;
     f.close();
     QDir::setCurrent(work);
   }
@@ -185,6 +188,7 @@ public:
     CHECK(dialogs.isEmpty(), "dialogs at open: %s", qPrintable(dialogs.join(" | ")));
     CHECK(w->BoardsNotProgrammed().isEmpty(), "not programmed: %s", qPrintable(w->BoardsNotProgrammed().join(",")));
     CHECK(w->bnStartACQ->isEnabled(), "Start not enabled after a good open");
+    CHECK(w->openSettingsDir == settingsPath, "opened with %s, not the settings set %s", qPrintable(w->openSettingsDir), qPrintable(settingsPath));
     if( nFail == 0 ) OK("six boards programmed from their files, Start enabled");
     w->CloseDigitizers();
   }
@@ -1215,6 +1219,502 @@ public:
     if( nFail == nFail0 ) OK("on at 0.3 s and off at 0.8 s, or off at the stop, or nothing before the delay; refused and unanswered commands logged, the run goes on; run file with settings, LED events and %d boards' registers; settings kept", (int) boards.size());
   }
 
+  //=================================================================== settings sets, run settings, run protocol
+  QString Log(){ return w->logInfo->toPlainText(); }
+  static QByteArray FileBytes(const QString & path){ QFile f(path); if( !f.open(QIODevice::ReadOnly) ) return QByteArray(); return f.readAll(); }
+  static bool WriteBytes(const QString & path, const QByteArray & b){ QFile f(path); return f.open(QIODevice::WriteOnly) && f.write(b) == b.size(); }
+  static uint32_t Word(const QString & path, Reg reg, int ch){
+    QByteArray b = FileBytes(path);
+    uint32_t v = 0xFFFFFFFF;
+    if( b.size() == SETTINGSIZE * 4 ) memcpy(&v, b.constData() + reg.Index(ch) * 4, 4);
+    return v;
+  }
+  static void SetWord(const QString & path, Reg reg, int ch, uint32_t v){
+    QByteArray b = FileBytes(path);
+    memcpy(b.data() + reg.Index(ch) * 4, &v, 4);
+    WriteBytes(path, b);
+  }
+  static QJsonObject ReadJson(const QString & path){ return QJsonDocument::fromJson(FileBytes(path)).object(); }
+  static uint32_t ThrAddr(int ch){ Reg r = DPP::PSD::TriggerThreshold; return r.ActualAddress(ch); }
+  void ParseProgramSettings(const QString & keys){
+    delete w; w = nullptr;
+    QFile f(work + "/programSettings.txt");
+    f.open(QIODevice::WriteOnly | QIODevice::Text);
+    f.write((dataPath + "\n\n\n\n\n\n\n\n\n" + keys).toUtf8());
+    f.close();
+    NewFSUDAQ();
+  }
+
+  void SettingsSets(){
+    printf("== settings sets: listed beside the active one, opened with the one chosen, its run protocol loaded\n");
+    int nFail0 = nFail;
+    NewWorkDir(); AddBoards();
+    const QString noise = work + "/noise_run";
+    Reg thr = DPP::PSD::TriggerThreshold;
+    QDir().mkpath(noise); QDir().mkpath(work + "/empty"); QDir().mkpath(work + "/notes");
+    WriteBytes(work + "/notes/readme.txt", "not a set");
+    for( int s : Serials ) QFile::copy(settingsPath + "/Digi-" + QString::number(s) + "_PSD.bin", noise + "/Digi-" + QString::number(s) + "_PSD.bin");
+    SetWord(noise + "/Digi-15880_PSD.bin", thr, 0, 0x44);
+    Reg boardConfig = DPP::BoardConfiguration;
+    SetWord(noise + "/Digi-15879_PSD.bin", boardConfig, 0, Word(noise + "/Digi-15879_PSD.bin", boardConfig, 0) | (1u << 16));   // saved with traces on
+    NewFSUDAQ();
+    CHECK(FSUDAQ::SettingsSets(work) == QStringList({"noise_run", "settings"}), "sets listed: %s", qPrintable(FSUDAQ::SettingsSets(work).join(",")));
+    CHECK(w->cbSettingsSet->count() == 2 && w->cbSettingsSet->currentText() == "settings" && w->cbOpenMethod->itemText(w->cbOpenMethod->findData(1)) == "w/ settings set: settings",
+          "set chooser: %d items, current %s", w->cbSettingsSet->count(), qPrintable(w->cbSettingsSet->currentText()));
+    QJsonObject p = w->ProtocolJson();
+    p["maxFileSizeMB"] = 700; p["runLengthMin"] = 2.5;
+    WriteBytes(noise + "/run_protocol.json", QJsonDocument(p).toJson());
+    QMap<int, QByteArray> noiseBefore;
+    for( int s : Serials ) noiseBefore[s] = FileBytes(noise + "/Digi-" + QString::number(s) + "_PSD.bin");
+
+    w->cbSettingsSet->setCurrentIndex(w->cbSettingsSet->findText("noise_run"));
+    CHECK(w->settingsPath == noise && FileBytes(work + "/programSettings.txt").contains(("settingsPath=" + noise + "\n").toUtf8()), "set chosen: settingsPath %s", qPrintable(w->settingsPath));
+    dialogs.clear();
+    Open();
+    CHECK(dialogs.isEmpty() && w->BoardsNotProgrammed().isEmpty() && w->openSettingsDir == noise, "open with noise_run: dialogs %s", qPrintable(dialogs.join(" | ")));
+    CHECK(fake_caen_reg(15880, ThrAddr(0)) == 0x44, "Digi-15880 not programmed from noise_run");
+    CHECK(w->sbFileSizeMB->value() == 700 && w->sbRunTimeMin->value() == 2.5 && Log().contains("Run protocol of set noise_run taken") && Log().contains("maxFileSizeMB: "),
+          "the set's run protocol not taken: file size %g", w->sbFileSizeMB->value());
+    CHECK(Log().contains("Digi-15880: programmed from settings set noise_run, " + noise + "/Digi-15880_PSD.bin"), "the log does not name the set and file");
+    for( unsigned int i = 0; i < w->nDigi; i++ )
+      CHECK(QString::fromStdString(w->digi[i]->GetSettingFileName()) == noise + "/Digi-" + QString::number(w->digi[i]->GetSerialNumber()) + "_PSD.bin", "Digi-%d's file %s", w->digi[i]->GetSerialNumber(), w->digi[i]->GetSettingFileName().c_str());
+    //---- a file saved with traces on: no question at Start (every open switches them off)
+    w->chkSaveData->setChecked(true);
+    w->sbRunTimeMin->setValue(0);
+    dialogs.clear();
+    w->AutoRun();
+    CHECK(w->inDataRun && dialogs.isEmpty(), "traces on in the file: run %d, dialogs %s", w->inDataRun, qPrintable(dialogs.join(" | ")));
+    Pump(100); w->StopPressed();
+    //---- Save and Load start at the board's file in the set
+    w->OpenDigiSettings();
+    CHECK(w->digiSettings->settingsDir == noise
+          && DigiSettingsPanel::DefaultSettingsFile(QString::fromStdString(w->digi[0]->GetSettingFileName()), w->digiSettings->settingsDir, "x.bin") == noise + "/Digi-15880_PSD.bin"
+          && DigiSettingsPanel::DefaultSettingsFile("", "/s", "Digi-1_PSD.bin") == "/s/Digi-1_PSD.bin", "Save/Load default path");
+    w->CloseDigitizers();
+    for( int s : Serials ) CHECK(FileBytes(noise + "/Digi-" + QString::number(s) + "_PSD.bin") == noiseBefore[s], "noise_run's Digi-%d file was written", s);
+
+    //---- a set without a run protocol: the values kept, nothing written into it
+    w->cbSettingsSet->setCurrentIndex(w->cbSettingsSet->findText("settings"));
+    Open();
+    CHECK(Log().contains("Settings set settings has no run protocol yet") && !QFileInfo::exists(settingsPath + "/run_protocol.json") && w->sbFileSizeMB->value() == 700,
+          "set without a run protocol: file size %g, file %s", w->sbFileSizeMB->value(), QFileInfo::exists(settingsPath + "/run_protocol.json") ? "created" : "absent");
+    w->CloseDigitizers();
+
+    //---- programSettings.txt as before: settingsPath is the set; empty means the data path
+    ParseProgramSettings("settingsPath=\n");
+    CHECK(w->settingsPath == dataPath, "empty settingsPath: %s", qPrintable(w->settingsPath));
+    {
+      QString why;
+      CHECK(w->SettingsRoot().isEmpty() && w->cbSettingsSet->count() == 1 && !w->SaveAsNewSet("x", why) && why.contains("no settings root"),
+            "the data path as a set: root \"%s\", %d entries, %s", qPrintable(w->SettingsRoot()), w->cbSettingsSet->count(), qPrintable(why));
+    }
+    ParseProgramSettings("settingsPath=" + noise + "/\nrepeatRun=1\n");
+    CHECK(w->settingsPath == noise && w->cbSettingsSet->currentText() == "noise_run" && w->SettingsRoot() == work, "settingsPath=%s/ read as %s", qPrintable(noise), qPrintable(w->settingsPath));
+    CHECK(!w->chkRepeatRun->isChecked(), "Repeat restored at program start");
+
+    //---- the run protocol only after a successful open; Repeat never restored
+    p["repeatRun"] = true; p["maxFileSizeMB"] = 900;
+    WriteBytes(noise + "/run_protocol.json", QJsonDocument(p).toJson());
+    fake_caen_reset_all();   // no board answers
+    const double sizeBefore = w->sbFileSizeMB->value();
+    w->OpenDigitizers();
+    CHECK(w->digi == nullptr && w->sbFileSizeMB->value() == sizeBefore, "a failed open took the run protocol: file size %g", w->sbFileSizeMB->value());
+    AddBoards();
+    Open();
+    CHECK(w->sbFileSizeMB->value() == 900 && !w->chkRepeatRun->isChecked() && Log().contains("repeat is never taken from a file"), "open: file size %g, repeat %d", w->sbFileSizeMB->value(), w->chkRepeatRun->isChecked());
+    w->CloseDigitizers();
+    if( nFail == nFail0 ) OK("2 sets listed (empty and file-less folders not), the chosen one opened with its run protocol, traces in a file no question, a set without a protocol untouched; no sets from the data path; protocol only after an open, Repeat never restored");
+  }
+
+  void SaveAsNewSet(){
+    printf("== Save as new set: the boards (read back) and the run protocol into a new folder beside the set, made active; the old set untouched\n");
+    int nFail0 = nFail;
+    NewWorkDir(); AddBoards(); NewFSUDAQ();
+    Open();
+    Reg thr = DPP::PSD::TriggerThreshold;
+    QMap<int, QByteArray> before;
+    for( int s : Serials ) before[s] = FileBytes(settingsPath + "/Digi-" + QString::number(s) + "_PSD.bin");
+    w->digi[0]->WriteRegister(DPP::PSD::TriggerThreshold, 0x5B, 1);   // an edit not in the set
+    w->digi[0]->SetSettingFileUpdate(true);                          // the read-back must still not write the old set
+    QString why;
+    const int dirsBefore = QDir(work).entryList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden).size();
+    for( const QString & bad : {QString(""), QString("a/b"), QString(".."), QString(".hidden"), QString("x..y"), QString("settings"), QString("data")} ){
+      bool ok = w->SaveAsNewSet(bad, why);
+      CHECK(!ok && !why.isEmpty(), "name \"%s\" accepted", qPrintable(bad));
+    }
+    CHECK(QDir(work).entryList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden).size() == dirsBefore && w->settingsPath == settingsPath, "a refused name left a folder or changed the set");
+
+    const QString noise = work + "/noise_run";
+    CHECK(w->SaveAsNewSet("noise_run", why), "noise_run not saved: %s", qPrintable(why));
+    QStringList files = QDir(noise).entryList(QDir::Files);
+    CHECK(files.size() == 7 && files.contains("run_protocol.json"), "noise_run holds %s", qPrintable(files.join(",")));
+    CHECK(Word(noise + "/Digi-15880_PSD.bin", thr, 1) == 0x5B, "the new set does not have the board's value");
+    CHECK(ReadJson(noise + "/run_protocol.json")["maxFileSizeMB"].toInt() == (int) w->sbFileSizeMB->value(), "run protocol not in the new set");
+    for( int s : Serials ) CHECK(FileBytes(settingsPath + "/Digi-" + QString::number(s) + "_PSD.bin") == before[s], "the old set's Digi-%d file changed", s);
+    CHECK(w->settingsPath == noise && w->openSettingsDir == noise && w->cbSettingsSet->currentText() == "noise_run" && Log().contains("New settings set noise_run"), "noise_run not made active");
+    for( unsigned int i = 0; i < w->nDigi; i++ )
+      CHECK(QString::fromStdString(w->digi[i]->GetSettingFileName()) == noise + "/Digi-" + QString::number(w->digi[i]->GetSerialNumber()) + "_PSD.bin", "Digi-%d still writes %s", w->digi[i]->GetSerialNumber(), w->digi[i]->GetSettingFileName().c_str());
+    CHECK(w->digi[0]->IsSettingFileUpdate(), "Live Setting Update went off although the new file holds the board");
+    w->digi[0]->WriteRegister(DPP::PSD::TriggerThreshold, 0x5C, 1);
+    CHECK(Word(noise + "/Digi-15880_PSD.bin", thr, 1) == 0x5C && FileBytes(settingsPath + "/Digi-15880_PSD.bin") == before[15880], "Live Setting Update after the new set");
+    w->digi[0]->SetSettingFileUpdate(false);
+    CHECK(QDir(work).entryList(QStringList() << ".*partial*", QDir::Dirs | QDir::Hidden).isEmpty(), "a partial set was left");
+    CHECK(!w->SaveAsNewSet("noise_run", why), "a set saved over an existing one");
+
+    //---- through the button's question
+    answers["Save as new set"] = "pulser";
+    w->PromptSaveAsNewSet();
+    answers.clear();
+    CHECK(QFileInfo::exists(work + "/pulser/Digi-15880_PSD.bin") && w->settingsPath == work + "/pulser", "the question did not make pulser");
+
+    //---- a set that cannot be written: nothing made, the set as it was
+    chmod(qPrintable(work), 0555);
+    bool made = w->SaveAsNewSet("blocked", why);
+    chmod(qPrintable(work), 0755);
+    CHECK(!made && !QFileInfo::exists(work + "/blocked") && w->settingsPath == work + "/pulser", "unwritable root: made %d (%s)", made, qPrintable(why));
+    w->CloseDigitizers();
+    if( nFail == nFail0 ) OK("names checked, the boards' values and the protocol in the new set, the old set byte for byte, Live Setting Update follows, nothing half-made");
+  }
+
+  void PanelKeepsTheSet(){
+    printf("== Load/Save in Digitizer Settings: another file is programmed or copied, the board's file stays in the active set\n");
+    int nFail0 = nFail;
+    NewWorkDir(); AddBoards(); NewFSUDAQ();
+    const QString other = work + "/noise_run";
+    Reg thr = DPP::PSD::TriggerThreshold;
+    QDir().mkpath(other);
+    QFile::copy(settingsPath + "/Digi-15880_PSD.bin", other + "/Digi-15880_PSD.bin");
+    SetWord(other + "/Digi-15880_PSD.bin", thr, 0, 0x44);
+    const QByteArray otherBytes = FileBytes(other + "/Digi-15880_PSD.bin");
+    const QString setFile = settingsPath + "/Digi-15880_PSD.bin";
+    Open();
+    w->OpenDigiSettings();
+    w->digiSettings->ID = 0;
+    CHECK(w->digiSettings->LoadSettingFile(other + "/Digi-15880_PSD.bin"), "Load from another set failed");
+    CHECK(fake_caen_reg(15880, ThrAddr(0)) == 0x44 && QString::fromStdString(w->digi[0]->GetLoadedFromFile()) == other + "/Digi-15880_PSD.bin"
+          && QString::fromStdString(w->digi[0]->GetSettingFileName()) == setFile && Log().contains("loaded from " + other + "/Digi-15880_PSD.bin"),
+          "Load from another set: board 0x%X, file %s", fake_caen_reg(15880, ThrAddr(0)), w->digi[0]->GetSettingFileName().c_str());
+    w->digiSettings->chkCoupledSettingFile->setChecked(true);
+    w->digi[0]->WriteRegister(DPP::PSD::TriggerThreshold, 0x45, 1);
+    CHECK(FileBytes(other + "/Digi-15880_PSD.bin") == otherBytes, "Live Setting Update wrote the other set");
+    CHECK(FileBytes(setFile) == QByteArray((const char *) w->digi[0]->GetSettings(), SETTINGSIZE * 4), "the active set's file is not the board's image");
+    CHECK(w->digiSettings->SaveSettingFile(work + "/export.bin", 0) && FileBytes(work + "/export.bin").size() == SETTINGSIZE * 4
+          && QString::fromStdString(w->digi[0]->GetSettingFileName()) == setFile && w->digi[0]->IsSettingFileUpdate(), "Save to another path was not a copy");
+    w->digiSettings->chkCoupledSettingFile->setChecked(false);
+    w->CloseDigitizers();
+
+    //---- opened without settings: Start does not compare (nor offer to save) a board that holds what it held before
+    w->cbOpenMethod->setCurrentIndex(w->cbOpenMethod->findData(0));
+    w->OpenDigitizers();
+    w->UpdateRunControls();
+    w->chkSaveData->setChecked(true);
+    const QByteArray setBefore = FileBytes(setFile);
+    w->digi[0]->WriteRegister(DPP::PSD::TriggerThreshold, 0x46, 2);
+    dialogs.clear();
+    w->AutoRun();
+    CHECK(w->inDataRun && dialogs.isEmpty() && w->BoardsNotProgrammed().isEmpty() && Log().contains("opened without settings, not compared"), "w/o settings: run %d, dialogs %s", w->inDataRun, qPrintable(dialogs.join(" | ")));
+    Pump(100); w->StopPressed();
+    CHECK(FileBytes(setFile) == setBefore, "the set's file changed after a w/o settings run");
+    w->CloseDigitizers();
+    w->cbOpenMethod->setCurrentIndex(w->cbOpenMethod->findData(1));
+
+    //---- a set file behind a symlink, with its own mode: replaced through the link, mode kept
+    const QString real = work + "/real_protocol.json", link = work + "/link_protocol.json";
+    WriteBytes(real, "{}");
+    chmod(qPrintable(real), 0640);
+    QFile::link(real, link);
+    CHECK(FSUDAQ::WriteFileAtomic(link, "{\"a\": 1}") && QFileInfo(link).isSymLink() && FileBytes(real) == "{\"a\": 1}"
+          && (QFileInfo(real).permissions() & (QFileDevice::ReadOther | QFileDevice::WriteGroup)) == 0 && (QFileInfo(real).permissions() & QFileDevice::ReadGroup),
+          "atomic write through a symlink: link %d", QFileInfo(link).isSymLink());
+    if( nFail == nFail0 ) OK("Load from another set programs it, the set stays the target (Live Setting Update writes the set whole, never the other); Save elsewhere is a copy; w/o settings not compared; symlink and mode kept");
+  }
+
+  void UnsavedEditsAtStart(){
+    printf("== Start with settings not in the set: asked once (default Start anyway), saved only when sure, put back if the start fails\n");
+    int nFail0 = nFail;
+    NewWorkDir(); AddBoards(20, 1); NewFSUDAQ();
+    Open();
+    w->chkSaveData->setChecked(true);
+    CHECK(w->SaveSetProtocol(settingsPath), "run protocol not saved to the set");
+    const QString file0 = settingsPath + "/Digi-15880_PSD.bin", proto = settingsPath + "/run_protocol.json";
+    const QByteArray fileBefore = FileBytes(file0);
+    Reg thr = DPP::PSD::TriggerThreshold;
+    const uint32_t fileThr = Word(file0, thr, 2);
+    auto StartStop = [&](){ w->AutoRun(); QString d = w->RunFolder(); if( w->inDataRun ){ Pump(100); w->StopPressed(); } return d; };
+
+    fake_caen_set_reg(15880, 0x10A8, 0x3C);   // a temperature: never a difference
+    dialogs.clear();
+    w->AutoRun();
+    CHECK(w->inDataRun && dialogs.isEmpty(), "nothing edited: run %d, dialogs %s", w->inDataRun, qPrintable(dialogs.join(" | ")));
+    Pump(100); w->StopPressed();
+
+    //---- an edit: asked, Enter starts this run only; the snapshot has it, the set not
+    w->digi[0]->WriteRegister(DPP::PSD::TriggerThreshold, 0x55, 2);
+    dialogs.clear();
+    QString runDir = StartStop();
+    CHECK(Dialogs("Settings not saved") == 1 && dialogs.join("|").contains("=> Start anyway (this run only)"), "the default is not Start anyway: %s", qPrintable(dialogs.join(" | ")));
+    CHECK(Word(runDir + "/" + QFileInfo(runDir).fileName() + "_15880_PSD.bin", thr, 2) == 0x55 && FileBytes(file0) == fileBefore, "snapshot or set wrong after Start anyway");
+    CHECK(Log().contains(QString::asprintf("Digi-15880: 0x%04X TriggerThreshold ch2: file 0x%08X, board 0x%08X", ThrAddr(2), fileThr, 0x55u)), "the register is not named in the log");
+    //---- the same again: not asked, said in the log
+    dialogs.clear();
+    StartStop();
+    CHECK(dialogs.isEmpty() && Log().contains("Unsaved changes kept for this run only"), "asked again for the same changes: %s", qPrintable(dialogs.join(" | ")));
+    //---- a per-run protocol field: never asked, in the run's copy
+    w->sbLedDelaySec->setValue(3.5);
+    dialogs.clear();
+    runDir = StartStop();
+    CHECK(dialogs.isEmpty() && ReadJson(runDir + "/" + QFileInfo(runDir).fileName() + "_run_protocol.json")["ledDelaySec"].toDouble() == 3.5, "per-run field: dialogs %s", qPrintable(dialogs.join(" | ")));
+    //---- a new difference (a set field of the protocol, and 32 registers): asked; Cancel
+    answers["Settings not saved"] = "Cancel";
+    w->sbFileSizeMB->setValue(300);
+    w->digi[0]->WriteRegister(DPP::PSD::ShortGateWidth, 0x21, -1);
+    w->digi[0]->WriteRegister(DPP::PSD::LongGateWidth, 0x61, -1);
+    const unsigned int run0 = w->runID;
+    dialogs.clear();
+    w->AutoRun();
+    CHECK(!w->inDataRun && Dialogs("Settings not saved") == 1 && w->runID == run0 && dialogs.join("|").contains("the run protocol"), "Cancel: run %d, dialogs %s", w->inDataRun, qPrintable(dialogs.join(" | ")));
+    CHECK(Log().contains("Digi-15880: ... and 13 more") && Log().contains("maxFileSizeMB: set "), "the log is not capped or lacks the protocol field");
+    answers.clear();
+    dialogs.clear();
+    StartStop();   // Start anyway (the default)
+    //---- Live Setting Update on: the check still compares the board with the file (and does not write it first)
+    fake_caen_set_reg(15880, ThrAddr(5), 0x99);   // changed behind FSUDAQ's back
+    w->digi[0]->SetSettingFileUpdate(true);
+    const uint32_t fileThr5 = Word(file0, thr, 5);
+    dialogs.clear();
+    StartStop();
+    w->digi[0]->SetSettingFileUpdate(false);
+    CHECK(Dialogs("Settings not saved") == 1 && Log().contains("Live Setting Update is on") && Word(file0, thr, 5) == fileThr5, "Live Setting Update: dialogs %s, file 0x%X", qPrintable(dialogs.join(" | ")), Word(file0, thr, 5));
+
+    //---- "Start anyway", then "Go back" at the run-number question: not remembered, asked again
+    w->digi[0]->WriteRegister(DPP::PSD::TriggerThreshold, 0x5A, 6);
+    {
+      const unsigned int last = w->runID;
+      w->runID = last - 1; w->leRunID->setText(QString::number(last - 1));
+      dialogs.clear();
+      w->AutoRun();
+      CHECK(!w->inDataRun && Dialogs("Settings not saved") == 1 && Dialogs("Run number already used") == 1, "Start anyway + Go back: %s", qPrintable(dialogs.join(" | ")));
+      w->runID = last; w->leRunID->setText(QString::number(last));
+      dialogs.clear();
+      StartStop();
+      CHECK(Dialogs("Settings not saved") == 1, "a start that went back remembered the answer: %s", qPrintable(dialogs.join(" | ")));
+    }
+    //---- Save to set chosen but a set file cannot be read (to keep it): not saved, no run, what was saved put back
+    answers["Settings not saved"] = "Save to set and start";
+    {
+      const QByteArray protoNow = FileBytes(proto);
+      chmod(qPrintable(proto), 0200);
+      dialogs.clear();
+      w->AutoRun();
+      chmod(qPrintable(proto), 0644);
+      CHECK(!w->inDataRun && dialogs.join(" ").contains("cannot read " + proto + " to keep what it holds"), "unreadable set file: run %d, dialogs %s", w->inDataRun, qPrintable(dialogs.join(" | ")));
+      CHECK(FileBytes(proto) == protoNow && FileBytes(file0) == fileBefore, "an unreadable set file was written over, or the board file not put back");
+    }
+    //---- Save to set chosen, then "Go back" at the run-number question: the set untouched
+    answers["Settings not saved"] = "Save to set and start";
+    w->digi[0]->WriteRegister(DPP::PSD::TriggerThreshold, 0x56, 3);
+    const QByteArray protoBefore = FileBytes(proto);
+    {
+      const unsigned int last = w->runID;
+      w->runID = last - 1; w->leRunID->setText(QString::number(last - 1));
+      dialogs.clear();
+      w->AutoRun();
+      CHECK(!w->inDataRun && Dialogs("Settings not saved") == 1 && Dialogs("Run number already used") == 1, "Go back: run %d, dialogs %s", w->inDataRun, qPrintable(dialogs.join(" | ")));
+      CHECK(FileBytes(file0) == fileBefore && FileBytes(proto) == protoBefore, "the set was saved although the start went back");
+      w->runID = last; w->leRunID->setText(QString::number(last));
+    }
+    //---- a settings file that cannot be written: no run
+    chmod(qPrintable(settingsPath), 0555);
+    {
+      const unsigned int last = w->runID;
+      dialogs.clear();
+      w->AutoRun();
+      CHECK(!w->inDataRun && Dialogs("Run not started") == 1 && dialogs.join(" ").contains("cannot write its settings file") && w->runID == last, "unwritable set: run %d, dialogs %s", w->inDataRun, qPrintable(dialogs.join(" | ")));
+    }
+    chmod(qPrintable(settingsPath), 0755);
+    CHECK(FileBytes(file0) == fileBefore, "the unwritable set changed");
+    //---- the start fails after the save: the set put back as it was
+    fake_caen_fail(1443, "malloc");
+    dialogs.clear();
+    w->AutoRun();
+    fake_caen_fail(1443, "");
+    for( int s : Serials ) fake_caen_forget(s);
+    CHECK(!w->inDataRun && FileBytes(file0) == fileBefore && FileBytes(proto) == protoBefore && Log().contains(file0 + " put back as before the start."), "a failed start left the set changed");
+    //---- Save to set and start
+    dialogs.clear();
+    StartStop();
+    CHECK(Dialogs("Settings not saved") == 1 && Word(file0, thr, 3) == 0x56 && ReadJson(proto)["maxFileSizeMB"].toInt() == 300, "Save to set: file 0x%X, protocol %d", Word(file0, thr, 3), ReadJson(proto)["maxFileSizeMB"].toInt());
+    dialogs.clear();
+    StartStop();
+    CHECK(dialogs.isEmpty(), "asked after saving: %s", qPrintable(dialogs.join(" | ")));
+    answers.clear();
+
+    //---- a series: the next run never waits on the question
+    w->sbRunTimeMin->setDecimals(3);
+    w->sbRunTimeMin->setValue(0.01);
+    w->chkRepeatRun->setChecked(true);
+    w->sbRepeatPauseSec->setValue(1);
+    dialogs.clear();
+    w->AutoRun();
+    const unsigned int first = w->runID;
+    CHECK(w->inDataRun && dialogs.isEmpty(), "series: first run %d, dialogs %s", w->inDataRun, qPrintable(dialogs.join(" | ")));
+    CHECK(WaitFor([&](){ return w->pauseTimer->isActive(); }, 3000), "no pause");
+    w->digi[1]->WriteRegister(DPP::PSD::TriggerThreshold, 0x66, 0);   // an edit in the pause (the panel is locked; a script is not)
+    CHECK(WaitFor([&](){ return w->inDataRun && w->runID == first + 1; }, 3000), "the next run of the series did not start");
+    CHECK(dialogs.isEmpty() && Log().contains("this run of the series starts with them"), "series: dialogs %s", qPrintable(dialogs.join(" | ")));
+    w->StopPressed();
+    Pump(1500);
+    w->sbRunTimeMin->setValue(0);
+    w->chkRepeatRun->setChecked(false);
+    w->CloseDigitizers();
+    if( nFail == nFail0 ) OK("default Start anyway; same changes not asked again; per-run field never; new ones asked (Cancel keeps the number); Live Setting Update compared; saved only once sure, put back if the start fails");
+  }
+
+  void SettingsFromRun(){
+    printf("== open with the settings of a run: the run chosen (newest first), snapshots never written, a board without one from the set\n");
+    int nFail0 = nFail;
+    NewWorkDir(); AddBoards(20, 1); NewFSUDAQ();
+    Open();
+    w->chkSaveData->setChecked(true);
+    auto Run = [&](uint32_t threshold, int fileMB){
+      w->sbFileSizeMB->setValue(fileMB);
+      w->digi[0]->WriteRegister(DPP::PSD::TriggerThreshold, threshold, 0);
+      w->AutoRun();
+      CHECK(w->inDataRun, "run with threshold 0x%X did not start (%s)", threshold, qPrintable(dialogs.join(" | ")));
+      QString dir = w->RunFolder();
+      Pump(100); w->StopPressed();
+      return dir;
+    };
+    const QString run1 = Run(0x31, 100), run2 = Run(0x32, 200);
+    const QString name1 = QFileInfo(run1).fileName(), name2 = QFileInfo(run2).fileName();
+    w->CloseDigitizers();
+    QFile::remove(run2 + "/" + name2 + "_62839_PSD.bin");
+    const QByteArray set30508 = FileBytes(settingsPath + "/Digi-30508_PSD.bin");
+    QFile::remove(settingsPath + "/Digi-30508_PSD.bin");   // the set lacks a board the run has
+
+    QList<FSUDAQ::SettingsRun> runs = FSUDAQ::RunsWithSnapshots(dataPath);
+    CHECK(runs.size() == 2 && runs[0].name == name2 && runs[1].name == name1 && runs[0].boards == 5 && runs[1].boards == 6,
+          "runs with snapshots: %lld, first %s", (long long) runs.size(), runs.isEmpty() ? "-" : qPrintable(runs[0].name));
+
+    w->sbFileSizeMB->setValue(300);
+    const QString snap2 = run2 + "/" + name2 + "_15880_PSD.bin";
+    const QByteArray snap2Bytes = FileBytes(snap2);
+    const QByteArray protoBytes2 = FileBytes(run2 + "/" + name2 + "_run_protocol.json");
+
+    //---- the default: the newest run
+    w->cbOpenMethod->setCurrentIndex(w->cbOpenMethod->findData(2));
+    dialogs.clear();
+    w->OpenDigitizers();
+    w->UpdateRunControls();
+    CHECK(Dialogs("Settings from a run") == 1 && dialogs.join("|").contains("Settings from a run: " + name2), "the run question: %s", qPrintable(dialogs.join(" | ")));
+    CHECK(w->nDigi == 6 && w->openedFromRun == name2, "opened from %s", qPrintable(w->openedFromRun));
+    CHECK(fake_caen_reg(15880, ThrAddr(0)) == 0x32, "Digi-15880 holds threshold 0x%X, run %s had 0x32", fake_caen_reg(15880, ThrAddr(0)), qPrintable(name2));
+    CHECK(Dialogs("Settings files") == 1 && w->BoardsNotProgrammed().isEmpty(), "missing snapshot: dialogs %s, not programmed %s", qPrintable(dialogs.join(" | ")), qPrintable(w->BoardsNotProgrammed().join(",")));
+    const QString log = Log();
+    CHECK(log.contains("Opening with the settings from run " + name2) && log.contains("Digi-15880: programmed from run " + name2 + ", " + snap2)
+          && log.contains("Digi-62839: run " + name2 + " has no settings snapshot of it") && log.contains("Digi-62839: programmed from settings set settings, " + settingsPath + "/Digi-62839_PSD.bin"),
+          "the log does not say where each board's settings came from");
+    for( unsigned int i = 0; i < w->nDigi; i++ ){
+      const int s = w->digi[i]->GetSerialNumber();
+      const QString target = settingsPath + "/Digi-" + QString::number(s) + "_PSD.bin";
+      const QString from = s == 62839 ? target : run2 + "/" + name2 + "_" + QString::number(s) + "_PSD.bin";
+      CHECK(QString::fromStdString(w->digi[i]->GetSettingFileName()) == target && QString::fromStdString(w->digi[i]->GetLoadedFromFile()) == from, "Digi-%d: settings file %s, programmed from %s", s, w->digi[i]->GetSettingFileName().c_str(), w->digi[i]->GetLoadedFromFile().c_str());
+    }
+    CHECK(w->sbFileSizeMB->value() == 200 && log.contains("maxFileSizeMB: 300 -> 200") && !QFileInfo::exists(settingsPath + "/run_protocol.json"),
+          "run protocol of the run: file size %g, set protocol %s", w->sbFileSizeMB->value(), QFileInfo::exists(settingsPath + "/run_protocol.json") ? "written" : "absent");
+    //---- edits go to the set's file, never to the run
+    Reg thr = DPP::PSD::TriggerThreshold;
+    w->OpenDigiSettings();
+    w->digiSettings->ID = 0;
+    w->digiSettings->chkCoupledSettingFile->setChecked(true);   // as the panel does it: the whole file first
+    w->digi[0]->WriteRegister(DPP::PSD::TriggerThreshold, 0x39, 1);
+    w->digiSettings->chkCoupledSettingFile->setChecked(false);
+    CHECK(FileBytes(snap2) == snap2Bytes && FileBytes(run2 + "/" + name2 + "_run_protocol.json") == protoBytes2, "a file of run %s was written", qPrintable(name2));
+    CHECK(Word(settingsPath + "/Digi-15880_PSD.bin", thr, 1) == 0x39
+          && FileBytes(settingsPath + "/Digi-15880_PSD.bin") == QByteArray((const char *) w->digi[0]->GetSettings(), SETTINGSIZE * 4), "Live Setting Update: the set's file is not the board's whole image");
+    //---- the board the set lacks: compared with its snapshot, offered to the set
+    answers["Settings not saved"] = "Save to set and start";
+    dialogs.clear();
+    w->AutoRun();
+    const QString run3 = w->RunFolder();
+    Pump(100); w->StopPressed();
+    answers.clear();
+    CHECK(Dialogs("Settings not saved") == 1 && dialogs.join("|").contains("Digi-30508") && Log().contains("Digi-30508: not in the set (" + settingsPath + "/Digi-30508_PSD.bin); compared with " + run2),
+          "the board without a file in the set: dialogs %s", qPrintable(dialogs.join(" | ")));
+    CHECK(FileBytes(settingsPath + "/Digi-30508_PSD.bin").size() == SETTINGSIZE * 4 && FileBytes(run2 + "/" + name2 + "_30508_PSD.bin") != QByteArray(), "Save did not put Digi-30508 into the set");
+    (void) set30508;
+    QJsonObject rf = RunFile(run3, QFileInfo(run3).fileName() + "_run.json");
+    QJsonObject rc = rf["run_control"].toObject();
+    CHECK(rc["opened_with"].toString() == "settings from run " + name2 && rc["settings_set"].toObject()["name"].toString() == "settings" && rc["settings_path"].toString() == settingsPath,
+          "run file: opened_with \"%s\"", qPrintable(rc["opened_with"].toString()));
+    w->CloseDigitizers();
+
+    //---- another run chosen, its run protocol missing: kept, and said
+    QFile::remove(run1 + "/" + name1 + "_run_protocol.json");
+    answers["Settings from a run"] = name1;
+    dialogs.clear();
+    w->OpenDigitizers();
+    w->UpdateRunControls();
+    CHECK(w->openedFromRun == name1 && fake_caen_reg(15880, ThrAddr(0)) == 0x31 && Dialogs("Settings files") == 0, "run %s chosen: opened from %s, threshold 0x%X", qPrintable(name1), qPrintable(w->openedFromRun), fake_caen_reg(15880, ThrAddr(0)));
+    CHECK(Log().contains("Run " + name1 + " has no run protocol"), "missing run protocol not said");
+    answers.clear();
+    w->CloseDigitizers();
+
+    //---- no run with snapshots: nothing opened
+    NewWorkDir(); AddBoards(); NewFSUDAQ();
+    w->cbOpenMethod->setCurrentIndex(w->cbOpenMethod->findData(2));
+    dialogs.clear();
+    w->OpenDigitizers();
+    CHECK(w->digi == nullptr && Dialogs("Settings from a run") == 1, "no run: digi %p, dialogs %s", (void *) w->digi, qPrintable(dialogs.join(" | ")));
+    w->cbOpenMethod->setCurrentIndex(w->cbOpenMethod->findData(1));
+    if( nFail == nFail0 ) OK("newest run offered first and named; boards from its snapshots, the one without from the set (warned); protocol restored, not saved; run files untouched; a board the set lacks offered to it");
+  }
+
+  void RunCopies(){
+    printf("== the run folder: programSettings.txt (secrets masked) and the run protocol beside the snapshots\n");
+    int nFail0 = nFail;
+    NewWorkDir(); AddBoards();
+    delete w; w = nullptr;
+    {
+      QFile f(work + "/programSettings.txt");
+      f.open(QIODevice::WriteOnly | QIODevice::Text);
+      f.write((dataPath + "\n\n\nSECRETTOKEN123\n\n\n\n\nPWD456\nsettingsPath=" + settingsPath + "\nautoIncrementRunID=1\nautoDashboard=0\n").toUtf8());
+    }
+    NewFSUDAQ();
+    Open();
+    w->chkSaveData->setChecked(true);
+    dialogs.clear();
+    w->AutoRun();
+    CHECK(w->inDataRun, "the run did not start (%s)", qPrintable(dialogs.join(" | ")));
+    const QString runDir = w->RunFolder(), name = QFileInfo(runDir).fileName();
+    Pump(100); w->StopPressed();
+    const QByteArray copy = FileBytes(runDir + "/" + name + "_programSettings.txt");
+    CHECK(!copy.isEmpty() && !copy.contains("SECRETTOKEN123") && !copy.contains("PWD456") && copy.count("masked in the run's copy") == 2
+          && copy.startsWith((dataPath + "\n").toUtf8()) && copy.contains(("settingsPath=" + settingsPath + "\n").toUtf8()), "programSettings copy:\n%s", copy.constData());
+    QJsonObject proto = ReadJson(runDir + "/" + name + "_run_protocol.json");
+    QJsonObject rf = RunFile(runDir, name + "_run.json");
+    QJsonObject rc = rf["run_control"].toObject(), led = rf["led"].toObject();
+    QJsonObject protoNoFormat = proto; protoNoFormat.remove("format");
+    CHECK(proto["format"].toString() == "FSUDAQ run protocol 1" && rc["run_protocol"].toObject() == protoNoFormat && rc["run_protocol_file"].toString() == name + "_run_protocol.json", "the run protocol copy and the run file differ");
+    CHECK(proto["maxFileSizeMB"].toInt() == rc["file_size_mb"].toInt() && proto["runLengthMin"].toDouble() == rc["run_length_min"].toDouble()
+          && proto["ledTrigger"].toBool() == led["enabled"].toBool() && proto["ledDelaySec"].toDouble() == led["delay_s"].toDouble() && proto["ledHoldSec"].toDouble() == led["hold_s"].toDouble(),
+          "run protocol copy disagrees with run_control/led");
+    QJsonObject b0 = rf["boards"].toArray().first().toObject();
+    CHECK(!b0["settings_file"].toString().isEmpty() && b0["programmed_from"].toString() == b0["settings_file"].toString() && rc["opened_with"].toString() == "settings set settings"
+          && rc["settings_set"].toObject()["path"].toString() == settingsPath, "run file: settings_file %s, programmed_from %s, opened_with %s", qPrintable(b0["settings_file"].toString()), qPrintable(b0["programmed_from"].toString()), qPrintable(rc["opened_with"].toString()));
+
+    //---- the copy cannot be made: no run, as for a snapshot
+    const unsigned int before = w->runID;
+    chmod(qPrintable(work + "/programSettings.txt"), 0);
+    dialogs.clear();
+    w->AutoRun();
+    chmod(qPrintable(work + "/programSettings.txt"), 0644);
+    CHECK(!w->inDataRun && Dialogs("Run not started") == 1 && dialogs.join(" ").contains("programSettings.txt") && w->runID == before,
+          "unreadable programSettings.txt: run %d, dialogs %s", w->inDataRun, qPrintable(dialogs.join(" | ")));
+    w->CloseDigitizers();
+    if( nFail == nFail0 ) OK("token and password masked, the rest as on disk; run protocol copy = run file's; set and source in the run file; a copy that cannot be made stops the start");
+  }
+
   void BoardClocks(){
     printf("== board clocks (PLL): checked after the open, at Start and at Stop; a board not locked refuses Start; a loss in the run is a stop problem\n");
     int nFail0 = nFail;
@@ -1284,7 +1784,17 @@ int main(int argc, char ** argv){
         for( QAbstractButton * x : box->buttons() ) if( x->text().remove('&') == answers[box->windowTitle()] ) b = x;
       }
       if( !b && !box->buttons().isEmpty() ) b = box->buttons().first();
+      if( b ) dialogs.last() += " => " + b->text().remove('&');
       if( b ) b->click(); else box->done(0);
+    }else if( auto * in = qobject_cast<QInputDialog *>(m) ){
+      // a choice: the item starting with the answer for its title, else the one preselected
+      if( answers.contains(in->windowTitle()) ){
+        if( in->comboBoxItems().isEmpty() ) in->setTextValue(answers[in->windowTitle()]);   // a name asked for
+        for( const QString & item : in->comboBoxItems() ) if( item.startsWith(answers[in->windowTitle()] + " ") ) in->setTextValue(item);
+      }
+      dialogs << in->windowTitle() + ": " + in->textValue();
+      printf("         [dialog] %s: %s\n", qPrintable(in->windowTitle()), qPrintable(in->textValue()));
+      in->accept();
     }else if( auto * d = qobject_cast<QDialog *>(m) ){
       dialogs << d->windowTitle() + ": (dialog)";
       d->accept();
@@ -1325,6 +1835,12 @@ int main(int argc, char ** argv){
   t.ReadLongerThanBuffer();
   t.LedTriggerAndRunFile();
   t.BoardClocks();
+  t.SettingsSets();
+  t.SaveAsNewSet();
+  t.PanelKeepsTheSet();
+  t.UnsavedEditsAtStart();
+  t.SettingsFromRun();
+  t.RunCopies();
 
   delete t.w;
   QDir(t.work).removeRecursively();

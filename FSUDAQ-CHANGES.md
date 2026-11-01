@@ -15,3 +15,17 @@ running -> all six boards answer (no PLL loss, run 0). Both launchers (`FSUDAQ`,
 inert so far (no "truncating" messages). Recovery recipe after ANY DAQ crash: close every CAEN
 program, `rm /dev/shm/CAENV_LCK_*`, then reopen; power-cycle only if a board still does not
 answer the probe.
+
+### 1 Nov: settings sets, run protocol, Start check (branch feature/run-settings, not yet on odin)
+Settings live in named sets: folders of `Digi-<serial>_<DPP>.bin` plus `run_protocol.json` beside the
+active one (`settingsPath`, e.g. .../PSI_2026_DAQtest_settings/cosmics; programSettings.txt unchanged).
+Open choices: "w/ settings set" (default), "w/ settings from a run..." (snapshots and protocol of a run;
+a board without a snapshot from the set, warned), "w/o settings". Save, Live Setting Update and
+"Save to set" always write the board's file in the active set (a run snapshot or another file loaded
+is never written); new "Save as new set..." and "Save protocol to set". Run protocol per set; Repeat is
+never restored. Start compares boards (and the set's protocol fields) with the set and asks once for
+new differences: default "Start anyway (this run only)"; series runs log only. Every saved run folder
+now also holds `<prefix>_<run>_run_protocol.json` and `<prefix>_<run>_programSettings.txt` (token and
+password masked); snapshots are read back after calibration and derived registers (PHA fine gain,
+QDC aggregation). Settings files are written atomically (through symlinks, mode kept). Live Setting
+Update no longer writes read-only registers into the file. Check on the hardware: tests/README.md item 8.
