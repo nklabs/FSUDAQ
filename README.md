@@ -118,6 +118,8 @@ User must setup the data path for data take. Without the data path, user still c
   - `<prefix>_<run>_<serial>_<DPP>_<tick>_<index>.fsu` <- data files, a new index at the roll-over size
   - `<prefix>_<run>_<serial>_<DPP>.bin` <- each board's settings, read back from the board at the start
   - `<prefix>_<run>_run.json` <- the run file: everything about the run that is not data (below)
+  - `<prefix>_<run>_summary.json` <- written by the online dashboard when the run is over: what it computed
+    (totals, histograms, rate history, problems, whether it saw the whole run); online/README.md "Run summary"
 
 The `.bin` snapshots are the boards' register memory as FSUDAQ loads it; the run file is the same
 read-back in words, with the rest of the run's settings, so a run can be understood later without

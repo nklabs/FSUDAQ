@@ -10,10 +10,64 @@ FSUDAQ finds it on its port. Its output goes to `online/dashboard.log`; to stop 
 `pkill -f online_dashboard.py`.
 
 **runs ▾** on the page lists the recorded runs in the data path (newest first, with their
-start, comment and size) and loads one for a look, or any run folder given by its path: it
-is read whole, and **back to live** returns to the run being taken. A run FSUDAQ starts
-takes the dashboard back to live by itself. The **size** slider scales text and plots
-(kept in the browser; `?size=1.5` in the link sets it).
+start, comment, size and summary). **summary** shows that run's summary in this browser only,
+under a banner "Recorded run … — summary, not live" with **Back to live**; everyone else keeps
+the live view, and none of the live checks is applied to it (`#summary=<run folder>` in the link
+opens it). **re-read (odin)** (odin and ssh tunnels only) reads a run folder whole again, also
+one given by its path, and shows it to every viewer; **back to live** returns to the run being
+taken, and a run FSUDAQ starts takes the dashboard back to live by itself. The **size** slider
+scales text and plots (kept in the browser; `?size=1.5` in the link sets it).
+
+#### Run summary
+
+**Only the dashboard on port 8050 (FSUDAQ's) writes summaries and backfills** by default: an
+instance on another port writes nothing into the run folders unless started with `--summaries`.
+Test instances: use a copy of the data, or `--no-summaries`.
+
+When the dashboard has processed a run to its end (FSUDAQ said it stopped, its run file has the
+stop, or no file was written for 5 min and FSUDAQ did not say the run goes on), it writes
+`<run folder>/<run folder name>_summary.json`, whole (a hidden temporary file, then a rename; the
+folder's modification time is kept, since the newest run folder is found by it). A run that
+turns out to go on is written again at its end, and so is one whose run file changes after (FSUDAQ
+records the stop and its comment after telling the dashboard). A failed write is shown at the top
+of the page and tried again a minute later. `GET /summary?run=<run folder name>` serves it to
+anyone (only a bare folder name directly in the data path is taken), with the run file as it is
+now, and `stale` if the data files changed since; `summary: null` if there is none.
+
+| key | what |
+|---|---|
+| `format`, `version`, `written_at`, `source` | `live` (a reading that began while the run was being taken: a mid-run start, and a re-read of the run being taken, too), `read_after_end` (began on a run already over: its stop recorded, or 5 min quiet; e.g. after a restart), `load` (re-read on odin of a run already over), `replay`, `backfill` (made afterwards) |
+| `dashboard`, `reading` | the commit and host; when the reading began and whether from the run's start |
+| `run` | name, number, prefix, start, stop, comments, `duration_s` (run file), LED, clock, `end`: `stopped` / `guess` (no stop recorded) / `replay` / `interrupted` (the next run started before the end was processed: what was processed is written, with `unread_bytes` of the data files' `bytes` not yet scanned and `finder_lag_s`; never for a look at another run, nor while the run is open) |
+| `data` | files, bytes, `t0_s` (board-clock second of the first hit read: 0 of every time below), `first_s`, `last_s`, `span_s`, `rate_span_s` (the mean rates' span, without far-off times), hits counted, hits in the finder |
+| `complete`, `incomplete`, `caveats` | whether this reading counted every hit of the run's files; why not (`started_mid_run`, `next_run_started`, `cleared`, `window_changed`, `tasks_lost`, `boards_not_analysed`, `analysis_errors`, `unreadable_files`); notes that do not make it incomplete (late hits, data problems in the files, no stop recorded, a reference change, `setup_unknown`, `problems_unwatched` (the page showed another run for a while), `config_not_json` (NaN/Infinity kept as text), `history_partial`: hits outside the history, from before a mid-run start or with far-off times) |
+| `setup`, `setup_known`, `setup_at_run_time` | the analysis setup the summary was computed with: the experiment config file and its content, path and sha256 of cabling, gains, offsets, map and the finder's own files (`handoff_meta.json`: threshold, K, sigmas, plane positions; `channels.csv`; `pion_light.csv`), the analysis code's sha256 (`code`), beam setting, bunch window, reference slot, boards, waits, and `identity` (a hash of what changes the results). A live summary has the setup in force while the run was taken (`setup_known: true`); any other reading uses the setup of its own time: `setup_known: false`, `setup_at_run_time: "unknown"` and a caveat, unless it equals the live reading's (`previous_live.setup`) |
+| `scope` | over what each part counts: per-channel hits always the whole reading; the finder since the last Clear or window change |
+| `boards`, `channels` | hits, `mean_rate_hz` (hits / `rate_span_s`), late and early hits; per board also files, bytes, counter gaps, damaged bytes |
+| `finder`, `histograms`, `occupancy` | the finder's counts by result, accepted tracks, setup and window; every histogram of the Tracker tab with its edges and unit |
+| `history` | hits per board and the finder's bunches by result over the whole run, in 10 s steps (merged to at most 720 points); `covered_s` is the data time of each point, so count / `covered_s` is its rate |
+| `problems_at_end`, `problems_during_reading` | what the page warned of at the end, and during the reading (first and last time, steps, episodes; at most 50 kinds) |
+| `settings` | file names of the run file, FSUDAQ's per-run copies of the program settings and run protocol (when there), the boards' `.bin`; the setup files, window and waits used. No registers are copied |
+| `previous_live` | when a later reading of the run (also of more files than it had: then `files_changed: true`) (backfill, re-read, replay, a restarted dashboard) replaced a summary: the most recent live summary's own knowledge, carried on: `source`, `written_at`, `reading`, `complete`, `incomplete`, `caveats`, `end`, `setup`, `problems_during_reading`, `problems_note`, `aggregate_events` |
+| `backfill_tried` | a backfill re-read these files and was kept out (it covered no more): `fingerprint`, `at`, its `incomplete` reasons; not tried again until the files change |
+| `fingerprint`, `units` | the data files' number and size it describes; units (times in s of data time, rates in Hz) |
+
+A reading that is not live never replaces a live summary made with another setup. Older runs
+without a summary get one between runs: only when FSUDAQ is not taking a run (no `/run` without
+`/stopped` while FSUDAQ runs; the current and newest folders stopped or quiet for 5 min; and, from
+the disk, neither the newest run folder nor the one with the highest number has a run file without
+a stop that grew in the last 12 h while FSUDAQ runs: a dashboard restarted during a long beam pause
+still holds off) and the
+dashboard has nothing left to process, and only after 2 min of that. One run at a time, newest
+first, a child process (`--summarise`, the same reading code) runs at nice 19 with idle I/O
+priority and is killed the moment a run starts (no file is left half written; the run is tried
+again later). Once every run has a summary, runs whose summary is incomplete (and not made by a
+backfill) are read again whole, once per set of files, and only with the same setup as the live
+reading's (else the run list says why): the new summary replaces the old one unless
+it covers less (more reasons), and keeps what the live reading saw in `previous_live`. A summary
+is never replaced by an incomplete one when it was complete. A run that cannot be read is skipped
+with the reason, shown in the run list.
+`--no-backfill` turns this off, `--no-summaries` all summary writing.
 
 The track finder is the handoff in `finder/` (`online_finder.py`, `INTERFACE.md`, the
 momentum map, channel table, one-track light and constants), kept unchanged as the
@@ -90,5 +144,5 @@ the history before Oct 2026.
 
 Tests: `python3 ../tests/test_online.py` runs the file following against simulated boards
 (late channels, pauses, roll-over, damage, counter gaps and wrap, a run recorded again, a start
-mid-run or after the run, the analysis falling behind, a killed worker, FSUDAQ's run file) and checks every number,
-and every rate shown, against the hits written.
+mid-run or after the run, the analysis falling behind, a killed worker, FSUDAQ's run file, the run
+summary and its backfill, GET /summary) and checks every number, and every rate shown, against the hits written.
