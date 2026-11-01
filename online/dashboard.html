@@ -19,7 +19,7 @@
   .toolbar { display:flex; gap:14px; align-items:center; flex-wrap:wrap; margin:0 0 10px; color:var(--muted); }
   .toolbar select, .toolbar button, .card select, .card label { font:calc(12px * var(--k, 1)) system-ui, sans-serif; }
   .toolbar select, .card select { background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:4px; padding:1px 4px; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(340px, 1fr)); gap:10px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(min(calc(340px * var(--k, 1)), 100%), 1fr)); gap:10px; }   /* wider cards for larger text */
   .card { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:8px 10px; min-width:0; overflow-x:auto; }
   .card h2 { font-size:calc(12px * var(--k, 1)); margin:0 0 4px; color:var(--muted); font-weight:600; letter-spacing:.02em; }
   .card h2 b { color:var(--fg); font-weight:600; }
@@ -28,12 +28,14 @@
   table { border-collapse:collapse; width:100%; font-variant-numeric:tabular-nums; }
   th, td { text-align:right; padding:2px 6px; border-bottom:1px solid var(--line); white-space:nowrap; }
   th:first-child, td:first-child { text-align:left; }
-  td.l { text-align:left; white-space:normal; }       /* text cells wrap: a warning at the end of a row stays visible */
+  td.l { text-align:left; white-space:normal; overflow-wrap:anywhere; }   /* text cells wrap, long paths too: a warning at the end of a row stays visible */
+  th { white-space:normal; }                          /* column names wrap rather than push the table past the card */
   th { color:var(--muted); font-weight:600; }
   .big { font-size:calc(22px * var(--k, 1)); font-weight:600; font-variant-numeric:tabular-nums; }
   .tiles { display:flex; gap:22px; flex-wrap:wrap; margin-bottom:10px; }
   .tile small { display:block; color:var(--muted); }
   .warn { color:var(--heavy); font-weight:600; }
+  .big.good { color:var(--good); }
   .warnbox { border:1px solid var(--heavy); border-radius:6px; padding:6px 10px; margin:0 0 10px; background:var(--card); }
   .note { color:var(--muted); font-size:calc(11px * var(--k, 1)); margin-top:2px; }
   .legend span { display:inline-block; margin-right:10px; }
@@ -45,7 +47,7 @@
   .ctl input[type=number] { width:64px; font:calc(12px * var(--k, 1)) system-ui, sans-serif; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:4px; padding:0 3px; }
   #c_q, #c_psd, .cmpgrid canvas.zoomable { cursor:crosshair; }
   /* channels side by side: one panel each, as many per row as fit */
-  .cmpgrid { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:8px; }
+  .cmpgrid { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(calc(280px * var(--k, 1)), 100%), 1fr)); gap:8px; }
   .cmpgrid .p { border:1px solid var(--line); border-radius:4px; padding:4px 6px; min-width:0; }
   .cmpgrid .ph { display:flex; align-items:center; gap:6px; font-size:calc(12px * var(--k, 1)); }
   .cmpgrid .ph b { flex:1; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -66,7 +68,10 @@
   .card.tall2 canvas { height:calc(520px * var(--k, 1)); }
   .card.collapsed > :not(.bar) { display:none; }
   .card.collapsed .bar { margin:0; }
+  .card.newrow { grid-column-start:1; }               /* starts a row of its own (after .w2: keeps its width) */
   .card.dragging { opacity:.4; }
+  .newrow-drop { margin:8px 0 0; padding:14px; border:2px dashed var(--muted); border-radius:6px; color:var(--muted); text-align:center; }
+  .newrow-drop.drop { border-color:var(--fg); color:var(--fg); }
   .card.drop { outline:2px dashed var(--muted); outline-offset:2px; }
   @media (max-width: 720px) { .card.w2, .card.wfull { grid-column:auto; } }
   [hidden] { display:none !important; }
@@ -102,11 +107,11 @@
 </div>
 <div class="banner" id="banner"></div>
 <div class="tiles">
+  <div class="tile"><span class="big" id="t_lag">–</span><small id="t_lag_note">track finder behind by (s of data)</small></div>
   <div class="tile"><span class="big" id="t_hits">–</span><small id="t_hits_note">hits / s, all channels</small></div>
   <div class="tile"><span class="big" id="t_mb">–</span><small>MB / s written</small></div>
   <div class="tile"><span class="big" id="t_gb">–</span><small>this run, GB in files</small></div>
   <div class="tile"><span class="big" id="t_disk">–</span><small>disk free</small></div>
-  <div class="tile"><span class="big" id="t_lag">–</span><small>track finder behind by (s of data)</small></div>
 </div>
 <div class="tabs"><button data-tab="daq" class="on">DAQ channels</button><button data-tab="trk">Tracker (track finder)</button></div>
 
@@ -140,7 +145,7 @@
         <span>Ctrl-click a bar above or a panel of the grid below to add or remove a channel</span></div>
       <div class="cmpgrid" id="cmp" data-card></div><div class="note" id="note_cmp"></div></div>
     <div class="card wfull"><h2>Pulse height on every channel</h2>
-      <div class="ctl"><label><input type="checkbox" id="grid_log" checked> log y</label>
+      <div class="ctl"><label><input type="checkbox" id="grid_own" checked> each scaled to its own peak</label><label><input type="checkbox" id="grid_log" checked> log y</label>
         <span id="grid_note"></span></div>
       <canvas id="c_grid"></canvas></div>
     <div class="card"><h2>Time since the previous hit on the same channel · <b class="chname">–</b></h2>
@@ -360,7 +365,7 @@ document.getElementById('win_apply').onclick = applyWindow;
 winIn.oninput = ()=>{ winIn.dataset.edited = '1'; };
 winIn.onkeydown = e=>{ if(e.key==='Enter') applyWindow(); };
 document.getElementById('btn_clear').onclick = async ()=>{ await fetch('/clear'); document.getElementById('clear_note').textContent='cleared at '+new Date().toLocaleTimeString(); await tick(); fetchChannel(); };
-['occ_mode','occ_log','q_log','dt_log','spec_which','grid_log'].forEach(id=>document.getElementById(id).onchange=()=>{ if(id==='spec_which') fetchChannel(); else draw(); });
+['occ_mode','occ_log','q_log','dt_log','spec_which','grid_log','grid_own'].forEach(id=>document.getElementById(id).onchange=()=>{ if(id==='spec_which') fetchChannel(); else draw(); });
 
 let lastOK = null, MBPS = null, BYTES = [];   // when /state last answered; the MB/s, from (server time, run bytes) of the last ~10 s
 async function tick(){
@@ -446,15 +451,20 @@ function draw(){
   document.getElementById('t_hits').textContent = fmt(D.total_rate);
   const slowN = D.total_rate==null ? 0 : D.slots.filter(s=>s.rate==null && s.written).length;
   document.getElementById('t_hits_note').textContent = 'hits / s, all channels' + (slowN ? ` (without ${slowN} slow channels, not known yet)` : '');
-  document.getElementById('t_mb').textContent = MBPS==null ? '–' : MBPS.toFixed(1);
+  document.getElementById('t_mb').textContent = mbText(MBPS);
   document.getElementById('t_gb').textContent = (D.run_bytes/1e9).toFixed(2);
   document.getElementById('t_disk').textContent = D.disk ? (D.disk.free_gb/1e3).toFixed(2)+' TB' : '–';
   const behind = D.backpressure || (D.lag_s!=null && D.lag_s>30);
-  const tl=document.getElementById('t_lag'); tl.textContent = D.lag_s==null ? '–' : D.lag_s.toFixed(1);
-  tl.className = 'big' + (behind ? ' warn' : '');
+  const tl=document.getElementById('t_lag'); tl.textContent = D.lag_s==null ? '–' : D.lag_s.toFixed(1) + ' s';
+  tl.className = 'big' + (behind ? ' warn' : D.lag_s!=null ? ' good' : '');
+  const tn=document.getElementById('t_lag_note');
+  tn.textContent = 'track finder behind the newest data on disk' + (D.lag_s==null ? '' : behind ? ' · FALLING BEHIND' : ' · keeping up');
+  tn.className = behind ? 'warn' : '';
   if(tab==='daq') drawDaq(); else drawTrk();
 }
 
+// MB/s with the decimals a slow run needs (0.042, not 0.0): two significant figures below 1 MB/s
+function mbText(v){ return v==null ? '–' : v >= 1 ? v.toFixed(1) : v > 0 ? (v >= 0.01 ? v.toFixed(3) : v.toPrecision(2)) : '0.000'; }
 function drawDaq(){
   const D=S.daq, slots=D.slots;
   document.querySelectorAll('.chname').forEach(e=>e.textContent = slotName(slots.find(s=>s.slot===selSlot)));
@@ -522,8 +532,7 @@ function drawDaq(){
   document.getElementById('note_spec').textContent = `Hits counted in 10 µs bins, Fourier transformed over ${D.n_windows} windows of 0.33 s. Random hits give 1; a pulser or a modulated beam gives peaks at its frequency and harmonics (12 Hz resolution, up to 50 kHz).`;
   // data and processing
   const row=(k,v)=>`<tr><td>${k}</td><td class="l">${v}</td></tr>`;
-  const mbps = parseFloat(document.getElementById('t_mb').textContent);
-  const hoursLeft = D.disk && mbps>0 ? D.disk.free_gb*1e3/mbps/3600 : null;
+  const hoursLeft = D.disk && MBPS>0 ? D.disk.free_gb*1e3/MBPS/3600 : null;
   document.getElementById('t_data').innerHTML =
     row('run folder', S.folder||'–') + row('files', D.files.toLocaleString()) + row('data', (D.run_bytes/1e9).toFixed(2)+' GB') +
     row('disk', D.disk ? `${(D.disk.free_gb).toFixed(0)} GB free of ${(D.disk.total_gb).toFixed(0)} GB` + (hoursLeft!==null ? ` · full in ${hoursLeft<2?warn(hoursLeft.toFixed(1)+' h'):hoursLeft.toFixed(1)+' h'} at the current rate` : '') : '–') +
@@ -652,7 +661,8 @@ let GRID_BOXES = [];
 function drawGrid(){
   const gc = document.getElementById('c_grid'); if(gc.closest('.card').classList.contains('collapsed')) return;
   if(!GRID){ message('c_grid','loading…'); return; }
-  const {g,w,h}=setupCanvas('c_grid'), ylog=document.getElementById('grid_log').checked;
+  const {g,w,h}=setupCanvas('c_grid'), ylog=document.getElementById('grid_log').checked, own=document.getElementById('grid_own').checked;
+  const mxAll = Math.max(0, ...GRID.slots.map(sl=>Math.max(0, ...sl.counts)));   // one scale for every panel (unticked)
   const boards = S.boards.map(b=>b.serial), L=Math.round(84*K), T=2, ncol=16, rowH=(h-T)/Math.max(1,boards.length), cw=(w-L)/ncol;
   const e=GRID.edges, tx = GRID.log ? (v=>Math.log10(Math.max(v,1))) : (v=>v), xa=tx(e[0]), xb=tx(e[e.length-1]);
   GRID_BOXES = [];
@@ -663,7 +673,7 @@ function drawGrid(){
     const x=L+sl.ch*cw, y=T+i*rowH, bw=cw-4, bh=rowH-4, top=13, col=BOARD_COLOR[i%BOARD_COLOR.length];
     GRID_BOXES.push({x, y, w:cw, h:rowH, slot:sl.slot});
     g.strokeStyle = sl.slot===selSlot ? css('--sel') : css('--line'); g.lineWidth = sl.slot===selSlot ? 2 : 1; g.strokeRect(x+1.5, y+1.5, bw, bh);
-    const tot = sl.counts.reduce((a,b)=>a+b,0), mx = Math.max(...sl.counts);
+    const tot = sl.counts.reduce((a,b)=>a+b,0), mx = own ? Math.max(...sl.counts) : mxAll;
     g.fillStyle=css('--muted'); g.textAlign='left'; g.fillText('ch'+sl.ch, x+5, y+12); g.textAlign='right'; g.fillText(tot?sinum(tot):'', x+bw-2, y+12);
     if(!mx) continue;
     const py0=y+bh, ph=bh-top-2, lm=Math.log10(1+mx);
@@ -671,7 +681,7 @@ function drawGrid(){
     sl.counts.forEach((c,k)=>{ const v = ylog ? Math.log10(1+c)/lm : c/mx, yy=py0-v*ph;
       const xl=x+2+(tx(e[k])-xa)/(xb-xa)*(bw-2), xr=x+2+(tx(e[k+1])-xa)/(xb-xa)*(bw-2); g.lineTo(xl, yy); g.lineTo(xr, yy); });
     g.lineTo(x+bw, py0); g.closePath(); g.fill(); g.globalAlpha=1; }
-  document.getElementById('grid_note').textContent = `Q ${VIEW.lo}–${VIEW.hi} (${GRID.log?'log':'linear'} x, ${e.length-1} bins), the range of the pulse-height plot · each panel scaled to its own peak · number: hits in range · click a panel to pick that channel`;
+  document.getElementById('grid_note').textContent = `Q ${VIEW.lo}–${VIEW.hi} (${GRID.log?'log':'linear'} x, ${e.length-1} bins), the range of the pulse-height plot · ${own ? 'each panel scaled to its own peak' : `one y scale for all panels (peak ${sinum(mxAll)})`} · number: hits in range · click a panel to pick that channel`;
 }
 document.getElementById('c_grid').onclick = ev=>{ const r=ev.target.getBoundingClientRect(), x=ev.clientX-r.left, y=ev.clientY-r.top;
   const b=GRID_BOXES.find(b=>x>=b.x && x<b.x+b.w && y>=b.y && y<b.y+b.h);
@@ -751,7 +761,9 @@ const defaults = Object.fromEntries(cards.map(c => [c.dataset.id, {w: Math.max(0
 const defaultOrder = Object.fromEntries(grids.map(gr => [gr.dataset.grid, [...gr.children].map(c=>c.dataset.id)]));
 function saveLayout(){
   const L = { order:Object.fromEntries(grids.map(gr=>[gr.dataset.grid, [...gr.children].map(c=>c.dataset.id)])), w:{}, h:{}, c:{} };
-  for(const c of cards){ L.w[c.dataset.id]=+c.dataset.w||0; L.h[c.dataset.id]=+c.dataset.h||0; L.c[c.dataset.id]=c.classList.contains('collapsed'); }
+  L.r = {};
+  for(const c of cards){ L.w[c.dataset.id]=+c.dataset.w||0; L.h[c.dataset.id]=+c.dataset.h||0; L.c[c.dataset.id]=c.classList.contains('collapsed');
+                         if(c.classList.contains('newrow')) L.r[c.dataset.id]=true; }
   store.set(LAYOUT_KEY, L);
 }
 function setSize(c, w, h){ c.dataset.w = w; c.dataset.h = h;
@@ -763,8 +775,16 @@ function applyLayout(L){
     const def=defaultOrder[gr.dataset.grid];   // a card added since the layout was saved goes in after its default neighbour
     def.forEach((id,k)=>{ if(!want.includes(id)){ const at = k ? want.indexOf(def[k-1])+1 : 0; want.splice(at, 0, id); } });
     for(const id of want) gr.appendChild(byId[id]); }
-  for(const c of cards){ const id=c.dataset.id; setSize(c, (L.w||{})[id] ?? defaults[id].w, (L.h||{})[id]||0); c.classList.toggle('collapsed', !!(L.c||{})[id]); }
+  for(const c of cards){ const id=c.dataset.id; setSize(c, (L.w||{})[id] ?? defaults[id].w, (L.h||{})[id]||0); c.classList.toggle('collapsed', !!(L.c||{})[id]);
+                         c.classList.toggle('newrow', !!(L.r||{})[id]); }
 }
+// below each grid while a card is dragged: drop it there and it starts a new row (dropped on a card, it joins that row)
+const rowDrops = Object.fromEntries(grids.map(gr=>{ const d=document.createElement('div'); d.className='newrow-drop'; d.hidden=true;
+  d.textContent='drop here: this card starts a new row'; gr.after(d);
+  d.addEventListener('dragover', e=>{ if(!dragCard || dragCard.dataset.grid!==gr.dataset.grid) return; e.preventDefault(); d.classList.add('drop'); cards.forEach(x=>x.classList.remove('drop')); });
+  d.addEventListener('dragleave', ()=>d.classList.remove('drop'));
+  d.addEventListener('drop', e=>{ if(!dragCard || dragCard.dataset.grid!==gr.dataset.grid) return; e.preventDefault(); gr.appendChild(dragCard); dragCard.classList.add('newrow'); });
+  return [gr.dataset.grid, d]; }));
 let dragCard = null;
 for(const c of cards){
   const h2 = c.querySelector('h2'), bar = document.createElement('div'); bar.className = 'bar';
@@ -775,11 +795,14 @@ for(const c of cards){
   btn('–', 'collapse / expand', ()=>c.classList.toggle('collapsed'));
   h2.addEventListener('mousedown', ()=>{ c.draggable = true; });
   h2.addEventListener('mouseup', ()=>{ c.draggable = false; });
-  c.addEventListener('dragstart', e=>{ dragCard=c; c.classList.add('dragging'); e.dataTransfer.effectAllowed='move'; e.dataTransfer.setData('text/plain', c.dataset.id); });
-  c.addEventListener('dragend', ()=>{ c.classList.remove('dragging'); c.draggable=false; dragCard=null; cards.forEach(x=>x.classList.remove('drop')); saveLayout(); draw(); });
+  c.addEventListener('dragstart', e=>{ dragCard=c; c.classList.add('dragging'); e.dataTransfer.effectAllowed='move'; e.dataTransfer.setData('text/plain', c.dataset.id);
+    rowDrops[c.dataset.grid].hidden=false; });
+  c.addEventListener('dragend', ()=>{ c.classList.remove('dragging'); c.draggable=false; dragCard=null; cards.forEach(x=>x.classList.remove('drop'));
+    Object.values(rowDrops).forEach(d=>{ d.hidden=true; d.classList.remove('drop'); }); saveLayout(); draw(); });
   c.addEventListener('dragover', e=>{ if(!dragCard || dragCard===c || dragCard.dataset.grid!==c.dataset.grid) return; e.preventDefault(); cards.forEach(x=>x.classList.toggle('drop', x===c)); });
   c.addEventListener('drop', e=>{ if(!dragCard || dragCard===c || dragCard.dataset.grid!==c.dataset.grid) return; e.preventDefault();
-    const kids=[...c.parentElement.children]; c.parentElement.insertBefore(dragCard, kids.indexOf(dragCard) < kids.indexOf(c) ? c.nextSibling : c); });
+    const kids=[...c.parentElement.children]; c.parentElement.insertBefore(dragCard, kids.indexOf(dragCard) < kids.indexOf(c) ? c.nextSibling : c);
+    dragCard.classList.remove('newrow'); });
 }
 document.getElementById('layout_reset').onclick = ()=>{ try { localStorage.removeItem(LAYOUT_KEY); } catch(e){} applyLayout({}); draw(); };
 applyLayout(store.get(LAYOUT_KEY, {}));

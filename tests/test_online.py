@@ -655,6 +655,9 @@ def scenario_finished_at_start(tmp):
         wait_tasks(online)
     st = online.state()
     good = check(st["status"].startswith("last run (already finished") and not st["live_start"], f"finished: status '{st['status']}'")
+    # all of it is on disk: every second of every board known (a slow pair once blanked the rate lines of a finished run)
+    good &= check(st["daq"]["seconds"] and all(x is not None for s in st["daq"]["seconds"] for x in s["boards"]),
+                  "finished: board rates not known in a run that is over")
     good &= check_daq(online, boards, SERIALS, "finished")
     fin, late, tot = check_partition(online, boards, "finished")
     good &= check(late == 0 and not same_finder(online.acc, offline(online, boards, SERIALS)), "finished: finder not as one pass")

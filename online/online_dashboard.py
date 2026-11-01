@@ -90,6 +90,7 @@ BATCH_HITS = 4_000_000                        # hits per DAQ task
 INDEX_WORDS = 32 << 20                        # words of a file indexed per step at most (128 MB): a big run
                                               # already on disk is read over several steps
 LATE_RECENT_S = 60                            # the page shows late hits of the last minute too
+SLOW_KNOWN_S = 300                            # a channel pair silent this long is taken to have nothing more to write
 FINISHED_QUIET_S = 300                        # a folder no file of which was written for this long: a finished run
                                               # (when its run file has no stop entry: an older run, or FSUDAQ died)
 
@@ -1175,9 +1176,15 @@ class Online:
     def _known_until(self, bi, slow, couple=None):
         """The first second (board clock) whose count of board bi (or of one couple of it) is not known yet:
         a couple that does not hold the finder back (slow, see _complete_seconds) but has written has its
-        hits on disk only up to its newest time. (Its newest seconds were drawn as 0 Hz, 1 Nov 2026.)"""
+        hits on disk only up to its newest time. (Its newest seconds were drawn as 0 Hz, 1 Nov 2026.) Not in
+        a run that is over (all of it is on disk), and not for a couple silent for SLOW_KNOWN_S (taken to
+        have nothing more: one that stopped for good blanked its board's rate for the rest of the run)."""
+        if self.mode == "stopped":
+            return 1 << 62
         b = self.boards[self.serials[bi]]
-        cs = [c for c in range(8) if (bi, c) in slow and b.newest[c] >= 0 and (couple is None or c == couple)]
+        now = self.clock()
+        cs = [c for c in range(8) if (bi, c) in slow and b.newest[c] >= 0 and (couple is None or c == couple)
+              and now - b.newest_wall[c] < SLOW_KNOWN_S]
         return min((int(b.newest[c]) // PS for c in cs), default=1 << 62)
 
     def channel(self, sl, view=None, light=False):
@@ -1198,7 +1205,7 @@ class Online:
             nbc = self.setup.chans.board_channels
             secs, slow = self._complete_seconds()
             known = self._known_until(sl // nbc, slow, (sl % nbc) // 2)
-            if self.boards[self.serials[sl // nbc]].newest[(sl % nbc) // 2] < 0:
+            if self.boards[self.serials[sl // nbc]].newest[(sl % nbc) // 2] < 0 and self.mode != "stopped":
                 known = -(1 << 62)              # its pair has written nothing yet: a first buffer may be filling, no rate known
             rates = [[s - t0s, int(self.secs[s][sl])] for s in secs if s < known]
             lo, hi, nb, log = view or (0, 65536, 4096, False)
