@@ -93,7 +93,7 @@
   #inspect { color:var(--heavy); font-weight:600; }
   body.viewonly [data-load], body.viewonly #runs_go, body.viewonly #live_btn { opacity:.45; pointer-events:none; }
   /* a recorded run's summary, in this browser only: nothing live is shown meanwhile, and that is said at the top */
-  body.summary .tiles, body.summary .tabs, body.summary #tab_daq, body.summary #tab_trk, body.summary #banner,
+  body.summary .tiles, body.summary .tabs, body.summary #tab_daq, body.summary #tab_trk, body.summary #tab_bvm, body.summary #banner,
   body.summary h1 .st, body.summary #inspect, body.summary #live_btn { display:none !important; }
   body:not(.summary) #sumbar, body:not(.summary) #tab_sum { display:none !important; }
   .sumbar { margin:0 0 10px; padding:8px 12px; border:2px solid var(--rec); border-left-width:8px; border-radius:6px; background:var(--recbg); }
@@ -127,7 +127,7 @@
   <div class="tile"><span class="big" id="t_gb">–</span><small>this run, GB in files</small></div>
   <div class="tile"><span class="big" id="t_disk">–</span><small>disk free</small></div>
 </div>
-<div class="tabs"><button data-tab="daq" class="on">DAQ channels</button><button data-tab="trk">Tracker (track finder)</button></div>
+<div class="tabs"><button data-tab="daq" class="on">DAQ channels</button><button data-tab="trk">Tracker (track finder)</button><button data-tab="bvm">Beam vs map</button></div>
 
 <section id="tab_daq">
   <div class="toolbar">
@@ -201,6 +201,19 @@
     <div class="card"><h2>Hits per bunch</h2><canvas id="c_nh"></canvas></div>
     <div class="card"><h2>Finder results (since Clear)</h2><table id="t_status"></table></div>
     <div class="card"><h2>Finder setup</h2><table id="t_setup"></table></div>
+  </div>
+</section>
+
+<section id="tab_bvm" hidden>
+  <div class="warnbox" id="bvm_warn" hidden></div>
+  <div class="grid" data-grid="bvm">
+    <div class="card"><h2>Published by the floor tool</h2><table id="t_bvm_pub"></table><div class="note" id="note_bvm_pub"></div></div>
+    <div class="card"><h2>Momentum of accepted tracks: live against expected (each scaled to unit area, MeV/c)</h2>
+      <canvas id="c_bvm_p"></canvas><div class="legend" id="leg_bvm_p"></div><table id="t_bvm_p"></table><div class="note" id="note_bvm_p"></div></div>
+    <div class="card"><h2>T0: hits per channel, live against expected (share of the plane)</h2><canvas id="c_bvm_t0"></canvas><div class="legend" id="leg_bvm_t0"></div><table id="t_bvm_t0"></table><div class="note" id="note_bvm_t0"></div></div>
+    <div class="card"><h2>T1: hits per channel, live against expected (share of the plane)</h2><canvas id="c_bvm_t1"></canvas><div class="legend" id="leg_bvm_t1"></div><table id="t_bvm_t1"></table><div class="note" id="note_bvm_t1"></div></div>
+    <div class="card"><h2>T2: hits per channel, live against expected (share of the plane)</h2><canvas id="c_bvm_t2"></canvas><div class="legend" id="leg_bvm_t2"></div><table id="t_bvm_t2"></table><div class="note" id="note_bvm_t2"></div></div>
+    <div class="card"><h2>What the comparison can and cannot say</h2><table id="t_bvm_cav"></table></div>
   </div>
 </section>
 
@@ -379,7 +392,8 @@ function boardIndex(serial){ return S ? S.boards.findIndex(b=>b.serial===serial)
 
 function showTab(t){ tab=t; store.set('fsudaq-tab', t);
   document.querySelectorAll('.tabs button').forEach(b=>b.classList.toggle('on', b.dataset.tab===t));
-  document.getElementById('tab_daq').hidden = t!=='daq'; document.getElementById('tab_trk').hidden = t!=='trk'; draw(); }
+  document.getElementById('tab_daq').hidden = t!=='daq'; document.getElementById('tab_trk').hidden = t!=='trk';
+  document.getElementById('tab_bvm').hidden = t!=='bvm'; if(t==='bvm') fetchBvm(); draw(); }
 document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>showTab(b.dataset.tab));
 
 function fillSelects(){
@@ -502,7 +516,7 @@ function draw(){
   const tn=document.getElementById('t_lag_note');
   tn.textContent = 'track finder behind the newest data on disk' + (D.lag_s==null ? '' : behind ? ' · FALLING BEHIND' : ' · keeping up');
   tn.className = behind ? 'warn' : '';
-  if(tab==='daq') drawDaq(); else drawTrk();
+  if(tab==='daq') drawDaq(); else if(tab==='trk') drawTrk(); else drawBvm();
 }
 
 // MB/s with the decimals a slow run needs (0.042, not 0.0): two significant figures below 1 MB/s
@@ -795,6 +809,88 @@ function drawTrk(){
     row('late hits', S.late ? warn(`${S.late.toLocaleString()} hits reached the disk after their time was processed: not in the finder`) +
         ` · ${S.late_recent.toLocaleString()} in the last minute` : 'none') +
     (S.early ? row('before the start', `${S.early.toLocaleString()} hits from before the dashboard started: not in the finder`) : '');
+}
+
+// ---------------------------------------------------------------- beam vs map: the floor tool's published expectation (GET /expected)
+// Live view only: a recorded run's summary is not compared with today's publish (its settings may not be the run's).
+let BVM = null, bvmSeq = 0;
+async function fetchBvm(){
+  const my = ++bvmSeq; let d = null;
+  try { const r = await fetch('/expected', {cache:'no-store'}); if(r.ok) d = await r.json(); } catch(e){}
+  if(my !== bvmSeq) return;
+  BVM = d || {error:'no answer from the dashboard (an analysis older than this page has no Beam vs map)'};
+  if(tab==='bvm') draw();
+}
+function ageText(iso){ const t = Date.parse(iso); if(!isFinite(t)) return '–'; const s = Math.max(0, (Date.now()-t)/1000);
+  return s < 120 ? `${s.toFixed(0)} s ago` : s < 7200 ? `${(s/60).toFixed(0)} min ago` : s < 172800 ? `${(s/3600).toFixed(1)} h ago` : `${(s/86400).toFixed(1)} days ago`; }
+const f2 = (v, d) => v==null || !isFinite(v) ? '–' : (+v).toFixed(d);
+function drawBvm(){
+  const B = BVM, row = (k,v)=>`<tr><td>${k}</td><td class="l">${v}</td></tr>`, W = document.getElementById('bvm_warn');
+  const ids = ['c_bvm_p','c_bvm_t0','c_bvm_t1','c_bvm_t2'];
+  if(!B){ ids.forEach(id=>message(id,'loading…')); return; }
+  const P = B.published, C = B.compare;
+  if(!P){
+    W.hidden = false; W.innerHTML = warn(esc(B.error || 'nothing published yet')) + ' — the floor tool\'s <b>Publish to online</b> writes it (' + esc(B.path||'') + ').';
+    ids.forEach(id=>{ message(id, 'nothing published'); PLOTS[id]=null; });
+    ['t_bvm_pub','t_bvm_p','t_bvm_t0','t_bvm_t1','t_bvm_t2','t_bvm_cav'].forEach(id=>document.getElementById(id).innerHTML='');
+    return;
+  }
+  const S = P.settings || {}, X = B.context || {}, L = B.live || {};
+  const top = (C ? C.mismatch : []).map(m=>`<div>${warn('NOT COMPARABLE: ' + esc(m))}</div>`).join('') +
+    (B.error ? `<div>${warn(esc(B.error))}</div>` : '') +
+    (X.inspect ? `<div>${warn('The dashboard shows a recorded run (re-read on odin), compared with the current publish.')}</div>` : '');
+  W.hidden = !top; W.innerHTML = top;
+  const sp = S.species ? Object.entries(S.species).map(([k,v])=>`${esc(k)} ${f2(100*v,1)} %`).join(' · ') : '–';
+  const fm = (P.map||{}).finder_map;
+  document.getElementById('t_bvm_pub').innerHTML =
+    row('published', `${esc((P.published_at||'').replace('T',' ').slice(0,19))} UTC · ${ageText(P.published_at)}`) +
+    row('field', S.field_T==null ? '–' : `${f2(S.field_T,3)} T (pole centre)` + (L.map_field_T!=null ? ` · live map built for ${f2(L.map_field_T,3)} T` : '')) +
+    row('setting', `${esc(S.setting ?? 'none (tables at neither preset)')} · live finder: ${esc(L.setting)}${L.setting_given ? '' : ' (assumed)'}`) +
+    row('beam', `p₀ ${f2(S.p0_MeV,1)} MeV/c · dp/p ${f2(100*S.dp_p_fwhm,2)} % FWHM · rate ${S.rate_hz==null ? '–' : hzfmt(S.rate_hz)}`) +
+    row('mix', `${esc(S.species_mode || '–')}: ${sp}`) +
+    row('threshold', `${f2(S.threshold_MeVee,3)} MeVee in the tool · ${num(S.n_beam)} beam particles simulated`) +
+    row('map read', fm ? `${esc(fm.path)} · sha256 ${esc(String(fm.sha256_lf).slice(0,12))}… · live ${esc(String(L.map_sha256_lf).slice(0,12))}…` +
+        (fm.sha256_lf===L.map_sha256_lf ? ' · the same' : ' · ' + warn('different')) : warn('not named')) +
+    row('tool', esc(P.tool_commit || 'not from git'));
+  document.getElementById('note_bvm_pub').textContent = `Live numbers count ${X.counted || '–'} (${num(X.bunches)} bunches). The last Publish wins: one file for everyone.`;
+  // momentum
+  const M = C && C.momentum;
+  if(M && M.live && M.expected){
+    plot('c_bvm_p', {x0:0, x1:1000, series:[{kind:'bars', edges:M.edges, y:M.live, color:ST_COLOR.unique, gap:0},
+                                           {kind:'step', edges:M.edges, y:M.expected, color:css('--fg'), width:2}], ylabel:'share per 10 MeV/c'});
+    legend('leg_bvm_p', [{name:'live hist_p', color:ST_COLOR.unique}, {name:'expected (published, read with the ' + (M.read_with==='finder_map' ? "live finder's" : "tool's") + ' map)', color:css('--fg')}]);
+    document.getElementById('t_bvm_p').innerHTML = '<tr><th></th><th>live</th><th>expected</th><th>live − expected</th></tr>' +
+      `<tr><td>mean (MeV/c)</td><td>${f2(M.mean.live,1)}</td><td>${f2(M.mean.expected,1)}</td><td>${f2(M.mean.diff,1)}</td></tr>` +
+      `<tr><td>sd (MeV/c)</td><td>${f2(M.sd.live,1)}</td><td>${f2(M.sd.expected,1)}</td><td>${f2(M.sd.diff,1)}</td></tr>`;
+    document.getElementById('note_bvm_p').textContent = `${num(M.live_tracks)} live accepted tracks. Mean and sd from the bins' centres, both alike ` +
+      `(the publish's own, from the exact momenta before any correction: ${f2(M.published_mean_MeV,1)} ± ${f2(M.published_sd_MeV,1)}). Electron correction: ${M.electron_correction}.`;
+  } else { message('c_bvm_p', M ? 'no live accepted track yet' : 'not compared (see the notes)'); PLOTS.c_bvm_p=null; legend('leg_bvm_p', []);
+    document.getElementById('t_bvm_p').innerHTML=''; document.getElementById('note_bvm_p').textContent=''; }
+  // planes
+  ['T0','T1','T2'].forEach((t,i)=>{ const Q = C && C.planes[t], id='c_bvm_t'+i, tb=document.getElementById('t_bvm_t'+i), nt=document.getElementById('note_bvm_t'+i);
+    if(!Q){ message(id, 'not in the publish'); PLOTS[id]=null; tb.innerHTML=''; nt.textContent=''; legend('leg_bvm_t'+i, []); return; }
+    const edges=[...Array(Q.n_channels+1).keys()].map(v=>v+0.5), ser=[];
+    if(Q.live_share) ser.push({kind:'bars', edges, y:Q.live_share, color:PLANE_COLOR[i], gap:0.5});
+    ser.push({kind:'step', edges, y:Q.expected_share, color:css('--fg'), width:2});
+    plot(id, {x0:0.5, x1:Q.n_channels+0.5, xfmt:v=>String(Math.round(v)), series:ser, ylabel:'share', empty:'no hits'});
+    legend('leg_bvm_t'+i, [{name:'live occupancy', color:PLANE_COLOR[i]}, {name:'expected', color:css('--fg')}]);
+    tb.innerHTML = '<tr><th></th><th>live</th><th>expected</th></tr>' +
+      `<tr><td>centroid (channel)</td><td>${f2(Q.centroid_ch.live,2)}</td><td>${f2(Q.centroid_ch.expected,2)}</td></tr>` +
+      `<tr><td>width, sd (channels)</td><td>${f2(Q.width_ch.live,2)}</td><td>${f2(Q.width_ch.expected,2)}</td></tr>` +
+      `<tr><td>centroid (mm, lab x)</td><td>${f2(Q.centroid_mm.live,1)}</td><td>${f2(Q.centroid_mm.expected,1)}</td></tr>` +
+      `<tr><td>width, sd (mm)</td><td>${f2(Q.width_mm.live,1)}</td><td>${f2(Q.width_mm.expected,1)}</td></tr>` +
+      `<tr><td>overlap of the shapes</td><td colspan="2">${f2(Q.overlap,3)} (1 = the same shape)</td></tr>`;
+    nt.innerHTML = (L.placeholder ? warn('Shape only — placeholder cabling: the channel numbers are not known to be the detector\'s.') + ' ' : 'Shape only. ') +
+      `${num(Q.live_hits)} live hits. Channels 1-based; mm from the publish's channel spans.` + (Q.note ? ' ' + warn(esc(Q.note)) + '.' : ''); });
+  // caveats
+  const mn = P.meanings || {};
+  document.getElementById('t_bvm_cav').innerHTML =
+    (C ? C.notes : []).map(n=>row('note', esc(n))).join('') +
+    (P.warnings||[]).map(w=>row('the tool warned', warn(esc(w)))).join('') +
+    row('occupancy', 'live: every digitizer hit on a tracker channel (all bunches, no light cut while there are no gains, noise and pile-up included), counted, not a rate; expected: beam particles only, at the tool\'s threshold') +
+    row('momentum', 'live hist_p: accepted tracks (unique, and every track of "tracks"), without bunches the Cherenkov or the entrance veto marked; the tool models no pile-up, noise, veto, time or light tests') +
+    (mn.planes ? row('expected hits', esc(mn.planes)) : '') + (mn.momentum ? row('expected momentum', esc(mn.momentum)) : '') +
+    (mn.events ? row('simulated', esc(mn.events)) : '');
 }
 
 // ---------------------------------------------------------------- card layout (per tab)
@@ -1108,7 +1204,8 @@ function drawSumHists(s){
 }
 
 viewControls();
-showTab(location.hash==='#trk' ? 'trk' : location.hash==='#daq' ? 'daq' : tab);
+showTab(location.hash==='#trk' ? 'trk' : location.hash==='#daq' ? 'daq' : location.hash==='#bvm' ? 'bvm' : tab);
+setInterval(()=>{ if(tab==='bvm' && !SUM) fetchBvm(); }, 5000);
 tick().then(fetchChannel); setInterval(tick, 1000); setInterval(fetchChannel, 2000);
 { const h = location.hash.match(/^#summary=(.+)$/); if(h) openSummary(decodeURIComponent(h[1])); }   // a link to a run's summary
 </script>

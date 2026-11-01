@@ -18,7 +18,38 @@ one given by its path, and shows it to every viewer; **back to live** returns to
 taken, and a run FSUDAQ starts takes the dashboard back to live by itself. The **size** slider
 scales text and plots (kept in the browser; `?size=1.5` in the link sets it).
 
-#### Run summary
+#### Beam vs map
+
+The floor tool (pion-spectrometer-simulations `tool/`, **Publish to online**) writes what the live data
+should look like for the current settings: `~/pion-spectrometer-simulations/tool/published/expected.json`
+(format `floor-tool-expected/1`, its README "Publish to online"; `--beam-expected` gives another path). The
+dashboard reads it again whenever it changes; without one the tab says "nothing published yet", and a
+broken or foreign file is named with the reason. `GET /expected` (open to all, read-only) returns the
+publish's head and the comparison; the **Beam vs map** tab shows it (live view only).
+
+- **Comparable at all?** First, in red: the map the live finder loaded is hashed (sha256 after CRLF → LF,
+  as the tool's `file_identity`) and compared with the publish's `map.finder_map.sha256_lf`; the
+  published `setting` with the finder's; the published field with the field in the live map's
+  `handoff_meta.json`. Any difference: the momenta are not comparable, and it says so. A publish that did
+  not name the finder's map is not comparable either (its momentum was read with the tool's own map).
+- **Hits per channel**, per plane: the live occupancy (the finder's hits per amplifier channel, 1-based)
+  as a share of the plane, against the published `share`. Shape only: with the sequential placeholder
+  cabling the channel numbers are not known to be the detector's, and it says so. Numbers: centroid and
+  width (sd) in channels and in mm (centres of the published `x_lo_mm`/`x_hi_mm`), and the overlap of the
+  two shapes (Σ min of the shares; 1 = the same).
+- **Momentum**: live `hist_p` against the published `read_with_finder_map` histogram (same bins), each
+  scaled to unit area, with mean and sd from the bin centres (both alike) and their difference. The live
+  `hist_p` leaves out bunches the gas Cherenkov marked (status `electron`): when the Cherenkov is cabled in
+  the live finder, the expectation is corrected to match, `per_beam_particle − by_kind["e-"]` (assumed: it
+  marks every electron, `CHERENKOV_E_EFF` = 1, and no muon or pion); without it, no correction. The tab
+  says which.
+- The live numbers count since the reading began (or the last Clear). The tool's warnings and the
+  publish's `meaning` texts are listed; the tool models no noise, pile-up, veto, time or light tests.
+
+A recorded run's summary is not compared with the publish: today's publish need not be the settings of
+that run, so the tab is hidden there.
+
+### Run summary
 
 **Only the dashboard on port 8050 (FSUDAQ's) writes summaries and backfills** by default: an
 instance on another port writes nothing into the run folders unless started with `--summaries`.

@@ -1793,6 +1793,108 @@ def scenario_summary_review2(tmp):
            "a NaN config is kept as text; the writer thread writes; only port 8050 writes by default")
 
 
+def expected_doc(map_sha, setting="high", field=0.2, finder=True, p0=200.0):
+    """A small floor-tool-expected/1 file by hand (tool/README.md "Publish to online"): T0 with 3 channels."""
+    edges = [float(v) for v in ff.P_EDGES]
+    per, ee = [0.0] * (len(edges) - 1), [0.0] * (len(edges) - 1)
+    per[20], per[21], per[22] = 0.2, 0.4, 0.2                  # 200-230 MeV/c
+    ee[21] = 0.2                                               # half of the middle bin are electrons
+    t0 = dict(plane=0, slot="T0", n_channels=3, channels=[1, 2, 3], live=[True] * 3, gang=[0, 0, 0],
+              x_lo_mm=[0.0, 10.0, 20.0], x_hi_mm=[10.0, 20.0, 30.0], share=[0.5, 0.5, 0.0],
+              hits_per_beam_particle={"total": [0.5, 0.5, 0.0]}, hz={"total": [5e4, 5e4, 0.0]},
+              sum_hits_per_beam_particle=1.0, particles_with_a_hit_per_beam_particle=0.9)
+    return {"format": "floor-tool-expected/1", "published_at": "2026-11-01T12:00:00+00:00", "tool_commit": "v1-2-gabc",
+            "settings": dict(meaning="m", field_T=field, current_A=None, setting=setting, table_x_mm={"T0": 1.0}, p0_MeV=p0,
+                             dp_p_fwhm=0.02, rate_hz=1e5, species_mode="psi", species={"pi-": 0.8, "mu-": 0.1, "e-": 0.1},
+                             threshold_MeVee=0.1, n_beam=1000, seed=1),
+            "map": dict(meaning="m", sha256="crlf", sha256_lf="tool-own", bytes=1, rows={}, field_T=field,
+                        finder_map=dict(path="/finder/momentum_map.csv", sha256_lf=map_sha, field_T=field) if finder else None),
+            "planes": {"meaning": "expected hits per channel", "T0": t0},
+            "momentum": dict(meaning="what hist_p should hold", events="1000 simulated", bin_edges_MeV=edges,
+                             kinds=["pi-", "mu-", "e-", "mu- (pi decay)"],
+                             read_with_finder_map=dict(per_beam_particle=per, by_kind={"e-": ee}, mean_MeV=214.0, sd_MeV=8.0)),
+            "warnings": ["transport maps built with a different field"], "setup": {}}
+
+
+def scenario_beam_vs_map(tmp):
+    print("== Beam vs map: the floor tool's published expectation against the live finder")
+    import hashlib
+    good = True
+    edges = [float(v) for v in ff.P_EDGES]
+    hp = [0] * (len(edges) - 1)
+    hp[20], hp[21], hp[22] = 1, 1, 2
+    live = dict(setting="high", setting_given=True, map="/finder/momentum_map.csv", map_sha256_lf="abc", map_field_T=0.2,
+                placeholder=True, cherenkov=True, occupancy=[[0, 1, 2, 1], [0], [0]], hist_p=hp, p_edges=edges)
+    C = od.compare_beam(expected_doc("abc"), live)
+    T = C["planes"]["T0"]
+    close = lambda a, b: a is not None and abs(a - b) < 1e-9   # noqa: E731
+    # by hand: live shares 1/4 1/2 1/4 at channels 1 2 3 (x 5 15 25 mm); expected 1/2 1/2 0
+    good &= check(not C["mismatch"] and T["live_share"] == [0.25, 0.5, 0.25] and close(T["centroid_ch"]["live"], 2.0)
+                  and close(T["width_ch"]["live"], 0.5 ** 0.5) and close(T["centroid_ch"]["expected"], 1.5) and close(T["width_ch"]["expected"], 0.5)
+                  and close(T["centroid_mm"]["live"], 15.0) and close(T["width_mm"]["live"], 50 ** 0.5)
+                  and close(T["centroid_mm"]["expected"], 10.0) and close(T["width_mm"]["expected"], 5.0) and close(T["overlap"], 0.75),
+                  f"bvm: plane shape {T}")
+    # momentum, Cherenkov cabled: 0.2 0.4-0.2 0.2 -> a third each: mean 215, sd sqrt(200/3); live 1 1 2 of 4: mean 217.5, sd sqrt(68.75)
+    M = C["momentum"]
+    good &= check(all(close(a, b) for a, b in zip(M["expected"][20:23], [1 / 3] * 3)) and close(sum(M["expected"]), 1.0)
+                  and close(M["mean"]["expected"], 215.0) and close(M["sd"]["expected"], (200 / 3) ** 0.5)
+                  and close(M["mean"]["live"], 217.5) and close(M["sd"]["live"], 68.75 ** 0.5) and close(M["mean"]["diff"], 2.5)
+                  and "25.0 %" in M["electron_correction"], f"bvm: momentum {M['mean']} {M['sd']} {M['electron_correction']}")
+    M = od.compare_beam(expected_doc("abc"), dict(live, cherenkov=False))["momentum"]
+    good &= check(close(M["mean"]["expected"], 215.0) and close(M["sd"]["expected"], 50 ** 0.5) and "not cabled" in M["electron_correction"],
+                  f"bvm: no Cherenkov, no correction: {M['sd']}")
+    # mismatches: another map, setting, field, no finder map named
+    for doc, word in ((expected_doc("other"), "not the one"), (expected_doc("abc", setting="low"), "setting 'low'"),
+                      (expected_doc("abc", field=0.25), "0.25 T"), (expected_doc("abc", finder=False), "did not name")):
+        mm = od.compare_beam(doc, live)["mismatch"]
+        good &= check(len(mm) == 1 and word in mm[0], f"bvm: mismatch for {word}: {mm}")
+    good &= check(any("placeholder" in n for n in C["notes"]), "bvm: placeholder cabling not said")
+    # the file: missing, not JSON, another format, valid, changed
+    path = os.path.join(tmp, "published", "expected.json")
+    E = od.BeamExpected(path)
+    good &= check(E.get()[0] is None and "nothing published yet" in E.get()[1], f"bvm: missing file: {E.get()}")
+    os.makedirs(os.path.dirname(path))
+    for text, word in (("{ not json", "cannot be used"), (json.dumps({"format": "other/1"}), "not a floor-tool-expected/1")):
+        with open(path, "w") as f:
+            f.write(text)
+        good &= check(E.get()[0] is None and word in (E.get()[1] or ""), f"bvm: bad file {word}: {E.get()[1]}")
+    mp = os.path.join(od.ff.FINDER_DIR, "momentum_map.csv")
+    with open(mp, "rb") as f:
+        sha = hashlib.sha256(f.read().replace(b"\r\n", b"\n")).hexdigest()
+    with open(path, "w") as f:
+        json.dump(expected_doc(sha), f)
+    good &= check(E.get()[0] is not None and E.get()[1] is None, f"bvm: valid file refused: {E.get()[1]}")
+    with open(path, "w") as f:
+        json.dump(expected_doc(sha, p0=250.5), f)
+    good &= check(E.get()[0]["settings"]["p0_MeV"] == 250.5, "bvm: a changed file not read again")
+    # GET /expected for anyone, against a live finder: its map recognised (the same sha256 after CRLF -> LF)
+    folder = os.path.join(tmp, "bvm_run"); os.makedirs(folder)
+    clock = Clock(); boards = boards_for(folder, seed=181)
+    online = make_online(folder, SERIALS, EIGHT, clock, extra=["--beam-expected", path])
+    drive(online, clock, boards, 0, 4)
+    od.Handler.online = online
+
+    class Remote(od.Handler):
+        def local(self):
+            return False
+    srv = od.ThreadingHTTPServer(("127.0.0.1", 0), Remote)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{srv.server_address[1]}/expected") as r:
+            code, d = r.status, json.loads(r.read())
+    finally:
+        srv.shutdown()
+    good &= check(code == 200 and d["live"]["map_sha256_lf"] == sha and d["published"]["settings"]["p0_MeV"] == 250.5
+                  and not d["compare"]["mismatch"] and d["compare"]["planes"]["T0"]["note"].startswith("the live finder has 8 channels")
+                  and d["compare"]["momentum"] is not None, f"bvm: /expected {code} {d.get('error')} {d.get('compare', {}).get('mismatch')}")
+    os.remove(path)
+    good &= check(online.beam_vs_map()["published"] is None and "nothing published" in online.beam_vs_map()["error"], "bvm: removed file")
+    if good:
+        ok("shapes, centroids, widths (channels and mm), overlap and the electron-corrected momentum match the hand-computed "
+           "values; another map, setting, field or no finder map are flagged; missing, broken, foreign, valid and changed files; "
+           "/expected open to all, the live map recognised by its LF sha256")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="fsudaq_test_online_")
     try:
@@ -1803,7 +1905,7 @@ def main():
                    scenario_window, scenario_run_file, scenario_view_only, scenario_rollover_backlog, scenario_quiet_live_start,
                    scenario_summary_at_stop, scenario_summary_incomplete, scenario_backfill, scenario_summary_route,
                    scenario_backfill_reread, scenario_summary_setup_and_restarts, scenario_summary_next_run_and_open,
-                   scenario_summary_review2):
+                   scenario_summary_review2, scenario_beam_vs_map):
             sc(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

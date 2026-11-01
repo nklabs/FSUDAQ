@@ -39,6 +39,11 @@ and its task run again once). The run's setting, cabling, gains and time offsets
 experiment.json (re-read for each run), else the command line; anything missing is a placeholder
 the page says so about.
 
+Beam vs map. The floor tool (pion-spectrometer-simulations tool, Publish to online) writes what the live
+data should look like for the current settings (--beam-expected, read again when it changes); GET
+/expected compares it with the finder: map (sha256 after CRLF -> LF), setting and field first, then
+the occupancy per plane and the momentum histogram as shapes (see compare_beam).
+
 Run summaries. When a reading of a run ends with everything on disk processed (FSUDAQ's /stopped,
 the stop in its run file, or no file written for FINISHED_QUIET_S), what the dashboard computed is
 written to <run folder>/<run folder name>_summary.json (whole: a temporary file, then a rename):
@@ -231,6 +236,178 @@ def setup_identity(setting, record, window_ps, serials, nch):
     return hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:16]
 
 
+# ---------------------------------------------------------------- beam vs map: the floor tool's published expectation
+EXPECTED_FORMAT = "floor-tool-expected/1"     # pion-spectrometer-simulations tool/README.md "Publish to online"
+EXPECTED_DEFAULT = os.path.expanduser("~/pion-spectrometer-simulations/tool/published/expected.json")
+EXPECTED_MAX_BYTES = 50 << 20
+CHERENKOV_E_EFF = 1.0                         # share of electrons whose bunch the gas Cherenkov marks "electron" (assumed:
+                                              # all; muons and pions below its threshold never fire it)
+
+
+def map_identity(path):
+    """sha256 of a momentum map's bytes after CRLF -> LF, as the floor tool's file_identity() (sha256_lf); None if
+    it cannot be read."""
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read().replace(b"\r\n", b"\n")).hexdigest()
+    except (OSError, TypeError):
+        return None
+
+
+def map_field(map_path):
+    """(field_T, where from) of the map the finder loads: the handoff_meta.json beside it, else the finder's."""
+    for meta in (os.path.join(os.path.dirname(os.path.abspath(map_path)), "handoff_meta.json"),
+                 os.path.join(ff.FINDER_DIR, "handoff_meta.json")):
+        try:
+            with open(meta) as f:
+                v = json.load(f).get("field_T")
+            return (None if v is None else float(v)), meta
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+    return None, None
+
+
+class BeamExpected:
+    """The floor tool's expected.json, read again whenever it changes (mtime, size). The tool writes it whole
+    (temp file + rename), so it is never seen half written."""
+
+    def __init__(self, path):
+        self.path, self.key, self.doc, self.error = path, None, None, None
+
+    def get(self):
+        """(document or None, why not: None when there is one)."""
+        try:
+            st = os.stat(self.path)
+        except FileNotFoundError:
+            self.key, self.doc, self.error = None, None, f"nothing published yet ({self.path} not there)"
+            return None, self.error
+        except OSError as ex:
+            return None, f"{self.path} not readable: {ex}"
+        key = (st.st_mtime_ns, st.st_size)
+        if key != self.key:
+            self.key, self.doc, self.error = key, None, None
+            try:
+                if st.st_size > EXPECTED_MAX_BYTES:
+                    raise ValueError(f"too large ({st.st_size:,} bytes)")
+                with open(self.path, encoding="utf-8") as f:
+                    d = json.load(f)
+                if not isinstance(d, dict) or d.get("format") != EXPECTED_FORMAT:
+                    raise ValueError(f"not a {EXPECTED_FORMAT} file (format {d.get('format') if isinstance(d, dict) else None!r})")
+                for k in ("settings", "map", "planes"):
+                    if not isinstance(d.get(k), dict):
+                        raise ValueError(f"no '{k}' block")
+                self.doc = _json_safe(d)[0]
+            except (OSError, ValueError, TypeError) as ex:
+                self.error = f"{os.path.basename(self.path)} cannot be used: {ex}"
+        return self.doc, self.error
+
+
+def _shape_stats(w, x):
+    """Mean and sd of positions x weighted by w (a normalised histogram); (None, None) without weight."""
+    w = np.asarray(w, float); x = np.asarray(x, float)
+    s = w.sum()
+    if not s > 0:
+        return None, None
+    m = float((w * x).sum() / s)
+    return m, float(np.sqrt((w * (x - m) ** 2).sum() / s))
+
+
+def compare_beam(exp, live, cherenkov_eff=CHERENKOV_E_EFF):
+    """The live finder against the floor tool's expectation (pure: tested on its own).
+    live: setting, setting_given, map, map_sha256_lf, map_field_T, placeholder (cabling), cherenkov (cabled),
+    occupancy (the finder's, per plane, index 0 unused), hist_p (counts), p_edges.
+    Returns mismatch (the momentum or channels are not comparable: shown first), notes, planes, momentum."""
+    s, m = exp.get("settings") or {}, exp.get("map") or {}
+    fm = m.get("finder_map")
+    mismatch, notes = [], []
+    if not fm:
+        mismatch.append("the publish did not name the live finder's map: its momentum is read with the tool's own map "
+                        "(not the live one), so the momentum shapes are not comparable")
+    elif fm.get("sha256_lf") != live["map_sha256_lf"]:
+        mismatch.append(f"the map the live finder loaded ({live['map']}, sha256 {str(live['map_sha256_lf'])[:12]}…) is not the "
+                        f"one the publish read ({fm.get('path')}, sha256 {str(fm.get('sha256_lf'))[:12]}…): the momenta are "
+                        "not comparable")
+    if s.get("setting") is None:
+        mismatch.append("the published table positions are at neither slot preset: no finder setting matches them")
+    elif s["setting"] != live["setting"]:
+        mismatch.append(f"the publish is for setting '{s['setting']}', the live finder uses '{live['setting']}'"
+                        + ("" if live["setting_given"] else " (not given in experiment.json: assumed)")
+                        + ": the momenta are not comparable")
+    if s.get("field_T") is not None and live["map_field_T"] is not None and abs(float(s["field_T"]) - live["map_field_T"]) > 1e-6:
+        mismatch.append(f"the publish is for {s['field_T']} T, the live map was built for {live['map_field_T']} T: the momentum "
+                        "numbers are not comparable (another field needs another map)")
+    elif live["map_field_T"] is None:
+        notes.append("the live map's field is not known (no handoff_meta.json): not compared")
+    if not live["setting_given"] and s.get("setting") == live["setting"]:
+        notes.append(f"the live finder's setting '{live['setting']}' is assumed (not given in experiment.json): the agreement "
+                     "with the publish is only as good as that assumption")
+    if live["placeholder"]:
+        notes.append("cabling is the sequential placeholder: the channel numbers are not known to be the detector's, so "
+                     "the per-channel comparison is shape only")
+
+    planes = {}
+    for name, P in (exp.get("planes") or {}).items():
+        if not isinstance(P, dict) or "plane" not in P:
+            continue
+        i, n = int(P["plane"]), int(P["n_channels"])
+        occ = live["occupancy"][i][1:] if i < len(live["occupancy"]) else []
+        note = "" if len(occ) == n else f"the live finder has {len(occ)} channels on this plane, the publish {n}"
+        L = (list(occ) + [0] * n)[:n]
+        tot = float(sum(L))
+        ls = [v / tot for v in L] if tot > 0 else None
+        es = [float(v) for v in P["share"]]
+        ch = list(range(1, n + 1))
+        xc = [(float(a) + float(b)) / 2 for a, b in zip(P["x_lo_mm"], P["x_hi_mm"])]
+        lm, lsd = _shape_stats(ls, ch) if ls else (None, None)
+        em, esd = _shape_stats(es, ch)
+        lmm, lsdmm = _shape_stats(ls, xc) if ls else (None, None)
+        emm, esdmm = _shape_stats(es, xc)
+        planes[name] = dict(plane=i, n_channels=n, live_hits=int(tot), live_share=ls, expected_share=es, note=note,
+                            x_lo_mm=P["x_lo_mm"], x_hi_mm=P["x_hi_mm"],
+                            centroid_ch=dict(live=lm, expected=em), width_ch=dict(live=lsd, expected=esd),
+                            centroid_mm=dict(live=lmm, expected=emm), width_mm=dict(live=lsdmm, expected=esdmm),
+                            overlap=None if ls is None else float(sum(min(a, b) for a, b in zip(ls, es))))
+
+    mom = None
+    M = exp.get("momentum")
+    if M:
+        r, which = M.get("read_with_finder_map"), "finder_map"
+        if r is None:
+            r, which = M.get("read_with_tool_map"), "tool_map"
+        edges = [float(v) for v in M.get("bin_edges_MeV") or []]
+        if r is None:
+            notes.append("the publish has no momentum histogram")
+        elif len(edges) != len(live["p_edges"]) or any(abs(a - b) > 1e-9 for a, b in zip(edges, live["p_edges"])):
+            notes.append("the published momentum bins are not the live hist_p's: not compared")
+        else:
+            e = np.asarray(r["per_beam_particle"], float)
+            ee = np.asarray((r.get("by_kind") or {}).get("e-", [0.0] * e.size), float)
+            # hist_p leaves out bunches where the gas Cherenkov fired (status "electron"): with it cabled, the
+            # electrons it would mark are taken out of the expectation, so both count the same tracks
+            corr = live["cherenkov"] and ee.any()
+            ec = np.clip(e - cherenkov_eff * ee, 0, None) if corr else e
+            lc = np.asarray(live["hist_p"], float)
+            centres = [(a + b) / 2 for a, b in zip(edges, edges[1:])]
+            en = ec / ec.sum() if ec.sum() > 0 else None
+            ln = lc / lc.sum() if lc.sum() > 0 else None
+            em_, esd_ = _shape_stats(en, centres) if en is not None else (None, None)
+            lm_, lsd_ = _shape_stats(ln, centres) if ln is not None else (None, None)
+            mom = dict(edges=edges, read_with=which, expected=None if en is None else en.tolist(),
+                       live=None if ln is None else ln.tolist(), live_tracks=int(lc.sum()),
+                       mean=dict(live=lm_, expected=em_, diff=None if lm_ is None or em_ is None else lm_ - em_),
+                       sd=dict(live=lsd_, expected=esd_, diff=None if lsd_ is None or esd_ is None else lsd_ - esd_),
+                       published_mean_MeV=r.get("mean_MeV"), published_sd_MeV=r.get("sd_MeV"),
+                       electron_correction=(
+                           f"electrons taken out of the expectation (x {cherenkov_eff:g}: by_kind['e-'], their bunches "
+                           "are status electron, not in hist_p): " + f"{100 * float(ee.sum() / e.sum()):.1f} % of it"
+                           if corr and e.sum() > 0 else
+                           "none: the gas Cherenkov is not cabled in the live finder, so electrons stay in hist_p"
+                           if not live["cherenkov"] else "none: the publish expects no accepted electrons"))
+            if which == "tool_map":
+                notes.append("the momentum was read with the tool's own map, not the live finder's")
+    return dict(mismatch=mismatch, notes=notes, planes=planes, momentum=mom)
+
+
 def save_window(path, ns):
     """Write window_ns into the config file, keeping the rest of it. Returns what happened, for the page."""
     if not path:
@@ -345,6 +522,8 @@ class Setup:
                             + (f" and {len(self.chans.uncalibrated) - 12} more" if len(self.chans.uncalibrated) > 12 else "")
                             + ": their hits are left out of the finder")
         self.map_path = cfg["map"] or os.path.join(ff.FINDER_DIR, "momentum_map.csv")
+        self.map_sha256_lf = map_identity(self.map_path)   # the map loaded, as the floor tool identifies it (Beam vs map)
+        self.map_field_T, self.map_meta = map_field(self.map_path)
         self.calibrated = gains is not None
         self.has_offsets = offs is not None
         self.max_offset_ps = int(np.abs(self.chans.toff_ps).max(initial=0))
@@ -631,6 +810,7 @@ class Online:
         self.step_error = None
         self.folder = None
         self.reading = 0                        # counts the readings (reset): a summary is for the reading it was made in
+        self.expected = BeamExpected(a.beam_expected)   # the floor tool's published expectation (Beam vs map)
         self.run_open = None                    # folder of the run FSUDAQ started (GET /run) and has not said stopped
         self.run_open_wall = 0.0
         self.interrupted = None                 # summary of a run followed live, left before its end (written by step)
@@ -1300,6 +1480,36 @@ class Online:
         if self.W is None:
             return None
         return min(t0s) if t0s else self.W
+
+    def beam_vs_map(self):
+        """GET /expected: what the floor tool published (its head) and how the finder's occupancy and momentum
+        now compare with it (compare_beam). The live numbers count since the reading began, or the last Clear."""
+        doc, err = self.expected.get()
+        with self.lock:
+            S, ch = self.setup, self.setup.chans
+            occ, _ = self._occupancy()
+            live = dict(setting=S.setting, setting_given=S.src.get("setting") is not None, map=S.map_path,
+                        map_sha256_lf=S.map_sha256_lf, map_field_T=S.map_field_T, map_meta=S.map_meta,
+                        placeholder=S.cabling.startswith("placeholder"),
+                        cherenkov=bool(ch.installed[ff.COUNTERS.index("cherenkov")]),
+                        occupancy=occ, hist_p=self.acc.h_p.tolist(), p_edges=ff.P_EDGES.tolist())
+            cleared = [e for e in self.agg_events if e["what"] in ("clear", "window")]
+            context = dict(folder=self.folder, inspect=self.inspect if self.inspect == self.folder else None, mode=self.mode,
+                           counted="since the reading began" if not cleared else f"since the last {cleared[-1]['what']} change",
+                           bunches=int(self.acc.n_bunches))
+        out = dict(path=self.expected.path, error=err, published=None, compare=None, context=context,
+                   live={k: v for k, v in live.items() if k not in ("occupancy", "hist_p", "p_edges")})
+        if doc is not None:
+            M = doc.get("momentum") or {}
+            out["published"] = dict(
+                published_at=doc.get("published_at"), tool_commit=doc.get("tool_commit"), settings=doc.get("settings"),
+                map={k: v for k, v in (doc.get("map") or {}).items()}, warnings=doc.get("warnings") or [],
+                meanings=dict(planes=(doc.get("planes") or {}).get("meaning"), momentum=M.get("meaning"), events=M.get("events")))
+            try:
+                out["compare"] = compare_beam(doc, live)
+            except (KeyError, TypeError, ValueError, IndexError) as ex:
+                out["error"] = f"the published file cannot be compared: {ex!r}"
+        return out
 
     def _board_rows(self, now):
         """Per board: files, what is read, late and early hits, and the live checks (state()["boards"])."""
@@ -2724,6 +2934,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(204); self.end_headers(); return
         if path == "/runs":        # the recorded runs, for the page's run list
             return self.reply(200, dict(runs=self.online.runs(), inspect=self.online.inspect, backfill=self.online.backfill_state()))
+        if path == "/expected":    # the floor tool's published expectation against the live finder, for anyone: read-only
+            return self.reply(200, self.online.beam_vs_map())
         if path == "/summary":     # a recorded run's summary, for anyone: read-only, nothing changes for the others
             code, d = self.online.summary_reply(q.get("run", [""])[0])
             return self.reply(code, d)
@@ -2841,6 +3053,8 @@ def parse_args(argv=None):
     p.add_argument("--workers", type=int, default=8, help="worker processes (0 = in the main loop)")
     p.add_argument("--open-browser", action="store_true", help="open the page in the default browser once the server is up")
     p.add_argument("--exit-with-parent", action="store_true", help="stop when the process that started us (FSUDAQ) is gone")
+    p.add_argument("--beam-expected", default=EXPECTED_DEFAULT, help="the floor tool's published expectation (Publish to "
+                   "online: format floor-tool-expected/1), for the page's Beam vs map tab; read again when it changes")
     p.add_argument("--no-summaries", action="store_true", help="write no <run>_summary.json into the run folders (and make none "
                                                                "for older runs)")
     p.add_argument("--summaries", action="store_true", help=f"write run summaries also when not on port {PRODUCTION_PORT}: "
