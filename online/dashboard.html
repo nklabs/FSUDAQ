@@ -6,9 +6,9 @@
 <title>FSUDAQ Online</title>
 <style>
   :root { --bg:#f6f7f9; --fg:#1b1f24; --muted:#5b6470; --line:#d8dde3; --card:#ffffff; --sel:#1b1f24;
-          --heavy:#d1495b; --good:#2a9d8f; }
-  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#101418; --fg:#e6e9ee; --muted:#9aa4b1; --line:#2a323c; --card:#171c22; --sel:#e6e9ee; color-scheme:dark; } }
-  :root[data-theme="dark"] { --bg:#101418; --fg:#e6e9ee; --muted:#9aa4b1; --line:#2a323c; --card:#171c22; --sel:#e6e9ee; color-scheme:dark; }
+          --heavy:#d1495b; --good:#2a9d8f; --rec:#5a3e9c; --recbg:#efeaf8; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#101418; --fg:#e6e9ee; --muted:#9aa4b1; --line:#2a323c; --card:#171c22; --sel:#e6e9ee; --rec:#b9a2ef; --recbg:#221c33; color-scheme:dark; } }
+  :root[data-theme="dark"] { --bg:#101418; --fg:#e6e9ee; --muted:#9aa4b1; --line:#2a323c; --card:#171c22; --sel:#e6e9ee; --rec:#b9a2ef; --recbg:#221c33; color-scheme:dark; }
   body { margin:0; padding:12px 16px; background:var(--bg); color:var(--fg); font:calc(13px * var(--k, 1))/1.35 system-ui, sans-serif; }
   h1 { font-size:calc(16px * var(--k, 1)); margin:0 0 6px; display:flex; gap:14px; align-items:baseline; flex-wrap:wrap; }
   h1 .st { font-weight:normal; color:var(--muted); }
@@ -92,21 +92,34 @@
   .runs tr.shown td { font-weight:600; }
   #inspect { color:var(--heavy); font-weight:600; }
   body.viewonly [data-load], body.viewonly #runs_go, body.viewonly #live_btn { opacity:.45; pointer-events:none; }
+  /* a recorded run's summary, in this browser only: nothing live is shown meanwhile, and that is said at the top */
+  body.summary .tiles, body.summary .tabs, body.summary #tab_daq, body.summary #tab_trk, body.summary #banner,
+  body.summary h1 .st, body.summary #inspect, body.summary #live_btn { display:none !important; }
+  body:not(.summary) #sumbar, body:not(.summary) #tab_sum { display:none !important; }
+  .sumbar { margin:0 0 10px; padding:8px 12px; border:2px solid var(--rec); border-left-width:8px; border-radius:6px; background:var(--recbg); }
+  .sumbar .sumtitle { display:flex; gap:14px; align-items:center; flex-wrap:wrap; font-size:calc(17px * var(--k, 1)); font-weight:700; color:var(--rec); }
+  .sumbar button { font:600 calc(13px * var(--k, 1)) system-ui, sans-serif; padding:3px 12px; border:2px solid var(--rec); border-radius:4px; background:var(--card); color:var(--rec); cursor:pointer; }
+  .sumbar .sub { margin-top:4px; color:var(--fg); }
+  .runs td.sum { white-space:normal; text-align:left; }
+  .runs button { margin-left:4px; }
 </style>
 </head>
 <body>
 <h1>FSUDAQ Online <span class="st" id="folder">–</span> <span id="inspect" hidden>a recorded run, for a look</span> <span class="st" id="status">connecting…</span>
-  <button id="runs_btn" title="Load a recorded run for a look (the run being taken is not analysed meanwhile)">runs ▾</button>
+  <button id="runs_btn" title="Recorded runs: show a run's summary in this browser (live goes on for everyone), or on odin read one again for everyone">runs ▾</button>
   <button id="live_btn" hidden title="Back to the run being taken">back to live</button>
   <button id="layout_reset" title="Put every card back to its original place and size">reset layout</button>
   <label class="sizer" title="Text and plot size (kept in this browser)">size <input type="range" id="size" min="0.7" max="2" step="0.05"><input type="number" class="sizenum" id="sizeval" min="70" max="200" step="1" title="type a size in %, then Enter">%</label></h1>
 <div class="runs" id="runs_panel" hidden>
-  <div class="row"><b>Recorded runs</b><span class="note">newest first; loading one reads it whole, and a run FSUDAQ starts takes the dashboard back to live</span></div>
-  <div class="row"><input id="runs_path" placeholder="or any run folder on odin, e.g. /home/beamtime/FSUDAQ_data/.../test_042"><button id="runs_go">load</button><button id="runs_close">close</button></div>
+  <div class="row"><b>Recorded runs</b><span class="note">newest first. <b>summary</b>: what the dashboard recorded of the run, shown in this browser only (live goes on for everyone).
+    <b>re-read (odin)</b>: reads the run whole again and shows it to every viewer instead of live, until back to live or until FSUDAQ starts a run.</span></div>
+  <div class="row"><input id="runs_path" placeholder="or any run folder on odin, e.g. /home/beamtime/FSUDAQ_data/.../test_042"><button id="runs_go" title="odin only: read this folder for every viewer">re-read (odin)</button><button id="runs_close">close</button></div>
   <div class="note" id="runs_note"></div>
   <div id="runs_list">–</div>
 </div>
 <div class="banner" id="banner"></div>
+<div class="sumbar" id="sumbar"><div class="sumtitle"><span id="sum_title">Recorded run</span><button id="sum_back" title="Show the live analysis again">Back to live</button></div>
+  <div class="sub" id="sum_sub"></div></div>
 <div class="tiles">
   <div class="tile"><span class="big" id="t_lag">–</span><small id="t_lag_note">track finder behind by (s of data)</small></div>
   <div class="tile"><span class="big" id="t_hits">–</span><small id="t_hits_note">hits / s, all channels</small></div>
@@ -188,6 +201,30 @@
     <div class="card"><h2>Hits per bunch</h2><canvas id="c_nh"></canvas></div>
     <div class="card"><h2>Finder results (since Clear)</h2><table id="t_status"></table></div>
     <div class="card"><h2>Finder setup</h2><table id="t_setup"></table></div>
+  </div>
+</section>
+
+<section id="tab_sum">
+  <div class="grid" data-grid="sum">
+    <div class="card"><h2>Recorded run</h2><table id="t_sum_run"></table><div class="note" id="note_sum_run"></div></div>
+    <div class="card"><h2>What this summary covers</h2><table id="t_sum_cov"></table></div>
+    <div class="card wfull"><h2>Hits per digitizer channel, whole run</h2>
+      <div class="ctl"><label>show <select id="sum_chmode"><option value="hits">hits</option><option value="rate">mean rate (Hz)</option></select></label>
+        <label><input type="checkbox" id="sum_chlog" checked> log scale</label></div>
+      <canvas id="c_sum_chan"></canvas><div class="legend" id="leg_sum_chan"></div><div class="note" id="note_sum_chan"></div></div>
+    <div class="card"><h2>Hit rate over the run, all channels and per board (Hz)</h2><canvas id="c_sum_rate"></canvas><div class="legend" id="leg_sum_rate"></div><div class="note" id="note_sum_rate"></div></div>
+    <div class="card"><h2>Bunches per second over the run, by finder result</h2><canvas id="c_sum_status"></canvas><div class="legend" id="leg_sum_status"></div><div class="note" id="note_sum_status"></div></div>
+    <div class="card"><h2>Boards</h2><table id="t_sum_boards"></table></div>
+    <div class="card"><h2>Finder results</h2><table id="t_sum_status"></table><div class="note" id="note_sum_status_t"></div></div>
+    <div class="card"><h2>Momentum of accepted tracks (MeV/c, from the map)</h2><canvas id="c_sum_p"></canvas></div>
+    <div class="card"><h2>Timing of accepted tracks: measured minus expected flight time (ns)</h2><canvas id="c_sum_res"></canvas><div class="legend" id="leg_sum_res"></div></div>
+    <div class="card"><h2>Hit light ÷ expected light of one pion, accepted tracks only</h2><canvas id="c_sum_r"></canvas><div class="legend" id="leg_sum_r"></div></div>
+    <div class="card"><h2>Hits per amplifier channel, by tracker plane</h2><canvas id="c_sum_occ"></canvas><div class="legend" id="leg_sum_occ"></div></div>
+    <div class="card"><h2>Adjacent channels firing together (cluster size)</h2><canvas id="c_sum_cl"></canvas><div class="legend" id="leg_sum_cl"></div></div>
+    <div class="card"><h2>Track candidates per bunch</h2><canvas id="c_sum_ncand"></canvas></div>
+    <div class="card"><h2>Hits per bunch</h2><canvas id="c_sum_nh"></canvas></div>
+    <div class="card wfull"><h2>Problems seen while the run was read</h2><table id="t_sum_prob"></table><div class="note" id="note_sum_prob"></div></div>
+    <div class="card"><h2>Settings and files</h2><table id="t_sum_set"></table></div>
   </div>
 </section>
 
@@ -273,7 +310,7 @@ function plot2d(id, spec){
   g.restore(); g.globalAlpha=1;
   return (PLOTS[id] = {X, Y, L, B, T, R, w, h, max:mx, inv:invX(x0, x1, spec.xlog, L, w-R)});
 }
-function legend(id, items){ document.getElementById(id).innerHTML = items.map(it=>`<span><i style="background:${it.color}"></i>${it.name}</span>`).join(''); }
+function legend(id, items){ document.getElementById(id).innerHTML = items.map(it=>`<span><i style="background:${esc(it.color)}"></i>${esc(it.name)}</span>`).join(''); }
 const sw = c => `<i style="display:inline-block;width:9px;height:9px;background:${c};margin-right:5px"></i>`;
 const warn = t => `<span class="warn">${t}</span>`;
 const esc = t => String(t ?? '').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -301,6 +338,7 @@ const store = { get(k,d){ try { const v=localStorage.getItem(k); return v===null
 
 // ---------------------------------------------------------------- state
 let S = null, CH = null, SPEC_ALL = null, GRID = null;
+let SUM = null;   // the /summary answer of a recorded run shown in this browser instead of live (null: live)
 // the Qlong range and binning the spectrum, the PSD map and the grid show: [lo, hi), kept in this browser
 const NB = {lin:[256, 1024, 4096, 16384], log:[100, 300, 1000]}, NB_DEF = {lin:4096, log:300};
 let VIEW = Object.assign({lo:0, hi:65536, log:false, nb:4096}, store.get('fsudaq-qview', {}));
@@ -370,8 +408,10 @@ document.getElementById('btn_clear').onclick = async ()=>{ await fetch('/clear')
 
 let lastOK = null, MBPS = null, BYTES = [];   // when /state last answered; the MB/s, from (server time, run bytes) of the last ~10 s
 async function tick(){
+  if(SUM) return;   // a recorded run's summary is shown: live is not asked for (nor shown) until Back to live
   let r = null;
   try { const res = await fetch('/state', {cache:'no-store', signal:AbortSignal.timeout(5000)}); if(res.ok) r = await res.json(); } catch(e){ r = null; }
+  if(SUM) return;   // a summary was opened while this was on its way
   if(!r){ document.body.classList.add('stale'); banner(); return; }
   document.body.classList.remove('stale');
   if(S && !(r.server_time > S.server_time)) return;   // an older answer that came late: never over a newer one
@@ -422,7 +462,7 @@ function banner(){
 }
 let chSeq = 0, chOK = null;   // the newest channel request, and when one last came back whole
 async function fetchChannel(){
-  if(selSlot===null) return;
+  if(selSlot===null || SUM) return;
   // only the newest request is drawn, and only for the run it was asked for: a late answer for an older
   // zoom or run would be drawn on the axes and under the name of the current one
   const my = ++chSeq, folder = S ? S.folder : null;
@@ -441,6 +481,7 @@ async function fetchChannel(){
 
 // ---------------------------------------------------------------- drawing
 function draw(){
+  if(SUM){ drawSummary(); return; }
   if(!S) return;
   const D=S.daq;
   banner();
@@ -540,7 +581,11 @@ function drawDaq(){
     row('track finder', D.lag_s==null ? '–' : `${D.lag_s.toFixed(1)} s of data behind the newest on disk`) +
     row('analysis', (D.backpressure ? warn(S.status) : (D.lag_s>60 ? warn('more than a minute behind') : 'keeping up')) +
         ` · ${S.workers} workers (${S.kernels}), ${D.in_flight} tasks out` + (S.oldest_task_s!=null ? `, oldest ${S.oldest_task_s.toFixed(0)} s` : '') +
-        (S.last_result_s!=null ? ` · last result ${S.last_result_s.toFixed(0)} s ago` : ''));
+        (S.last_result_s!=null ? ` · last result ${S.last_result_s.toFixed(0)} s ago` : '')) +
+    (S.summary ? row('run summary', !S.summary.enabled ? 'not written: ' + esc(S.summary.off || '--no-summaries') : S.summary.error ? warn(esc(S.summary.error)) :
+        S.summary.file ? `${esc(S.summary.file)} · ${esc(S.summary.written)}` : 'written when the run ends') : '') +
+    (S.backfill && S.backfill.enabled ? row('older runs', (S.backfill.running ? `summary of ${esc(S.backfill.running)} being made (nice 19)` :
+        'no summary being made: ' + esc(S.backfill.waiting)) + ` · ${S.backfill.made} made` + (S.backfill.skipped ? `, ${S.backfill.skipped} cannot be made` : '')) : '');
   drawRun();
   const live = S.mode==='running' || S.mode==='paused';
   document.getElementById('t_boards').innerHTML = '<tr><th>board</th><th>files</th><th>MB</th><th>read</th><th>newest (s)</th><th>late hits</th><th></th></tr>' +
@@ -815,11 +860,19 @@ async function listRuns(){
   const box = document.getElementById('runs_list'); box.textContent = 'reading…';
   try {
     const d = await (await fetch('/runs', {cache:'no-store'})).json();
-    const shown = S ? S.folder : null;
-    box.innerHTML = '<table><tr><th>run</th><th>started</th><th>comment</th><th>files</th><th>data</th><th></th></tr>' +
+    const shown = S && !SUM ? S.folder : null;
+    // what the run's summary file is (an older analysis has no "summary" field: shown as not known)
+    const sumText = r => { const m = r.summary;
+      if(m===undefined) return '–';
+      if(!m) return r.backfill ? esc(r.backfill) : 'none yet';
+      if(m.error) return warn(esc(m.error));
+      return (m.stale ? warn('stale: the files changed since') : m.complete ? 'complete' : warn('incomplete')) +
+        (m.source==='backfill' ? ' · made afterwards' : '') + (m.end==='guess' ? ' · no stop recorded' : ''); };
+    box.innerHTML = '<table><tr><th>run</th><th>started</th><th>comment</th><th>files</th><th>data</th><th>summary</th><th></th></tr>' +
       d.runs.map(r=>`<tr class="${r.folder===shown?'shown':''}"><td>${esc(r.name)}</td><td>${esc((r.start||'').replace('T',' ').slice(0,19)) || new Date(r.written*1000).toLocaleString()}</td>` +
-        `<td>${esc((r.comment||'').replace(/^(Start|Stop) Comment: ?/,''))}</td><td>${r.files}</td><td>${gb(r.bytes)}</td>` +
-        `<td><button data-load="${esc(r.folder)}">${r.folder===shown?'reload':'load'}</button></td></tr>`).join('') + '</table>';
+        `<td>${esc((r.comment||'').replace(/^(Start|Stop) Comment: ?/,''))}</td><td>${r.files}</td><td>${gb(r.bytes)}</td><td class="sum">${sumText(r)}</td>` +
+        `<td><button data-summary="${esc(r.name)}" title="Show this run's summary in this browser only">summary</button>` +
+        `<button data-load="${esc(r.folder)}" title="odin only: read the run whole again and show it to every viewer instead of live">re-read (odin)</button></td></tr>`).join('') + '</table>';
   } catch(e){ box.textContent = 'no answer from the dashboard'; }
 }
 async function loadRun(folder){
@@ -828,20 +881,236 @@ async function loadRun(folder){
   note.textContent = 'loading…';
   let r = null, d = {};
   try { r = await fetch('/load?folder=' + encodeURIComponent(folder)); d = await r.json(); } catch(e){}
-  if(r && r.ok){ note.textContent = ''; runsPanel.hidden = true; await tick(); fetchChannel(); }
+  if(r && r.ok){ note.textContent = ''; runsPanel.hidden = true; if(SUM) backToLive(); else { await tick(); fetchChannel(); } }
   else note.textContent = 'not loaded: ' + (d.note || (r ? 'answer ' + r.status : 'no answer'));
 }
 document.getElementById('runs_btn').onclick = ()=>{ runsPanel.hidden = !runsPanel.hidden; if(!runsPanel.hidden) listRuns(); };
 document.getElementById('runs_close').onclick = ()=>{ runsPanel.hidden = true; };
 document.getElementById('runs_go').onclick = ()=>loadRun(document.getElementById('runs_path').value.trim());
 document.getElementById('runs_path').onkeydown = e=>{ if(e.key === 'Enter') loadRun(e.target.value.trim()); };
-runsPanel.addEventListener('click', e=>{ if(e.target.dataset.load) loadRun(e.target.dataset.load); });
+runsPanel.addEventListener('click', e=>{ if(e.target.dataset.load) loadRun(e.target.dataset.load);
+                                          else if(e.target.dataset.summary) openSummary(e.target.dataset.summary); });
 document.addEventListener('keydown', e=>{ if(e.key === 'Escape') runsPanel.hidden = true; });
 document.getElementById('live_btn').onclick = async ()=>{ await fetch('/live'); await tick(); fetchChannel(); };
+
+// ---------------------------------------------------------------- a recorded run's summary (GET /summary), in this browser only
+// Only what the dashboard aggregated over that run: none of the live checks (rates now, silent boards,
+// falling behind, ...) is applied to it. Live goes on for everyone else; here it is not asked for meanwhile.
+const SUM_SRC = {live:'written by the dashboard while the run was taken', load:'written when the run was read again on odin',
+                 read_after_end:'written by the dashboard reading the run after it ended (e.g. after a restart)',
+                 replay:'written from a replay of the run', backfill:'made afterwards from the files (backfill)'};
+async function openSummary(name){
+  const note = document.getElementById('runs_note'); note.textContent = 'reading the summary…';
+  let r = null, d = null;
+  try { r = await fetch('/summary?run=' + encodeURIComponent(name), {cache:'no-store'}); d = await r.json(); } catch(e){}
+  if(!r || !r.ok || !d){ note.textContent = 'not shown: ' + ((d && d.note) || (r ? 'answer ' + r.status : 'no answer from the dashboard')); return; }
+  note.textContent = ''; runsPanel.hidden = true;
+  SUM = d; document.body.classList.add('summary'); document.body.classList.remove('stale');
+  try { history.replaceState(null, '', location.pathname + location.search + '#summary=' + encodeURIComponent(d.run)); } catch(e){}
+  window.scrollTo(0, 0); draw();
+}
+function backToLive(){
+  SUM = null; document.body.classList.remove('summary');
+  document.body.classList.add('stale');   // what is still on the page is from before: grey until /state answers
+  try { history.replaceState(null, '', location.pathname + location.search); } catch(e){}
+  tick().then(fetchChannel);
+}
+document.getElementById('sum_back').onclick = backToLive;
+['sum_chmode','sum_chlog'].forEach(id=>document.getElementById(id).onchange=()=>draw());
+const when = t => t ? esc(String(t).replace('T',' ').slice(0,19)) : '–';
+const num = v => v==null ? '–' : Number(v).toLocaleString();
+// one number of decimals for a column (fixed width, aligned): enough for its smallest non-zero value, at most 3
+function colDec(vals){ const nz = vals.filter(v=>v!=null && v>0); if(!nz.length) return 0;
+  return Math.max(0, Math.min(3, 2 - Math.floor(Math.log10(Math.min(...nz))))); }
+function durText(s){ if(s==null) return '–'; if(s < 120) return s.toFixed(1)+' s';
+  const h=Math.floor(s/3600), m=Math.floor(s%3600/60), x=Math.floor(s%60); return `${h}:${String(m).padStart(2,'0')}:${String(x).padStart(2,'0')} (h:mm:ss)`; }
+function drawSummary(){
+  const d = SUM, s = d.summary, row = (k,v)=>`<tr><td>${k}</td><td class="l">${v}</td></tr>`;
+  document.getElementById('sum_title').textContent = `Recorded run ${d.run} — summary, not live`;
+  let sub;
+  try {
+    sub = !s ? esc(d.note || 'no summary recorded') + ". Below: only what FSUDAQ's run file says." :
+      `${esc(SUM_SRC[s.source] || s.source)}, ${when(s.written_at)}. ` +
+      (s.complete ? 'The dashboard counted the whole run.' : warn('INCOMPLETE: ' + esc((s.incomplete||[]).map(x=>x.detail).join('; ')) + '.')) +
+      (s.setup_known ? '' : ' ' + warn('Analysis setup at run time not known: analysed with the setup of ' + when(s.written_at) + '.'));
+  } catch(e){ sub = warn('This summary could not be read whole (an older or damaged file): parts are shown as —.'); }
+  if(d.stale) sub += ' ' + warn('STALE: ' + esc(d.note) + '.');
+  document.getElementById('sum_sub').innerHTML = sub + ' Aggregated values only: the live checks do not apply to a recorded run.';
+  sumSafe(()=>drawSumRun(d, s, row), row);
+  if(!s){
+    document.querySelectorAll('#tab_sum canvas').forEach(c=>{ message(c.id, 'no summary recorded'); PLOTS[c.id]=null; });
+    document.querySelectorAll('#tab_sum table').forEach(t=>{ if(t.id!=='t_sum_run') t.innerHTML = row('–', 'no summary recorded'); });
+    document.querySelectorAll('#tab_sum .legend, #tab_sum .note').forEach(e=>{ if(e.id!=='note_sum_run') e.textContent=''; });
+    return;
+  }
+  sumSafe(()=>drawSumCov(d, s, row), row, ['t_sum_cov']);
+  sumSafe(()=>drawSumChan(s), row, ['c_sum_chan']); sumSafe(()=>drawSumRate(s, d), row, ['c_sum_rate']);
+  sumSafe(()=>drawSumStatus(s), row, ['c_sum_status']);
+  sumSafe(()=>drawSumTables(s, row), row, ['t_sum_boards','t_sum_status','t_sum_prob','t_sum_set']);
+  sumSafe(()=>drawSumHists(s), row, ['c_sum_p','c_sum_res','c_sum_r','c_sum_occ','c_sum_cl','c_sum_ncand','c_sum_nh']);
+}
+// a part the summary lacks (an older or damaged file) is shown as "—", never as a number it does not have
+function sumSafe(fn, row, ids){
+  try { fn(); } catch(e){
+    for(const id of ids || []){ const el = document.getElementById(id); if(!el) continue;
+      if(el.tagName === 'CANVAS'){ message(id, '— (not in this summary)'); PLOTS[id] = null; } else el.innerHTML = row('—', 'not in this summary'); } }
+}
+function drawSumCov(d, s, row){
+  const ev = (s.aggregate_events||[]).map(e=>`${when(e.at)}: ${esc(e.detail)}`).join('<br>');
+  const U = s.setup || {}, P = s.previous_live;
+  document.getElementById('t_sum_cov').innerHTML =
+    row('complete', s.complete ? 'yes: every hit in the run\'s files was counted' : warn('no')) +
+    (s.incomplete||[]).map(x=>row('not covered', warn(esc(x.detail)))).join('') +
+    (s.caveats||[]).map(x=>row('note', esc(x.detail))).join('') +
+    row('analysis setup', (s.setup_known ? 'known: ' + esc(s.setup_at_run_time) :
+        warn(`not known for the time of the run: analysed with the setup of ${when(s.written_at)}`)) +
+        (U.identity ? ` · identity ${esc(U.identity)}` : '')) +
+    row('counted', `per channel: ${esc((s.scope||{}).per_channel_hits || '—')} · finder: ${esc((s.scope||{}).finder || '—')}`) +
+    row('mean rates', esc((s.scope||{}).mean_rate || '—')) +
+    row('changes while read', ev || 'none') +
+    row('read', s.reading ? `${s.reading.from_start ? "from the run's start" : 'from the middle of the run'} · began ${when(s.reading.started_at)}` : '—') +
+    row('made by', `${esc(SUM_SRC[s.source] || s.source)} · dashboard ${esc((s.dashboard||{}).commit || 'version not known')} on ${esc((s.dashboard||{}).host || '—')}`) +
+    (d.stale ? row('stale', warn(esc(d.note))) : '') +
+    (P ? row('while it was taken', `the live reading (${when(P.written_at)}) ` +
+      (P.complete ? 'saw the whole run' : 'did not see it all: ' + esc((P.incomplete||[]).map(x=>x.detail).join('; '))) +
+      ` · ${num((P.problems_during_reading||[]).length)} kinds of problem seen then (below)` +
+      (P.setup && U.identity ? (P.setup.identity === U.identity ? ' · same setup' : ' · ' + warn('another setup: ' + esc(P.setup.identity))) : '')) : '');
+}
+function drawSumRun(d, s, row){
+  const sr = s ? s.run : {}, R = d.run_file, rf = R && !R.error ? R : null;
+  // start, stop and LED as FSUDAQ's run file says now (the stop and its comment may be written after the summary)
+  const start = rf ? rf.start : sr.start;
+  const stop = rf ? rf.stop : (sr.stop ? {time:sr.stop, comment:sr.stop_comment, run_ms:sr.duration_s!=null ? sr.duration_s*1000 : null, problems:sr.stop_problems} : null);
+  const startC = rf ? rf.start_comment : sr.start_comment, L = rf ? rf.led : sr.led;
+  const cmds = L && L.events ? L.events.map(e=>`${esc(e.what)}: ${when(e.sent)}` + (e.run_ms!=null && e.run_ms>=0 ? `, ${(e.run_ms/1000).toFixed(3)} s into the run` : '') +
+    (e.ok===true ? ` · PLC "${esc(e.reply)}"` : e.ok===false ? ' · ' + warn(esc(e.error)) : ' · no answer recorded')).join('<br>') : '';
+  document.getElementById('t_sum_run').innerHTML =
+    row('run', esc(d.run) + (rf && rf.run!=null ? ` · run ${esc(rf.run)}` : sr.number!=null ? ` · run ${esc(sr.number)}` : '')) +
+    row('started', when(start) + (startC ? ` · "${esc(startC)}"` : '')) +
+    row('stopped', !stop ? 'no stop recorded' : when(stop.time) + (stop.run_ms!=null ? ` after ${durText(stop.run_ms/1000)}` : '') +
+        (stop.comment ? ` · "${esc(stop.comment)}"` : '') + (stop.problems && stop.problems.length ? ' · ' + warn(esc([].concat(stop.problems).join('; '))) : '')) +
+    (s ? row('end, as the summary knew it', esc(sr.end_how)) : '') +
+    row('data files', `${num(d.files)} files · ${gb(d.bytes)}`) +
+    (s ? row('data time', `${s.data.span_s!=null ? durText(s.data.span_s) : '–'} from the first hit read to the last · ${num(s.data.hits_counted)} hits counted, ${num(s.data.hits_in_finder)} in the finder`) : '') +
+    (rf ? row('board clocks', clockRow(rf.clock)) : '') +
+    (L ? row('LED trigger', (L.enabled ? `on ${esc(L.delay_s)} s after the start, for ${esc(L.hold_s)} s` : 'not used in this run') + (cmds ? '<br>' + cmds : '')) : '') +
+    row('FSUDAQ', esc((rf ? rf.source : sr.fsudaq) || 'source not known'));
+  document.getElementById('note_sum_run').innerHTML = R && R.error ? warn(`${esc(R.file)}: ${esc(R.error)}`) :
+    R ? "Start, stop and LED: FSUDAQ's run file as it is now." : 'No run file in this folder (a run from before FSUDAQ wrote one).';
+}
+function drawSumChan(s){
+  const ch = s.channels, mode = document.getElementById('sum_chmode').value, ylog = document.getElementById('sum_chlog').checked;
+  const bi = serial => Math.max(0, s.boards.findIndex(b=>b.serial===serial));
+  const note = document.getElementById('note_sum_chan');
+  legend('leg_sum_chan', s.boards.map((b,i)=>({name:'Digi-'+b.serial, color:BOARD_COLOR[i%BOARD_COLOR.length]})));
+  if(mode==='rate' && ch.every(c=>c.mean_rate_hz==null)){ message('c_sum_chan', 'mean rate not known'); PLOTS.c_sum_chan=null; note.textContent = 'Mean rate: ' + s.scope.mean_rate + '.'; return; }
+  const A = plot('c_sum_chan', {x0:0, x1:ch.length, ylog, xticks:false, series:[{kind:'bars', edges:[...Array(ch.length+1).keys()], gap:1,
+      y:ch.map(c=>mode==='rate' ? (c.mean_rate_hz ?? 0) : c.hits), colors:ch.map(c=>BOARD_COLOR[bi(c.board)%BOARD_COLOR.length])}],
+    empty:'no hits', ylabel: mode==='rate' ? 'Hz' : 'hits'});
+  if(A){ const g=document.getElementById('c_sum_chan').getContext('2d'); g.fillStyle=css('--muted'); g.font=cfont(10); g.textAlign='center';
+    let st=0; for(let i=1;i<=ch.length;i++){ if(i===ch.length || ch[i].board!==ch[st].board){ g.fillText(`Digi-${ch[st].board} ch0–${ch[i-1].ch}`, (A.X(st)+A.X(i))/2, A.h-7); st=i; } } }
+  const base = (mode==='rate' ? 'Mean rate: ' + esc(s.scope.mean_rate) + '. ' : 'Hits over ' + esc(s.scope.per_channel_hits) + '. ') + 'Click a bar for its numbers.';
+  note.innerHTML = base;
+  document.getElementById('c_sum_chan').onclick = ev=>{ if(!A) return; const r=ev.target.getBoundingClientRect();
+    const i=Math.floor((ev.clientX-r.left-A.L)/((A.w-A.L-A.R)/ch.length)); if(!(i>=0 && i<ch.length)) return; const c=ch[i];
+    note.innerHTML = `<b>${esc(slotName(c))}</b>: ${num(c.hits)} hits · mean ${c.mean_rate_hz==null ? '–' : c.mean_rate_hz.toFixed(colDec([c.mean_rate_hz]))+' Hz'}` +
+      ` · late ${num(c.late)} · before the start ${num(c.early)}. ` + base; };
+}
+function sumLedMarks(s, d){
+  const R = d.run_file && !d.run_file.error ? d.run_file : null, L = R ? R.led : s.run.led;
+  if(!L || !L.events || s.data.t0_s==null) return [];
+  return L.events.filter(e=>e.run_ms!=null && e.run_ms>=0 && e.ok!==false)
+    .map(e=>({x:e.run_ms/1000 - s.data.t0_s, color:e.what==='on' ? LED_COLOR : css('--muted'), label:'LED '+e.what}));
+}
+function drawSumRate(s, d){
+  const H = s.history && s.history.daq, note = document.getElementById('note_sum_rate');
+  if(!H || !H.t0_s.length){ message('c_sum_rate', 'no data'); PLOTS.c_sum_rate=null; legend('leg_sum_rate', []); note.textContent=''; return; }
+  const n = H.t0_s.length, edges = H.t0_s.concat([H.t1_s[n-1]]);
+  const per = H.boards.map((_,b)=>H.hits.map((h,i)=>H.covered_s[i]>0 ? h[b]/H.covered_s[i] : null));
+  const tot = H.hits.map((h,i)=>H.covered_s[i]>0 ? h.reduce((a,v)=>a+v,0)/H.covered_s[i] : null);
+  const ser = [{kind:'step', edges, y:tot, color:css('--fg'), width:2}].concat(per.map((y,b)=>({kind:'step', edges, y, color:BOARD_COLOR[b%BOARD_COLOR.length]})));
+  plot('c_sum_rate', {x0:edges[0], x1:edges[n], xfmt:v=>sinum(v)+' s', series:ser, marks:sumLedMarks(s, d), ylabel:'Hz', empty:'no hits'});
+  legend('leg_sum_rate', [{name:'all channels', color:css('--fg')}].concat(H.boards.map((sn,i)=>({name:'Digi-'+sn, color:BOARD_COLOR[i%BOARD_COLOR.length]}))));
+  note.textContent = `Mean rate in steps of ${s.history.bin_s} s of data time (0 = the board-clock second of the first hit read; the first and last steps cover only the part with data).`;
+}
+function drawSumStatus(s){
+  const H = s.history && s.history.finder, ser = [], leg = [];
+  if(H) for(const n of STATUS_ORDER){ const x=[], y=[]; H.t0_s.forEach((t,i)=>{ if(H.covered_s[i]>0){ x.push((t+H.t1_s[i])/2); y.push(H.status[n][i]/H.covered_s[i]); } });
+    if(y.some(v=>v>0)){ ser.push({kind:'line', x, y, color:ST_COLOR[n]}); leg.push({name:n, color:ST_COLOR[n]}); } }
+  if(ser.length && ser[0].x.length>1) plot('c_sum_status', {x0:ser[0].x[0], x1:ser[0].x[ser[0].x.length-1], ylog:true, xfmt:v=>sinum(v)+' s', series:ser, ylabel:'bunches / s'});
+  else { message('c_sum_status', ser.length ? 'too short for a curve' : 'no bunches'); PLOTS.c_sum_status=null; }
+  legend('leg_sum_status', leg);
+  document.getElementById('note_sum_status').textContent = H ? `Per ${H.bin_s} s of data time, over ${s.scope.history}: bunches ÷ the data time of the finder's slices in that step.` : '';
+}
+function drawSumTables(s, row){
+  const rd = colDec(s.boards.map(b=>b.mean_rate_hz));
+  document.getElementById('t_sum_boards').innerHTML = '<tr><th>board</th><th>files</th><th>MB</th><th>hits</th><th>mean rate (Hz)</th><th>late</th><th></th></tr>' +
+    s.boards.map((b,i)=>`<tr><td>${sw(BOARD_COLOR[i%BOARD_COLOR.length])}Digi-${esc(b.serial)}</td><td>${num(b.files)}</td><td>${(b.bytes/1e6).toFixed(0)}</td>` +
+      `<td>${num(b.hits)}</td><td>${b.mean_rate_hz==null ? '–' : b.mean_rate_hz.toFixed(rd)}</td><td>${num(b.late)}</td><td class="l">` +
+      [!b.has_data ? 'no data' : '', b.aggregates_missing ? warn(`${num(b.aggregates_missing)} aggregates missing`) : '',
+       b.damaged_bytes ? warn(`${num(b.damaged_bytes)} damaged bytes`) : '', b.other_format_aggregates ? warn(`${num(b.other_format_aggregates)} aggregates of another format`) : '']
+        .filter(Boolean).join(' · ') + '</td></tr>').join('');
+  const F = s.finder, SC = F.status_counts, tot = Math.max(1, F.bunches);
+  document.getElementById('t_sum_status').innerHTML = '<tr><th>result</th><th>bunches</th><th>share</th><th>meaning</th></tr>' +
+    STATUS_ORDER.map(n=>`<tr><td>${sw(ST_COLOR[n])}${n}</td><td>${num(SC[n]||0)}</td><td>${(100*(SC[n]||0)/tot).toFixed(2)} %</td><td class="l" style="color:var(--muted)">${ST_NOTE[n]}</td></tr>`).join('') +
+    `<tr><td>bunches</td><td>${num(F.bunches)}</td><td></td><td class="l" style="color:var(--muted)">${num(F.hits)} hits${F.unmapped_hits ? ', '+num(F.unmapped_hits)+' on uncabled channels' : ''}</td></tr>` +
+    `<tr><td>accepted tracks</td><td>${num(F.accepted_tracks)}</td><td></td><td class="l" style="color:var(--muted)">lucite ${F.setup.installed.includes('lucite') ? `yes ${num(F.lucite.yes)} · no ${num(F.lucite.no)}` : 'not cabled'}</td></tr>`;
+  document.getElementById('note_sum_status_t').innerHTML = `Counted over ${esc(F.counted)} · bunch window ${esc(F.window_ns)} ns (${esc(F.window_src)}) · ` +
+    `setting ${esc(F.setup.setting)}${F.setup.setting_src ? '' : ' (not given, assumed)'} · cabling ${esc(F.setup.cabling)}` +
+    (F.late_hits ? ' · ' + warn(`${num(F.late_hits)} hits came late: not in these results`) : '');
+  // the problems seen while the run was taken: this reading's, or (made later) the live reading's kept with it
+  const PL = s.previous_live ? (s.previous_live.problems_during_reading || []) : [];
+  const P = s.problems_during_reading.length ? s.problems_during_reading : PL, E = s.problems_at_end;
+  document.getElementById('t_sum_prob').innerHTML = (!P.length && !E.length) ? row('none', '') :
+    '<tr><th>problem (its last wording)</th><th>first seen</th><th>last seen</th><th>times</th><th>steps (≈ s)</th></tr>' +
+    E.map(t=>`<tr><td class="l">${esc(t)}</td><td colspan="4" class="l">at the end (what the files show)</td></tr>`).join('') +
+    P.map(p=>`<tr><td class="l">${esc(p.text)}</td><td>${when(p.first)}</td><td>${when(p.last)}</td><td>${num(p.episodes)}</td><td>${num(p.steps)}</td></tr>`).join('');
+  document.getElementById('note_sum_prob').textContent = (P===PL && PL.length ? 'Seen by the live reading (' + s.previous_live.problems_note + ')' : s.problems_note) +
+    '. They are what the live page warned of then, not checks of the run now.';
+  const T = s.settings, f = v => v ? esc(v) : 'none';
+  document.getElementById('t_sum_set').innerHTML =
+    row('run folder', esc(T.run_folder)) + row('run file', f(T.run_file)) +
+    row('program settings', T.program_settings ? esc(T.program_settings) : 'no copy in the run folder') +
+    row('run protocol', T.run_protocol ? esc(T.run_protocol) : 'no copy in the run folder') +
+    row('board snapshots', T.board_settings.length ? esc(T.board_settings.join(', ')) : 'none') +
+    row('experiment config', f(T.experiment_config) + (s.setup && s.setup.config ? ' (its content kept in the summary)' : '')) +
+    Object.keys((s.setup||{}).files || {cabling:0, gains:0, time_offsets:0, map:0}).map(k=>{ const R = ((s.setup||{}).files||{})[k];
+      return row(k.replace('_',' '), (R ? esc(R.path) + (R.sha256 ? ` · sha256 ${esc(R.sha256.slice(0,12))}…` : ' · ' + warn('not readable')) : 'none') +
+        (T.setup_src && T.setup_src[k] ? ` (from ${esc(T.setup_src[k])})` : '')); }).join('') +
+    (s.setup && s.setup.code ? row('analysis code', Object.entries(s.setup.code).map(([f,h])=>`${esc(f)} ${h ? esc(h.slice(0,10))+'…' : '–'}`).join(' · ')) : '') +
+    row('bunch window', `${esc(T.window_ns)} ns (${esc(T.window_src)})`) +
+    row('waits', `pause after ${esc(T.stall_s)} s, a silent pair held up to ${esc(T.hold_s)} s`) +
+    row('boards', esc(T.boards.join(', '))) +
+    (T.setup_warnings.length ? row('placeholders', esc(T.setup_warnings.join('; '))) : '') +
+    (T.setup_problems.length ? row('setup problems', warn(esc(T.setup_problems.join('; ')))) : '');
+}
+function drawSumHists(s){
+  const Hs = s.histograms;
+  plot('c_sum_p', {x0:0, x1:1000, series:[{kind:'bars', edges:Hs.momentum.edges, y:Hs.momentum.counts, color:ST_COLOR.unique}], empty:'no accepted track', ylabel:'tracks per 10 MeV/c'});
+  const rs = [{name:'T0 → T1', color:PLANE_COLOR[1], y:Hs.timing_residual.t0_t1}, {name:'T1 → T2', color:PLANE_COLOR[2], y:Hs.timing_residual.t1_t2}];
+  plot('c_sum_res', {x0:-15, x1:15, series:rs.map(r=>({kind:'step', edges:Hs.timing_residual.edges, y:r.y, color:r.color})), marks:[{x:0}], empty:'no accepted track', ylabel:'tracks per 0.25 ns'});
+  legend('leg_sum_res', rs);
+  const rser = [0,1,2].map(p=>({name:'T'+p, color:PLANE_COLOR[p], y:Hs.light_ratio.planes[p]}));
+  if(s.finder.setup.calibrated){ plot('c_sum_r', {x0:0, x1:4, series:rser.map(r=>({kind:'step', edges:Hs.light_ratio.edges, y:r.y, color:r.color})), marks:[{x:1},{x:2}], empty:'no accepted track'}); legend('leg_sum_r', rser); }
+  else { message('c_sum_r', 'no light calibration in this run: every hit counted as one track'); PLOTS.c_sum_r=null; legend('leg_sum_r', []); }
+  const gap=3, ys=[], cs=[], starts=[], O=s.occupancy.planes;
+  O.forEach((o,p)=>{ starts.push(ys.length); o.slice(1).forEach(v=>{ ys.push(v); cs.push(PLANE_COLOR[p]); }); if(p<2) for(let k=0;k<gap;k++){ ys.push(0); cs.push(null); } });
+  const A = plot('c_sum_occ', {x0:0, x1:ys.length, ylog:true, xticks:false, series:[{kind:'bars', edges:[...Array(ys.length+1).keys()], y:ys, colors:cs, gap:0.5}], empty:'no hits', ylabel:'hits'});
+  if(A){ const g=document.getElementById('c_sum_occ').getContext('2d'); g.fillStyle=css('--muted'); g.font=cfont(10); g.textAlign='center';
+    O.forEach((o,p)=>{ const n=o.length-1; g.fillText(`T${p}  ch 1–${n}`, A.X(starts[p]+n/2), A.h-7); }); }
+  legend('leg_sum_occ', [0,1,2].map(p=>({name:'T'+p, color:PLANE_COLOR[p]})));
+  const cedges=[...Array(7).keys()].map(v=>v+0.5);
+  plot('c_sum_cl', {x0:0.5, x1:6.5, ylog:true, xfmt:v=>v>=6?'6+':String(Math.round(v)), series:[0,1,2].map(p=>({kind:'step', edges:cedges, y:Hs.cluster_size.planes[p], color:PLANE_COLOR[p]})), ylabel:'clusters', empty:'no clusters'});
+  legend('leg_sum_cl', [0,1,2].map(p=>({name:'T'+p, color:PLANE_COLOR[p]})));
+  plot('c_sum_ncand', {x0:-0.5, x1:7.5, ylog:true, xfmt:v=>v>=7?'7+':String(Math.round(v)), series:[{kind:'bars', edges:[...Array(9).keys()].map(v=>v-0.5), y:Hs.candidates_per_bunch.counts, color:'#5b6470'}], ylabel:'bunches', empty:'no bunches'});
+  const nh = Hs.hits_per_bunch.counts;
+  plot('c_sum_nh', {x0:-0.5, x1:nh.length-0.5, ylog:true, series:[{kind:'bars', edges:[...Array(nh.length+1).keys()].map(v=>v-0.5), y:nh, color:'#9467bd', gap:0}], ylabel:'bunches (last bin: 40+)', empty:'no bunches'});
+}
 
 viewControls();
 showTab(location.hash==='#trk' ? 'trk' : location.hash==='#daq' ? 'daq' : tab);
 tick().then(fetchChannel); setInterval(tick, 1000); setInterval(fetchChannel, 2000);
+{ const h = location.hash.match(/^#summary=(.+)$/); if(h) openSummary(decodeURIComponent(h[1])); }   // a link to a run's summary
 </script>
 </body>
 </html>

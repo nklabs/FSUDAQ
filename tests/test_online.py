@@ -15,7 +15,12 @@ against the hits that were written:
 * the analysis falling behind (reading the files, or the DAQ part): no false "stopped", nothing
   late, and every rate shown is the true count of its second;
 * the aggregate counter wrapping, gaps in it, a stale copy of an aggregate; a finished run at
-  start-up; a pause longer than --hold-s; a board without data; hits exactly at a slice boundary.
+  start-up; a pause longer than --hold-s; a board without data; hits exactly at a slice boundary;
+* the run summary: written once at the stop, whole, with the totals the page showed; complete=false
+  and why (a mid-run start, Clear, the window changed, boards not analysed); no stop word; the
+  backfill (between runs only, nice 19, killed by a run start, the same as a live summary; an
+  incomplete summary re-read once, the live reading's part kept); and
+  GET /summary for anyone, taking only a run folder's bare name.
 
     python3 tests/test_online.py
 """
@@ -29,6 +34,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import numpy as np
@@ -39,6 +45,8 @@ import finder_fast as ff                 # noqa: E402
 import online_dashboard as od            # noqa: E402
 
 PS = od.PS
+# hermetic: whether FSUDAQ runs is never asked of this machine (its pid.dat, /proc); "running" unless a scenario says
+od.Online.fsudaq_probe = staticmethod(lambda: True)
 TICK = 2000
 N_FAIL = 0
 
@@ -998,6 +1006,793 @@ def scenario_quiet_live_start(tmp):
         ok(f"read as a run being taken, modes {sorted(set(modes))}, the rate shown")
 
 
+def read_summary(folder):
+    with open(od.summary_path(folder)) as f:
+        return json.load(f)
+
+
+def write_run_file(folder, stop=True, comment="stop"):
+    """FSUDAQ's run file (as in scenario_run_file), with or without the stop."""
+    name = os.path.basename(folder)
+    run = {"format": "FSUDAQ run file 1", "run": int(name.rsplit("_", 1)[1]), "prefix": name.rsplit("_", 1)[0], "folder": folder,
+           "start": {"time": "2026-10-31T12:00:00.000+01:00", "comment": "beam on"}, "led": {"enabled": False, "events": []},
+           "stop": None if not stop else {"time": "2026-10-31T12:00:12.000+01:00", "run_ms": 12000, "comment": comment, "problems": []},
+           "run_control": {}, "fsudaq": {"source": "test 0000000"}, "boards": []}
+    with open(os.path.join(folder, name + "_run.json"), "w") as f:
+        json.dump(run, f)
+
+
+def set_old(folder, age_s):
+    """Every file of the folder (and the folder) last written age_s ago."""
+    t = time.time() - age_s
+    for f in os.listdir(folder):
+        os.utime(os.path.join(folder, f), (t, t))
+    os.utime(folder, (t, t))
+
+
+def scenario_summary_at_stop(tmp):
+    print("== run summary: written once at the stop, its totals as the page showed them, whole or not at all")
+    folder = os.path.join(tmp, "sum_001"); os.makedirs(folder)
+    clock = Clock(); boards = boards_for(folder, slow=[(1443, 6, 1.5), (1443, 7, 1.5)], seed=101)
+    online = make_online(folder, SERIALS, EIGHT, clock, extra=["--hold-s", "8"])
+    writes = []
+    real, real_replace = od.write_summary_file, od.os.replace
+
+    def counting(f, doc):
+        writes.append(doc["run"]["end"])
+        return real(f, doc)
+    od.write_summary_file = counting
+    try:
+        drive(online, clock, boards, 0, 30)
+        good = check(not writes and not os.path.exists(od.summary_path(folder)), "summary: written while the run was taken")
+        t_old = time.time() - 3600
+        os.utime(folder, (t_old, t_old))           # the folder's own time must stay as it was (newest run folder)
+        finish(online, clock, boards)
+        st = online.state()
+        good &= check(writes == ["stopped"], f"summary: written {writes} at the stop")
+        for _ in range(5):
+            clock.t += 1; online.step()
+        good &= check(len(writes) == 1, f"summary: written again with nothing new ({writes})")
+        s = read_summary(folder)
+        good &= check(abs(os.stat(folder).st_mtime - t_old) < 1, "summary: the run folder's modification time changed")
+        good &= check(not [f for f in os.listdir(folder) if f.endswith(".tmp")], "summary: a temporary file left")
+        good &= check(s["complete"] and not s["incomplete"] and s["source"] == "live" and s["run"]["end"] == "stopped"
+                      and s["run"]["end_how"] == "FSUDAQ said the run stopped", f"summary: {s['complete']} {s['incomplete']} {s['source']} {s['run']}")
+        late = st["late"]
+        good &= check(late > 0 and any(c["reason"] == "late_hits" for c in s["caveats"]) and s["finder"]["late_hits"] == late,
+                      f"summary: {late} late hits, caveats {s['caveats']}")
+        # every number as /state showed it at the end
+        good &= check(s["finder"]["hits"] == st["hits"] and s["finder"]["bunches"] == st["bunches"]
+                      and s["finder"]["status_counts"] == st["status_counts"] and s["finder"]["unmapped_hits"] == st["unmapped"],
+                      "summary: the finder's counts differ from the page")
+        Hs = s["histograms"]
+        good &= check(Hs["momentum"]["counts"] == st["hist_p"]["counts"] and Hs["momentum"]["edges"] == st["hist_p"]["edges"]
+                      and Hs["timing_residual"]["t0_t1"] == st["hist_res"]["t10"] and Hs["timing_residual"]["t1_t2"] == st["hist_res"]["t21"]
+                      and Hs["timing_residual"]["edges"] == st["hist_res"]["edges"]
+                      and Hs["t2_minus_t1"]["counts"] == st["hist_dt"]["counts"] and Hs["light_ratio"]["planes"] == st["hist_r"]["counts"]
+                      and Hs["cluster_size"]["planes"] == st["hist_cl"] and Hs["candidates_per_bunch"]["counts"] == st["hist_ncand"]
+                      and Hs["tracks_per_bunch"]["counts"] == st["hist_ntrk"] and Hs["hits_per_bunch"]["counts"] == st["hist_nhit"],
+                      "summary: a histogram differs from the page")
+        good &= check(s["occupancy"]["planes"] == st["occupancy"] and s["occupancy"]["counters"] == st["counters"], "summary: occupancy differs")
+        page = {x["slot"]: (x["count"], x["late"]) for x in st["daq"]["slots"]}
+        good &= check({c["slot"]: (c["hits"], c["late"]) for c in s["channels"]} == page, "summary: per-channel hits differ from the page")
+        T = truth(boards, SERIALS)
+        good &= check(all(c["hits"] == len(T.get(c["slot"], [])) for c in s["channels"]), "summary: per-channel hits differ from the hits written")
+        good &= check([b["bytes"] for b in s["boards"]] == [b["bytes"] for b in st["boards"]] and s["data"]["bytes"] == st["daq"]["run_bytes"]
+                      and s["fingerprint"] == od.run_fingerprint(folder), "summary: file sizes differ")
+        span = s["data"]["span_s"]
+        good &= check(all(abs(c["mean_rate_hz"] - c["hits"] / span) < 1e-9 * (1 + c["hits"]) for c in s["channels"]), "summary: mean rates")
+        H, F = s["history"]["daq"], s["history"]["finder"]
+        good &= check([sum(h[i] for h in H["hits"]) for i in range(len(SERIALS))] == [b["hits"] for b in s["boards"]]
+                      and abs(sum(H["covered_s"]) - span) < 1e-6 and all(x < y for x, y in zip(H["t0_s"], H["t1_s"])),
+                      "summary: the rate history does not add up to the board totals over the run's span")
+        good &= check(sum(F["bunches"]) == s["finder"]["bunches"] and sum(sum(v) for v in F["status"].values()) == s["finder"]["bunches"],
+                      "summary: the finder's history does not add up")
+        good &= check(len(online.secs) <= od.HISTORY_S + 1 and len(H["t0_s"]) == 3, f"summary: {len(H['t0_s'])} history points for 30 s")
+        json.dumps(s, allow_nan=False)
+        # FSUDAQ writes the stop (and its comment) into the run file after /stopped: written again with it
+        write_run_file(folder, comment="beam off")
+        clock.t += 1; online.step()
+        s = read_summary(folder)
+        good &= check(len(writes) == 2 and s["run"]["stop_comment"] == "beam off" and s["run"]["duration_s"] == 12.0,
+                      f"summary: the run file's stop not taken in ({writes}, {s['run']['stop_comment']})")
+        # Clear after the end, then the run file changes: only the run's part is made again, the counts stay
+        hits = s["finder"]["hits"]
+        online.clear()
+        write_run_file(folder, comment="beam off, later")
+        clock.t += 1; online.step()
+        s = read_summary(folder)
+        good &= check(len(writes) == 3 and s["complete"] and s["finder"]["hits"] == hits and s["run"]["stop_comment"] == "beam off, later",
+                      f"summary: a Clear after the end reached it ({s['complete']}, {s['finder']['hits']} of {hits} hits)")
+        # a write that fails: nothing half written, the loop goes on, the page says so, tried again later
+        os.remove(od.summary_path(folder))
+
+        def boom(a, b):
+            raise OSError(28, "No space left on device")
+        od.os.replace = boom
+        write_run_file(folder, comment="beam off again")
+        try:
+            for _ in range(3):
+                clock.t += 1; online.step()
+        finally:
+            od.os.replace = real_replace
+        st = online.state()
+        good &= check(not os.path.exists(od.summary_path(folder)) and not [f for f in os.listdir(folder) if f.endswith(".tmp")],
+                      "summary: a failed write left a file")
+        good &= check(len(writes) == 4 and any("run summary" in h and "No space" in h for h in st["health"]),
+                      f"summary: a failed write not on the page ({writes}, {st['health']})")
+        clock.t += od.SUMMARY_RETRY_S + 1; online.step()
+        s = read_summary(folder) if os.path.exists(od.summary_path(folder)) else {}
+        good &= check(online.summary_error is None and s.get("complete") and s["finder"]["hits"] == hits
+                      and s["run"]["stop_comment"] == "beam off again", "summary: not written again after a failure")
+    finally:
+        od.write_summary_file, od.os.replace = real, real_replace
+    if good:
+        ok(f"written once at the stop ({s['finder']['hits']:,} hits in the finder, {late:,} late), every total as the page showed it, "
+           "the folder's time kept; again when the run file got the stop; a failed write reported, left nothing, tried again")
+
+
+def scenario_summary_incomplete(tmp):
+    print("== run summary: complete=false when the dashboard did not see the whole run, and why")
+    good = True
+    # started mid-run
+    folder = os.path.join(tmp, "inc_001"); os.makedirs(folder)
+    clock = Clock(); boards = boards_for(folder, seed=111)
+    for t in range(5):
+        for b in boards:
+            b.hits(t * PS, (t + 1) * PS)
+    online = od.Online(od.parse_args(["--run", folder, "--boards", ",".join(map(str, SERIALS)), "--eight-channel-boards", "1443",
+                                      "--workers", "0", "--config", "/nonexistent"]), clock=clock)
+    clock.t += 5
+    drive(online, clock, boards, 5, 12)
+    finish(online, clock, boards)
+    s = read_summary(folder)
+    good &= check(not s["complete"] and [x["reason"] for x in s["incomplete"]] == ["started_mid_run"] and not s["reading"]["from_start"],
+                  f"mid-run start: {s['complete']} {s['incomplete']}")
+    D = online.daq
+    good &= check([c["hits"] for c in s["channels"]] == [int(D.counts[sl]) for sl in online.slots], "mid-run start: per-channel hits")
+    span = s["data"]["span_s"]
+    good &= check(all(abs(c["mean_rate_hz"] - (c["hits"] - c["early"]) / span) < 1e-9 * (1 + c["hits"]) for c in s["channels"]),
+                  "mid-run start: the mean rate counts hits from before the start")
+    # Clear, and the bunch window, changed mid-run
+    for what in ("clear", "window"):
+        folder = os.path.join(tmp, f"inc_{what}_002"); os.makedirs(folder)
+        clock = Clock(); boards = boards_for(folder, seed=112)
+        online = make_online(folder, SERIALS, EIGHT, clock)
+        drive(online, clock, boards, 0, 6)
+        online.clear() if what == "clear" else online.set_window(100)
+        drive(online, clock, boards, 6, 12)
+        finish(online, clock, boards)
+        s, st = read_summary(folder), online.state()
+        T = truth(boards, SERIALS)
+        reason = "cleared" if what == "clear" else "window_changed"
+        good &= check(not s["complete"] and [x["reason"] for x in s["incomplete"]] == [reason] and s["finder"]["counted"].startswith("since"),
+                      f"{what}: {s['incomplete']}, finder counted {s['finder']['counted']}")
+        good &= check(all(c["hits"] == len(T.get(c["slot"], [])) for c in s["channels"]) and s["finder"]["hits"] == st["hits"]
+                      and s["finder"]["hits"] < s["data"]["hits_counted"],
+                      f"{what}: per-channel hits not the whole run, or the finder's not since the change")
+    # boards in the folder that are not analysed
+    folder = os.path.join(tmp, "inc_003"); os.makedirs(folder)
+    clock = Clock(); boards = boards_for(folder, seed=113) + [Board(folder, 1, 30508, 8, [500.0] * 8, seed=9)]
+    online = make_online(folder, SERIALS, EIGHT, clock)
+    drive(online, clock, boards, 0, 6)
+    finish(online, clock, boards)
+    s = read_summary(folder)
+    good &= check(not s["complete"] and [x["reason"] for x in s["incomplete"]] == ["boards_not_analysed"] and "30508" in s["incomplete"][0]["detail"],
+                  f"other board: {s['incomplete']}")
+    # no word of the stop: only once no file was written for FINISHED_QUIET_S, and never while FSUDAQ said the run goes on
+    folder = os.path.join(tmp, "inc_004"); os.makedirs(folder)
+    clock = Clock(); boards = boards_for(folder, seed=114)
+    online = make_online(folder, SERIALS, EIGHT, clock, extra=["--hold-s", "5"])
+    t = drive(online, clock, boards, 0, 6)
+    for b in boards:
+        b.flush()
+    t = drive(online, clock, boards, t, t + 12, gen=False)
+    good &= check(online.mode == "quiet" and online.all_done and not os.path.exists(od.summary_path(folder)),
+                  f"no word: summary while the folder was written recently ({online.mode}, {online.status})")
+    set_old(folder, od.FINISHED_QUIET_S + 60)
+    online.run_open = os.path.abspath(folder)      # FSUDAQ said /run and not /stopped: the run goes on
+    t = drive(online, clock, boards, t, t + 2, gen=False)
+    good &= check(not os.path.exists(od.summary_path(folder)), "no word: summary written while FSUDAQ said the run goes on")
+    online.run_open = None
+    t = drive(online, clock, boards, t, t + 2, gen=False)
+    s = read_summary(folder)
+    good &= check(s["run"]["end"] == "guess" and s["complete"] and any(c["reason"] == "end_not_recorded" for c in s["caveats"]),
+                  f"no word: end {s['run']['end']}, caveats {s['caveats']}")
+    # ... and the run went on after all: written again at its end, with the new data
+    t = drive(online, clock, boards, t, t + 6)
+    good &= check(online.summary_kind is None, "went on: still taken for ended")
+    finish(online, clock, boards)
+    s = read_summary(folder)
+    T = truth(boards, SERIALS)
+    good &= check(s["run"]["end"] == "stopped" and all(c["hits"] == len(T.get(c["slot"], [])) for c in s["channels"]),
+                  f"went on: summary not written again with the new data (end {s['run']['end']})")
+    if good:
+        ok("started mid-run, Clear, window changed, another board's files: complete=false with the reason; no stop word: "
+           "only after 5 min of quiet and never while FSUDAQ says the run goes on; written again when the run went on")
+
+
+def scenario_backfill(tmp):
+    print("== backfill: older runs get their summary between runs only, from a nice-19 child, killed at once by a run start")
+    root = os.path.join(tmp, "bf_data"); os.makedirs(root)
+
+    def recorded(name, seed, age_s):
+        folder = os.path.join(root, name); os.makedirs(folder)
+        bs = boards_for(folder, seed=seed)
+        for t in range(8):
+            for b in bs:
+                b.hits(t * PS, (t + 1) * PS)
+        for b in bs:
+            b.flush(); b.f.close()
+        write_run_file(folder)
+        set_old(folder, age_s)
+        return folder
+    bad = recorded("run_000", 200, 7200)                       # oldest: a file that cannot be read
+    os.chmod(os.path.join(bad, "run_001_15880_PSD_2_000.fsu"), 0)
+    a = recorded("run_001", 201, 3600)
+    b = recorded("run_002", 202, 1800)                         # newest: the one the dashboard shows
+    a_mtime = os.stat(a).st_mtime_ns
+    clock = Clock()
+    online = od.Online(od.parse_args(["--data-path", root, "--boards", ",".join(map(str, SERIALS)), "--eight-channel-boards", "1443",
+                                      "--workers", "0", "--config", "/nonexistent"]), clock=clock)
+    online.fsudaq_probe = lambda: True        # FSUDAQ runs (set here: never the host's)
+    saved = od.BACKFILL_IDLE_S, od.BACKFILL_LOOK_S
+    od.BACKFILL_IDLE_S, od.BACKFILL_LOOK_S = 0, 0
+    try:
+        for _ in range(6):
+            clock.t += 1; online.step(); wait_tasks(online)
+        good = check(online.folder == b and read_summary(b)["source"] == "read_after_end", f"backfill: the newest run not read and summarised ({online.folder})")
+        # FSUDAQ takes a run: no child
+        c = os.path.join(root, "run_003"); os.makedirs(c)
+        online.run_started(c)
+        for _ in range(3):
+            clock.t += 1; online.step(); online.backfill_tick()
+        good &= check(online.bf is None and "taking run run_003" in online.bf_busy, f"backfill: started during a run ({online.bf_busy})")
+        online.run_stopped(c)
+        clock.t += 1; online.step(); online.backfill_tick()
+        bf = online.bf
+        good &= check(bf is not None and bf["folder"] == a, f"backfill: not started between runs ({online.bf_busy})")
+        if bf is None:
+            return
+        pid = bf["proc"].pid
+        for _ in range(100):                 # held where it is (once it is python, past ionice and nice): a run must find it at work
+            try:
+                with open(f"/proc/{pid}/comm") as f:
+                    if f.read().startswith("python"):
+                        break
+            except OSError:
+                break
+            time.sleep(0.05)
+        os.kill(pid, signal.SIGSTOP)
+        try:
+            prio = os.getpriority(os.PRIO_PROCESS, bf["proc"].pid)
+        except OSError:
+            prio = None
+        good &= check(prio == 19, f"backfill: the child runs at nice {prio}")
+        # a run starts while it works (here: a half-written temporary file of it): killed, nothing left, folder time kept
+        tmp_file = os.path.join(a, f".run_001_summary.json.{bf['proc'].pid}.tmp")
+        with open(tmp_file, "w") as f:
+            f.write("{\"half")
+        d = os.path.join(root, "run_004"); os.makedirs(d)
+        t0 = time.time()
+        online.run_started(d)
+        good &= check(online.bf is None and time.time() - t0 < 0.5, f"backfill: the run start waited for the child ({time.time() - t0:.1f} s)")
+        while online.bf_reap and time.time() - t0 < 5:     # cleaned up once it is gone (not waited for under the lock)
+            online.backfill_tick(); time.sleep(0.05)
+        good &= check(not online.bf_reap and bf["proc"].poll() is not None and time.time() - t0 < 2,
+                      f"backfill: the child not stopped at once when the run started ({time.time() - t0:.1f} s)")
+        good &= check(not os.path.exists(tmp_file) and not os.path.exists(od.summary_path(a)) and os.stat(a).st_mtime_ns == a_mtime,
+                      "backfill: a stopped child left a file, or the folder's time changed")
+        online.run_stopped(d)
+        # between runs again: it starts over, and goes on to the next run, which it cannot read (given up, with the reason)
+        t_end = time.time() + 300
+        while time.time() < t_end and not (bad in online.bf_skipped and online.bf is None):
+            clock.t += 1; online.step(); online.backfill_tick()
+            time.sleep(0.2)
+        s = read_summary(a) if os.path.exists(od.summary_path(a)) else None
+        good &= check(s is not None and s["source"] == "backfill" and s["complete"] and s["run"]["end"] == "stopped"
+                      and s["setup_known"] is False and s["setup_at_run_time"] == "unknown"
+                      and any(c["reason"] == "setup_unknown" for c in s["caveats"]),
+                      f"backfill: no summary of run_001 ({s and (s['source'], s['complete'])})")
+        good &= check(bad in online.bf_skipped and "cannot read" in online.bf_skipped[bad][1] and not os.path.exists(od.summary_path(bad)),
+                      f"backfill: the unreadable run not skipped with its reason ({online.bf_skipped})")
+        for _ in range(3):
+            clock.t += 1; online.step(); online.backfill_tick()
+        good &= check(online.bf is None, "backfill: the unreadable run tried again")
+        runs = {r["name"]: r for r in online.runs()}
+        good &= check(runs["run_001"]["summary"]["complete"] and runs["run_001"]["summary"]["source"] == "backfill"
+                      and "cannot read" in runs["run_000"].get("backfill", ""), f"backfill: /runs {runs['run_000']}")
+        good &= check(os.stat(a).st_mtime_ns == a_mtime and od.newest_run_folder(root) == b, "backfill: the folder's time changed")
+        # the same run read live (a copy, by its own dashboard) gives the same summary
+        cp = os.path.join(tmp, "bf_copy", "run_001")
+        shutil.copytree(a, cp)
+        os.remove(od.summary_path(cp))
+        clock2 = Clock()
+        live = make_online(cp, SERIALS, EIGHT, clock2)
+        for _ in range(6):
+            clock2.t += 1; live.step(); wait_tasks(live)
+        L = read_summary(cp)
+        same = ("complete", "incomplete", "caveats", "boards", "channels", "finder", "histograms", "occupancy", "history", "data", "fingerprint", "scope")
+        for x in (L, s):                         # "analysed with the setup of <its own time>"
+            x["caveats"] = [c for c in x["caveats"] if c["reason"] != "setup_unknown"]
+        diff = [k for k in same if L[k] != s[k] and k != "finder"]
+        fin = [k for k in L["finder"] if L["finder"][k] != s["finder"][k] and k not in ("window_src", "decided")]
+        fin += [k for k in L["finder"]["decided"] if L["finder"]["decided"][k] != s["finder"]["decided"][k] and k != "reference_cpu_s"]
+        diff += [f"finder.{k}" for k in fin]   # (where the window came from, and CPU seconds, differ)
+        good &= check(L["source"] == "read_after_end" and not diff, f"backfill: differs from the live summary of the same run in {diff}")
+    finally:
+        od.BACKFILL_IDLE_S, od.BACKFILL_LOOK_S = saved
+        online.backfill_stop("test over")
+        os.chmod(os.path.join(bad, "run_001_15880_PSD_2_000.fsu"), 0o644)
+    if good:
+        ok(f"none during a run; started between runs at nice 19, killed within a second by a run start leaving nothing; "
+           f"{s['data']['hits_counted']:,} hits, identical to the live summary of the same run; the unreadable run skipped once, with its reason")
+
+
+def scenario_summary_route(tmp):
+    print("== GET /summary: anyone may read a recorded run's summary; only a run folder's bare name is taken")
+    root = os.path.join(tmp, "route_data"); os.makedirs(root)
+    a = os.path.join(root, "run_001"); os.makedirs(a)
+    clock = Clock(); boards = boards_for(a, seed=121)
+    online = make_online(a, SERIALS, EIGHT, clock)
+    drive(online, clock, boards, 0, 5)
+    finish(online, clock, boards)
+    write_run_file(a)
+    b = os.path.join(root, "run_002"); os.makedirs(b)
+    boards_for(b, seed=122)[0].write(0, [(1000, 0, 0, 512, 100, 50)])
+    secret = os.path.join(tmp, "outside", "secret_001"); os.makedirs(secret)
+    shutil.copy(os.path.join(a, "run_001_15880_PSD_2_000.fsu"), secret)
+    os.symlink(secret, os.path.join(root, "link_001"))
+    os.makedirs(os.path.join(root, ".hidden_001"))
+    online.a.run = None; online.a.data_path = root; online.follow = None
+    od.Handler.online = online
+
+    class Remote(od.Handler):
+        def local(self):
+            return False
+    servers = [od.ThreadingHTTPServer(("127.0.0.1", 0), h) for h in (od.Handler, Remote)]
+    for srv in servers:
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+    here, there = (f"http://127.0.0.1:{srv.server_address[1]}" for srv in servers)
+
+    def get(url):
+        try:
+            with urllib.request.urlopen(url) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"null")
+    folder, hits = online.folder, online.state()["hits"]
+    code, d = get(there + "/summary?run=run_001")
+    good = check(code == 200 and d["summary"] and d["summary"]["complete"] and not d["stale"] and d["run_file"]["run"] == 1
+                 and d["summary"]["finder"]["hits"] == hits, f"route: remote /summary of run_001: {code} {d.get('note')}")
+    code, d = get(there + "/summary?run=run_002")
+    good &= check(code == 200 and d["summary"] is None and d["note"].startswith("no summary recorded") and d["files"] == 3,
+                  f"route: a run without summary: {code} {d}")
+    refused = ["", ".", "..", "../outside/secret_001", "run_001/../run_001", "run_001/", "/etc", "%2Fetc%2Fpasswd", "%2e%2e",
+               "%2e%2e%2foutside%2fsecret_001", "run_001%00", "run%5C001", "link_001", ".hidden_001", "nonexistent_001", "x" * 300,
+               urllib.parse.quote(secret, safe="")]
+    for name in refused:
+        code, d = get(there + "/summary?run=" + name)
+        good &= check(code in (400, 404) and d["summary"] is None and "folder" not in d and "secret" not in json.dumps(d),
+                      f"route: /summary?run={name[:40]} answered {code} {str(d)[:120]}")
+    code, d = get(there + "/summary")
+    good &= check(code == 400, f"route: /summary without a run: {code}")
+    good &= check(get(there + "/load?folder=" + a)[0] == 403 and get(there + "/live")[0] == 403, "route: remote /load or /live not refused")
+    good &= check(get(here + "/summary?run=run_001")[0] == 200, "route: local /summary refused")
+    code, d = get(there + "/runs")
+    rs = {r["name"]: r for r in d["runs"]}
+    good &= check(code == 200 and rs["run_001"]["summary"]["complete"] and not rs["run_001"]["summary"]["stale"]
+                  and rs["run_002"]["summary"] is None, f"route: /runs {code}")
+    with open(os.path.join(a, "run_001_1443_PSD_2_000.fsu"), "ab") as f:      # the files changed after the summary
+        f.write(b"\0" * 16)
+    code, d = get(there + "/summary?run=run_001")
+    good &= check(code == 200 and d["stale"] and "changed" in d["note"], f"route: changed files not marked stale ({d.get('note')})")
+    good &= check(online.folder == folder and online.state()["hits"] == hits and online.inspect is None, "route: /summary changed the live view")
+    for srv in servers:
+        srv.shutdown()
+    if good:
+        ok(f"another machine reads summaries (and run.json-only metadata) while /load and /live stay refused; "
+           f"{len(refused)} names that are not a run folder's (paths, .., links out, hidden, encoded) refused; changed files marked stale")
+
+
+def scenario_backfill_reread(tmp):
+    print("== backfill re-reads an incomplete summary once (after the runs without one); what the live reading saw is kept")
+    root = os.path.join(tmp, "rr_data"); os.makedirs(root)
+    good = True
+    # run_010: read live from the middle of the run, a board without data (a problem the live page showed)
+    a = os.path.join(root, "run_010"); os.makedirs(a)
+    clock = Clock(); boards = boards_for(a, seed=131)
+    quiet = [b for b in boards if b.serial != 1443]   # Digi-1443's file is there, empty
+    for t in range(3):
+        for b in quiet:
+            b.hits(t * PS, (t + 1) * PS)
+    live = od.Online(od.parse_args(["--run", a, "--boards", ",".join(map(str, SERIALS)), "--eight-channel-boards", "1443",
+                                    "--workers", "0", "--config", "/nonexistent", "--hold-s", "5"]), clock=clock)
+    clock.t += 3
+    drive(live, clock, quiet, 3, 12)
+    finish(live, clock, boards)
+    L = read_summary(a)
+    lp = [p for p in L["problems_during_reading"] if p["text"].startswith("Digi-1443: no data")]
+    good &= check(L["source"] == "live" and [x["reason"] for x in L["incomplete"]] == ["started_mid_run"] and bool(lp),
+                  f"re-read: the live summary is not as set up ({L['incomplete']}, {[p['text'] for p in L['problems_during_reading']]})")
+    # run_012: read live from its start, files of a board not analysed: a re-read cannot make it complete
+    c = os.path.join(root, "run_012"); os.makedirs(c)
+    clock = Clock(); boards = boards_for(c, seed=132) + [Board(c, 1, 30508, 8, [500.0] * 8, seed=8)]
+    live = make_online(c, SERIALS, EIGHT, clock)
+    drive(live, clock, boards, 0, 5)
+    finish(live, clock, boards)
+    C0 = read_summary(c)
+    good &= check([x["reason"] for x in C0["incomplete"]] == ["boards_not_analysed"], f"re-read: run_012 live summary {C0['incomplete']}")
+    for folder, age in ((a, 3600), (c, 3000)):
+        write_run_file(folder)
+        set_old(folder, age)
+    b = os.path.join(root, "run_011"); os.makedirs(b)     # the newest: the run the dashboard shows
+    bs = boards_for(b, seed=133)
+    for t in range(3):
+        for x in bs:
+            x.hits(t * PS, (t + 1) * PS)
+    for x in bs:
+        x.flush(); x.f.close()
+    write_run_file(b)
+    set_old(b, 1800)
+    clock = Clock()
+    online = od.Online(od.parse_args(["--data-path", root, "--boards", ",".join(map(str, SERIALS)), "--eight-channel-boards", "1443",
+                                      "--workers", "0", "--config", "/nonexistent"]), clock=clock)
+    online.fsudaq_probe = lambda: True        # FSUDAQ runs (set here: never the host's)
+    saved = od.BACKFILL_IDLE_S, od.BACKFILL_LOOK_S
+    od.BACKFILL_IDLE_S, od.BACKFILL_LOOK_S = 0, 0
+    try:
+        for _ in range(6):
+            clock.t += 1; online.step(); wait_tasks(online)
+        t_end = time.time() + 300
+        while time.time() < t_end and len(online.bf_done) < 2:
+            clock.t += 1; online.step(); online.backfill_tick()
+            time.sleep(0.2)
+        for _ in range(10):                   # nothing more to do: no third child, no second try of either run
+            clock.t += 1; online.step(); online.backfill_tick()
+            time.sleep(0.1)
+        done = [os.path.basename(f) for f, _ in online.bf_done]
+        good &= check(sorted(done) == ["run_010", "run_012"] and online.bf is None and not online.bf_skipped,
+                      f"re-read: backfills {done}, running {online.bf and online.bf['folder']}, skipped {online.bf_skipped}")
+        A = read_summary(a)
+        P = A.get("previous_live") or {}
+        pp = [p for p in P.get("problems_during_reading", []) if p["text"].startswith("Digi-1443: no data")]
+        good &= check(A["source"] == "backfill" and A["complete"] and P.get("source") == "live"
+                      and [x["reason"] for x in P.get("incomplete", [])] == ["started_mid_run"]
+                      and pp == lp and P.get("reading") == L["reading"] and P.get("written_at") == L["written_at"],
+                      f"re-read: run_010 {A['source']} {A['complete']}, previous_live {P and {k: P[k] for k in ('source', 'complete', 'incomplete')}}")
+        C = read_summary(c)
+        good &= check(C["source"] == "backfill" and [x["reason"] for x in C["incomplete"]] == ["boards_not_analysed"]
+                      and (C.get("previous_live") or {}).get("written_at") == C0["written_at"],
+                      f"re-read: run_012 {C['source']} {C['incomplete']}")
+        meta = od.summary_meta(c, od.run_fingerprint(c))
+        good &= check(not meta["complete"] and meta["source"] == "backfill", f"re-read: run_012 meta {meta}")
+    finally:
+        od.BACKFILL_IDLE_S, od.BACKFILL_LOOK_S = saved
+        online.backfill_stop("test over")
+    # write_summary_file's rules on their own: a reading covering less is kept out and marked (not tried again);
+    # a re-read of another kind carries the live part, and keeps carrying it
+    d = os.path.join(tmp, "rr_unit", "run_020"); shutil.copytree(c, d)
+    live_doc = dict(read_summary(c), source="live", reading={"started_at": "x"}, problems_during_reading=[{"text": "seen live"}])
+    live_doc.pop("previous_live", None)
+    od.write_summary_file(d, live_doc)
+    worse = dict(live_doc, source="backfill", reading={"started_at": "y"}, written_at="later",
+                 incomplete=live_doc["incomplete"] + [{"reason": "analysis_errors", "detail": "x"}])
+    path, written, note = od.write_summary_file(d, worse)
+    K = read_summary(d)
+    good &= check(not written and "kept" in note and K["source"] == "live" and K["backfill_tried"]["fingerprint"] == od.run_fingerprint(d)
+                  and od.summary_meta(d, od.run_fingerprint(d))["backfill_tried"], f"re-read: a worse backfill not kept out ({note})")
+    better = dict(live_doc, source="load", reading={"started_at": "z"}, complete=True, incomplete=[])
+    od.write_summary_file(d, better)
+    again = dict(better, source="replay", reading={"started_at": "w"})
+    od.write_summary_file(d, again)
+    K = read_summary(d)
+    good &= check(K["source"] == "replay" and K["previous_live"]["problems_during_reading"] == [{"text": "seen live"}],
+                  f"re-read: the live part lost over two re-reads ({K.get('previous_live')})")
+    if good:
+        ok("an incomplete live summary re-read once after the others and made complete, with the live problems and coverage "
+           "kept in previous_live; one that stays incomplete re-read once, not again; a worse re-read kept out and marked")
+
+
+def scenario_summary_setup_and_restarts(tmp):
+    print("== summaries record their setup; a later reading with another setup never replaces a live one; two restarts keep it")
+    import hashlib
+    import subprocess
+    good = True
+    root = os.path.join(tmp, "su_data"); os.makedirs(root)
+    # a run followed live: its setup recorded (the map's content by sha256)
+    a = os.path.join(root, "run_040"); os.makedirs(a)
+    clock = Clock(); boards = boards_for(a, seed=141)
+    online = make_online(a, SERIALS, EIGHT, clock, extra=["--hold-s", "5"])
+    drive(online, clock, boards, 0, 12, each=lambda o: o.state())
+    finish(online, clock, boards)
+    L = read_summary(a)
+    mp = L["setup"]["files"]["map"]["path"]
+    with open(mp, "rb") as f:
+        sha = hashlib.sha256(f.read()).hexdigest()
+    good &= check(L["source"] == "live" and L["setup_known"] and L["setup"]["files"]["map"]["sha256"] == sha
+                  and L["setup"]["window_ns"] == 25.0 and bool(L["setup"]["identity"]), f"setup: live summary {L['source']} {L.get('setup')}")
+    # two restarts of the dashboard, each reading the finished run again: "read_after_end", the live part kept through both
+    write_run_file(a)
+    set_old(a, 3600)
+    for n in (1, 2):
+        r = od.Online(od.parse_args(["--run", a, "--boards", ",".join(map(str, SERIALS)), "--eight-channel-boards", "1443",
+                                     "--workers", "0", "--config", "/nonexistent"]), clock=Clock())
+        for _ in range(4):
+            r.clock.t += 1; r.step(); wait_tasks(r)
+        R = read_summary(a)
+        P = R.get("previous_live") or {}
+        good &= check(R["source"] == "read_after_end" and P.get("source") == "live" and P.get("written_at") == L["written_at"]
+                      and P.get("problems_during_reading") == L["problems_during_reading"] and R["setup_known"]
+                      and not any(c["reason"] == "setup_unknown" for c in R["caveats"]),
+                      f"restart {n}: {R['source']}, previous_live from {P.get('source')} {P.get('written_at')}, setup known {R['setup_known']}")
+    # another setup (bunch window) never replaces a live summary
+    other = dict(R, source="backfill", reading={"started_at": "later"}, setup=dict(R["setup"], identity="different"),
+                 complete=True, incomplete=[])
+    other.pop("previous_live", None)
+    live_again = dict(L)                     # the live one back in place, then a backfill of another setup over it
+    od._write_json_whole(a, od.summary_path(a), live_again, live_again["fingerprint"])
+    path, written, note = od.write_summary_file(a, other)
+    K = read_summary(a)
+    good &= check(not written and K["source"] == "live" and "another setup" in K["backfill_tried"]["why"],
+                  f"setup: a backfill of another setup replaced the live summary ({note})")
+    # files changed while the summary was made: not written, nothing left
+    b = os.path.join(root, "run_041"); shutil.copytree(a, b); os.remove(os.path.join(b, "run_040_summary.json"))
+    try:
+        od.write_summary_file(b, dict(L, fingerprint={"files": 1, "bytes": 1}))
+        good &= check(False, "files changed: written anyway")
+    except OSError:
+        pass
+    good &= check(not os.path.exists(od.summary_path(b)) and not [f for f in os.listdir(b) if f.endswith(".tmp")],
+                  "files changed: something left")
+    # the child exits at once when the process that should be its parent is not (PDEATHSIG gap)
+    t0 = time.time()
+    rc = subprocess.run([sys.executable, os.path.join(ROOT, "online", "online_dashboard.py"), "--summarise", b, "--boards",
+                         ",".join(map(str, SERIALS)), "--eight-channel-boards", "1443", "--config", "/nonexistent",
+                         "--parent-pid", "1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120).returncode
+    good &= check(rc == 3 and not os.path.exists(od.summary_path(b)), f"parent check: the child exited {rc} ({time.time() - t0:.1f} s)")
+    # never "finished" by the files' age while FSUDAQ said the run goes on (/run without /stopped)
+    c = os.path.join(root, "run_042"); shutil.copytree(a, c); os.remove(os.path.join(c, "run_040_summary.json")); os.remove(os.path.join(c, "run_040_run.json"))
+    set_old(c, 3600)
+    g = od.Online(od.parse_args(["--run", c, "--boards", ",".join(map(str, SERIALS)), "--eight-channel-boards", "1443",
+                                 "--workers", "0", "--config", "/nonexistent"]), clock=Clock())
+    g.run_open = os.path.abspath(c)
+    g.restart = True
+    g.clock.t += 1; g.step()
+    good &= check(not g.finished_at_start and not g.finished_guess, "guess: taken for finished while FSUDAQ said the run goes on")
+    g.run_open = None; g.restart = True
+    g.clock.t += 1; g.step()
+    good &= check(g.finished_at_start and g.finished_guess and g._source() == "read_after_end",
+                  f"guess: not taken for finished without /run, or labelled {g._source()}")
+    # the rate history over a damaged far-off time tag: fast, left out, said so
+    online.run_daq_bins[10 ** 5] = np.array([3, 0, 0], np.int64)
+    t1 = time.time()
+    hist, span, outside, far = online._run_history(online.t_first, online.t_first + 10 ** 6 * PS, int(online.t_first // PS))
+    good &= check(time.time() - t1 < 1 and far == 3 and outside == 3 and span <= 20 + 1e-9 and len(hist["daq"]["t0_s"]) <= od.HISTORY_POINTS,
+                  f"history: far-off bin {far} far, {outside} outside, span {span}, {time.time() - t1:.2f} s")
+    # ... and in a summary: the mean rates over the run's own span, not to the far-off time
+    newest = online.boards[15880].newest.copy()
+    online.boards[15880].newest[0] = online.t_first + 10 ** 6 * PS
+    doc = online._summary_doc("stopped")
+    online.boards[15880].newest[:] = newest
+    D = doc["data"]
+    ch0 = doc["channels"][0]
+    good &= check(D["span_s"] > 1e5 and D["rate_span_s"] <= 20 + 1e-9 and abs(ch0["mean_rate_hz"] - ch0["hits"] / D["rate_span_s"]) < 1e-6
+                  and any(c["reason"] == "history_partial" and "far from the rest" in c["detail"] for c in doc["caveats"]),
+                  f"rate span: span {D['span_s']}, rate span {D['rate_span_s']}, caveats {[c['reason'] for c in doc['caveats']]}")
+    del online.run_daq_bins[10 ** 5]
+    if good:
+        ok("setup recorded (map sha256, window, identity); two restarts read_after_end with the live part kept and the setup known; "
+           "another setup never replaces the live summary; changed files abort the write; the child checks its parent; no "
+           "age-based end during /run; a far-off time tag left out of the history")
+
+
+def scenario_summary_next_run_and_open(tmp):
+    print("== the next run starting while the analysis is behind writes the live summary; backfill waits for a run open on disk")
+    good = True
+    root = os.path.join(tmp, "nr_data"); os.makedirs(root)
+    a = os.path.join(root, "run_060"); os.makedirs(a)
+    clock = Clock(); boards = boards_for(a, seed=161)
+    online = make_online(a, SERIALS, EIGHT, clock)
+    online.a.run = None; online.a.data_path = root; online.follow = a
+    saved = od.INDEX_WORDS
+    od.INDEX_WORDS = 60_000                   # behind: less is read per step than is written
+    try:
+        drive(online, clock, boards, 0, 10)
+        good &= check(online.status.startswith("falling behind") and not os.path.exists(od.summary_path(a)), f"next run: {online.status}")
+        bnext = os.path.join(root, "run_061"); os.makedirs(bnext)
+        unread = od.run_fingerprint(a)["bytes"] - sum(fs.pos * 4 for bb in online.boards.values() for fs in bb.scans.values())
+        online.run_started(bnext)
+        clock.t += 1; online.step()
+    finally:
+        od.INDEX_WORDS = saved
+    s = read_summary(a) if os.path.exists(od.summary_path(a)) else None
+    good &= check(s is not None and s["source"] == "live" and not s["complete"]
+                  and [x["reason"] for x in s["incomplete"]] == ["next_run_started"] and "not yet scanned" in s["incomplete"][0]["detail"]
+                  and unread > 0 and s["incomplete"][0]["unread_bytes"] == unread and s["incomplete"][0]["bytes"] == s["data"]["bytes"]
+                  and any(p["text"].startswith("the analysis is falling behind") for p in s["problems_during_reading"])
+                  and s["run"]["end"] == "interrupted", f"next run: summary {s and (s['source'], s['incomplete'], s['run']['end'])}")
+    # backfill: a run on disk without a stop, written 15 min ago, FSUDAQ running: open (also with no /run seen)
+    c = os.path.join(root, "run_062"); os.makedirs(c)
+    for x in boards_for(c, seed=162):
+        x.hits(0, PS); x.flush(); x.f.close()
+    write_run_file(c, stop=False)
+    set_old(c, 900)
+    for x in boards:
+        x.f.close()                           # (what the boards still held is never written: the summary stays of these files)
+    write_run_file(a); set_old(a, 7200)
+    clock = Clock()
+    o = od.Online(od.parse_args(["--data-path", root, "--boards", ",".join(map(str, SERIALS)), "--eight-channel-boards", "1443",
+                                 "--workers", "0", "--config", "/nonexistent"]), clock=clock)
+    try:
+        for _ in range(4):
+            clock.t += 1; o.step(); wait_tasks(o)
+        o.fsudaq_probe = lambda: True
+        o.open_cache = (0.0, None)
+        why = o._busy_reason()
+        good &= check(why is not None and "run_062 has no stop recorded" in why, f"open on disk: not seen ({why}, reading {o.folder})")
+        o.fsudaq_probe = lambda: False
+        o.open_cache = (0.0, None)
+        good &= check(o._busy_reason() is None, "open on disk: FSUDAQ not running, still taken for open")
+        o.fsudaq_probe = lambda: True
+        set_old(c, od.OPEN_RUN_MAX_S + 600)
+        o.open_cache = (0.0, None)
+        good &= check(o._busy_reason() is None, "open on disk: nothing written for 12 h, still taken for open")
+        # /run without /stopped, and FSUDAQ gone: no longer "taking run" for ever
+        o.run_open, o.run_open_wall = os.path.abspath(c), time.time()
+        good &= check("taking run run_062" in (o._busy_reason() or ""), "run open: not said")
+        o.fsudaq_probe = lambda: False
+        good &= check(o._busy_reason() is None and o.run_open is None, "run open: FSUDAQ gone, still taking the run")
+        o.fsudaq_probe = lambda: True      # the /stopped missed, but the run file has the stop: not taken
+        o.run_open, o.run_open_wall = os.path.abspath(c), time.time()
+        write_run_file(c, stop=True)
+        o.open_cache = (0.0, None)
+        good &= check(o._busy_reason() is None and o.run_open is None, "run open: the run file has the stop, still taking the run")
+        write_run_file(c, stop=False); set_old(c, od.OPEN_RUN_MAX_S + 600)
+        # the incomplete live summary of run_060 is read again only with the same setup
+        good &= check(o._bf_next() == a, f"re-read: not chosen with the same setup ({o.bf_notes})")
+        o2 = od.Online(od.parse_args(["--data-path", root, "--boards", ",".join(map(str, SERIALS)), "--eight-channel-boards", "1443",
+                                      "--workers", "0", "--config", "/nonexistent", "--window", "40"]), clock=Clock())
+        good &= check(o2._bf_next() is None and "setup now differs" in o2.bf_notes.get(a, ""),
+                      f"re-read: chosen with another bunch window ({o2.bf_notes})")
+    finally:
+        pass
+    # a killed child's folder time is put back only if nothing else changed the folder
+    folder = os.path.join(tmp, "nr_clean"); os.makedirs(folder)
+    with open(os.path.join(folder, "x_001_1_PSD_2_000.fsu"), "wb") as f:
+        f.write(b"\0" * 8)
+    set_old(folder, 3600)
+    st = os.stat(folder)
+
+    class Gone:
+        pid, returncode = 999999, -9
+
+        def poll(self):
+            return -9
+    for changed in (False, True):
+        bf = dict(folder=folder, proc=Gone(), mtime=(st.st_atime_ns, st.st_mtime_ns), names=set(os.listdir(folder)),
+                  err=tempfile.TemporaryFile())
+        if changed:                           # FSUDAQ started a run here meanwhile
+            with open(os.path.join(folder, "x_001_1_PSD.bin"), "wb") as f:
+                f.write(b"\0")
+            bf["names"] = set(os.listdir(folder)) - {"x_001_1_PSD.bin"}
+        with open(os.path.join(folder, f".{os.path.basename(od.summary_path(folder))}.999999.tmp"), "w") as f:
+            f.write("{")
+        os.utime(folder, None)
+        now_ns = os.stat(folder).st_mtime_ns
+        o._bf_cleanup(bf)
+        restored = os.stat(folder).st_mtime_ns == st.st_mtime_ns
+        good &= check(restored != changed, f"cleanup: folder time {'put back over a change' if changed else 'not put back'}")
+    if good:
+        ok("the run left for the next one got its live summary (incomplete, why, its problems); a run on disk without a stop "
+           "holds the backfill while FSUDAQ runs, for 12 h at most; /run without /stopped expires when FSUDAQ is gone; "
+           "a killed child's folder time is put back only over its own changes")
+
+
+def scenario_summary_review2(tmp):
+    print("== a look at another run during a live run writes nothing there; identity covers every input; stale live summaries")
+    good = True
+    root = os.path.join(tmp, "lk_data"); os.makedirs(root)
+    b = os.path.join(root, "run_070"); os.makedirs(b)          # a recorded run to look at
+    for x in boards_for(b, seed=171):
+        x.hits(0, 2 * PS); x.flush(); x.f.close()
+    write_run_file(b); set_old(b, 3600)
+    a = os.path.join(root, "run_071"); os.makedirs(a)          # the run being taken; Digi-1443 writes nothing (a live problem)
+    clock = Clock(); boards = boards_for(a, seed=172)
+    quiet = [x for x in boards if x.serial != 1443]
+    online = od.Online(od.parse_args(["--data-path", root, "--boards", ",".join(map(str, SERIALS)), "--eight-channel-boards", "1443",
+                                      "--workers", "0", "--config", "/nonexistent", "--hold-s", "5"]), clock=clock)
+    online.run_started(a)
+    t = drive(online, clock, quiet, 0, 10)
+    seen = [p["text"] for p in online.problems.values()]
+    good &= check(any(x.startswith("Digi-1443: no data") for x in seen), f"look: no live problem to carry ({seen})")
+    online.load(b)
+    t = drive(online, clock, quiet, t, t + 3)
+    time.sleep(2.1)                                            # the look lasts a while
+    good &= check(online.folder == b and not os.path.exists(od.summary_path(a)) and not [f for f in os.listdir(a) if "summary" in f],
+                  "look: a summary written into the open run's folder")
+    online.live()
+    t = drive(online, clock, quiet, t, t + 8)
+    finish(online, clock, boards)
+    s = read_summary(a)
+    T = truth(boards, SERIALS)
+    good &= check(s["source"] == "live" and s["complete"] and all(c["hits"] == len(T.get(c["slot"], [])) for c in s["channels"])
+                  and any(p["text"].startswith("Digi-1443: no data") for p in s["problems_during_reading"])
+                  and any(c["reason"] == "problems_unwatched" for c in s["caveats"]),
+                  f"look: after it, {s['source']} {s['complete']} {[c['reason'] for c in s['caveats']]}")
+    # /load of the run being taken itself: still live (it follows the run), with what was seen so far
+    c = os.path.join(root, "run_072"); os.makedirs(c)
+    clock = Clock(); boards = boards_for(c, seed=173)
+    o = make_online(c, SERIALS, EIGHT, clock, extra=["--hold-s", "5"])
+    o.a.run = None; o.a.data_path = root; o.follow = c
+    t = drive(o, clock, [x for x in boards if x.serial != 1443], 0, 8)
+    o.load(c)
+    clock.t += 1; o.step()
+    good &= check(o._source() == "live" and any(p["text"].startswith("Digi-1443: no data") for p in o.problems.values()),
+                  f"look at itself: {o._source()}, problems {list(o.problems)}")
+    # the identity changes with every input
+    fd = os.path.join(tmp, "lk_finder"); shutil.copytree(od.ff.FINDER_DIR, fd, ignore=shutil.ignore_patterns("__pycache__"))
+    saved_dir, saved_code = od.ff.FINDER_DIR, dict(od.CODE_HASHES)
+    try:
+        od.ff.FINDER_DIR = fd
+        nch = {sn: (8 if sn in EIGHT else 16) for sn in SERIALS}
+        ident = lambda: od.setup_identity("high", od.setup_files_record({}), 25000, SERIALS, nch)   # noqa: E731
+        base, changed = ident(), []
+        for f in od.FINDER_FILES + ("momentum_map.csv",):
+            with open(os.path.join(fd, f), "ab") as fh:
+                fh.write(b"\n")
+            changed.append((f, ident() != base)); base = ident()
+        od.CODE_HASHES["finder_fast.py"] = "0" * 64
+        changed.append(("code", ident() != base)); base = ident()
+        changed.append(("window", od.setup_identity("high", od.setup_files_record({}), 26000, SERIALS, nch) != base))
+        changed.append(("setting", od.setup_identity("low", od.setup_files_record({}), 25000, SERIALS, nch) != base))
+        good &= check(all(x for _, x in changed), f"identity: unchanged by {[f for f, x in changed if not x]}")
+    finally:
+        od.ff.FINDER_DIR = saved_dir
+        od.CODE_HASHES.clear(); od.CODE_HASHES.update(saved_code)
+    # a stale live summary (the files grew since): replaced by a later reading, which keeps the live part, marked
+    L = read_summary(a)
+    with open(os.path.join(a, "run_001_15880_PSD_2_000.fsu"), "ab") as fh:
+        fh.write(b"\0" * 16)
+    fp = od.run_fingerprint(a)
+    for same_setup in (False, True):
+        newer = dict(L, source="backfill", reading={"started_at": f"later {same_setup}"}, fingerprint=fp, setup_known=False,
+                     setup=dict(L["setup"], identity=L["setup"]["identity"] if same_setup else "other"),
+                     caveats=L["caveats"] + [{"reason": "setup_unknown", "detail": "x"}])
+        newer.pop("previous_live", None)
+        if same_setup:
+            od._write_json_whole(a, od.summary_path(a), L)         # the live one back
+        path, written, note = od.write_summary_file(a, newer)
+        K = read_summary(a)
+        P = K.get("previous_live") or {}
+        good &= check(written and P.get("written_at") == L["written_at"] and P.get("files_changed") is True
+                      and K["setup_known"] is same_setup and any(c["reason"] == "setup_unknown" for c in K["caveats"]) is not same_setup,
+                      f"stale live: same setup {same_setup}: written {written}, previous_live {P.get('files_changed')}, known {K['setup_known']}")
+    # a config JSON cannot hold, and the writer thread
+    cfg = os.path.join(tmp, "lk_nan.json")
+    with open(cfg, "w") as fh:
+        fh.write('{"setting": "high", "note": NaN, "limit": Infinity}')
+    d = os.path.join(root, "run_073"); os.makedirs(d)
+    clock = Clock(); boards = boards_for(d, seed=174)
+    o = make_online(d, SERIALS, EIGHT, clock, extra=["--config", cfg])
+    o.write_async = True
+    drive(o, clock, boards, 0, 4)
+    finish(o, clock, boards)
+    o.flush_writes()
+    s = read_summary(d) if os.path.exists(od.summary_path(d)) else {}
+    good &= check(s.get("setup", {}).get("config", {}).get("note") == "nan" and s["setup"]["config"]["limit"] == "inf"
+                  and any(c["reason"] == "config_not_json" for c in s["caveats"]), f"NaN config / writer thread: {s.get('setup', {}).get('config')}")
+    # summaries only from the production port, unless asked
+    good &= check(od.parse_args(["--data-path", root, "--port", "8057"]).no_summaries
+                  and not od.parse_args(["--data-path", root, "--port", "8057", "--summaries"]).no_summaries
+                  and not od.parse_args(["--data-path", root]).no_summaries, "port guard")
+    if good:
+        ok("a look at another run during a live run writes nothing into it, the live reading goes on with its problems and says "
+           "when it was not watched; /load of the run itself stays live; identity changes with every finder file, the map, the "
+           "code, window and setting; a stale live summary is replaced with its live part kept and the setup known only if equal; "
+           "a NaN config is kept as text; the writer thread writes; only port 8050 writes by default")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="fsudaq_test_online_")
     try:
@@ -1005,7 +1800,10 @@ def main():
                    scenario_live_start, scenario_offsets, scenario_replay, scenario_short_hold, scenario_worker_killed,
                    scenario_idle_worker_killed, scenario_falling_behind, scenario_counters, scenario_finished_at_start,
                    scenario_long_pause, scenario_offsets_dense, scenario_missing_board, scenario_boundaries, scenario_x725,
-                   scenario_window, scenario_run_file, scenario_view_only, scenario_rollover_backlog, scenario_quiet_live_start):
+                   scenario_window, scenario_run_file, scenario_view_only, scenario_rollover_backlog, scenario_quiet_live_start,
+                   scenario_summary_at_stop, scenario_summary_incomplete, scenario_backfill, scenario_summary_route,
+                   scenario_backfill_reread, scenario_summary_setup_and_restarts, scenario_summary_next_run_and_open,
+                   scenario_summary_review2):
             sc(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

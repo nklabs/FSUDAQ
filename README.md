@@ -125,6 +125,8 @@ User must setup the data path for data take. Without the data path, user still c
   - `<prefix>_<run>_programSettings.txt` <- programSettings.txt as it was, the influx token and the elog
     password masked
   - `<prefix>_<run>_run.json` <- the run file: everything about the run that is not data (below)
+  - `<prefix>_<run>_summary.json` <- written by the online dashboard when the run is over: what it computed
+    (totals, histograms, rate history, problems, whether it saw the whole run); online/README.md "Run summary"
 
 All of these are written for every saved run, whatever is answered at Start; a file that cannot be
 written stops the start. The snapshots and copies are never written again (Save refuses a run snapshot;
