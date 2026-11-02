@@ -842,7 +842,7 @@ def parse_args(argv=None):
     p.add_argument("--interval", type=float, default=2.0, help="seconds between gatherings")
     p.add_argument("--online", default="http://localhost:8050/state", help="the online dashboard's state")
     p.add_argument("--online-interval", type=float, default=5.0, help="seconds between reads of the online state (it is large)")
-    p.add_argument("--relay", default="http://129.129.141.236:8770/status", help="pion-ros plc_command relay's GET /status")
+    p.add_argument("--relay", default="http://romulus.psi.ch:8770/status", help="pion-ros plc_command relay's GET /status")
     p.add_argument("--fsudaq-dir", default=os.path.dirname(HERE), help="FSUDAQ folder (programSettings.txt) when FSUDAQ is not running")
     p.add_argument("--limits", default=os.path.join(HERE, "limits.json"))
     return p.parse_args(argv)

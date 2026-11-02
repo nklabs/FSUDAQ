@@ -193,7 +193,7 @@ started and off again *hold* seconds later, and off at the stop if the run ends 
 left on by a run that ends, a Stop, a closed window or a signal.
 
 The commands go by HTTP to the plc_command node of pion-ros on romulus, which holds the PLC's
-command connection (`ledRelayURL`, default `http://129.129.141.236:8770/command`; the node only
+command connection (`ledRelayURL`, default `http://romulus.psi.ch:8770/command`; the node only
 takes commands from the hosts in its `http_allowed_hosts`). Nothing is spawned during a run. The
 PLC's DQ1 is the LED: `ledOnCommand=slowtronics,dq1,on`, `ledOffCommand=slowtronics,dq1,off`.
 A command that is refused or unanswered is logged in red and recorded in the run file; the run

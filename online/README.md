@@ -2,7 +2,7 @@
 
 `online_dashboard.py` follows the run FSUDAQ is writing, merges the boards' `.fsu`
 streams in time, builds bunches, runs the pion-spectrometer track finder on every bunch
-and serves a dashboard at http://localhost:8050/ (http://129.129.141.162:8050/ for anyone
+and serves a dashboard at http://localhost:8050/ (http://odin.psi.ch:8050/ for anyone
 on the network; the controls answer odin and ssh tunnels only). The **Online Dashboard**
 button in FSUDAQ shows it, and starts it on the current data path first if nothing answers
 on port 8050. It runs in its own session, so it keeps running when FSUDAQ closes; the next

@@ -19,11 +19,11 @@ the link sets it.
 
     python3 status/status_server.py          # on odin; standard library only
 
-Anyone on the beamline network can look: http://129.129.141.162:8060/ (status) and
-http://129.129.141.162:8060/limits (limits and names, view only). Limits are saved only from odin
+Anyone on the beamline network can look: http://odin.psi.ch:8060/ (status) and
+http://odin.psi.ch:8060/limits (limits and names, view only). Limits are saved only from odin
 itself or through an ssh tunnel (a quiet window, as for the online dashboard):
 
-    ssh -N -o LogLevel=QUIET -L 8060:localhost:8060 beamtime@129.129.141.162
+    ssh -N -o LogLevel=QUIET -L 8060:localhost:8060 beamtime@odin.psi.ch
 
 then http://localhost:8060/limits. `--bind 127.0.0.1` keeps the whole page to odin and tunnels. Lines move
 within their card by dragging; the order is kept in the browser ("reset lines" restores it).

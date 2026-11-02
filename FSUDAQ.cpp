@@ -98,7 +98,7 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
   ledOffTimer->setTimerType(Qt::PreciseTimer);
   ledOffTimer->setSingleShot(true);
   connect(ledOffTimer, &QTimer::timeout, this, [=](){ LedCommand("off"); });
-  ledRelayURL = "http://129.129.141.236:8770/command";   // romulus
+  ledRelayURL = "http://romulus.psi.ch:8770/command";   // romulus
   ledOnCommand = "slowtronics,dq1,on";                  // PLC DQ1 = dq0 in /plc_status/status
   ledOffCommand = "slowtronics,dq1,off";
   runClockTimer = new QTimer(this);
