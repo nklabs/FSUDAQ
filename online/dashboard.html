@@ -59,6 +59,19 @@
   #c_grid { height:calc(430px * var(--k, 1)); cursor:pointer; }
   .card.tall1 #c_grid { height:calc(620px * var(--k, 1)); }
   .card.tall2 #c_grid { height:calc(840px * var(--k, 1)); }
+  /* Beam vs map: smaller plots, so the tab fits one screen; the top view is drawn to scale */
+  #tab_bvm canvas { height:calc(150px * var(--k, 1)); }
+  #tab_bvm #c_bvm_view { height:calc(300px * var(--k, 1)); cursor:grab; }
+  #tab_bvm .card.tall1 canvas { height:calc(260px * var(--k, 1)); }
+  #tab_bvm .card.tall2 canvas { height:calc(420px * var(--k, 1)); }
+  #tab_bvm .card.tall1 #c_bvm_view { height:calc(520px * var(--k, 1)); }
+  #tab_bvm .card.tall2 #c_bvm_view { height:calc(760px * var(--k, 1)); }
+  #tab_bvm canvas.zoom1 { cursor:crosshair; }
+  #tab_bvm th, #tab_bvm td { padding:1px 5px; }
+  .axes { display:inline-flex; gap:4px; align-items:center; flex-wrap:wrap; }
+  .ctl .axes input[type=number] { width:calc(46px * var(--k, 1)); }
+  #tab_bvm .card details { color:var(--muted); font-size:calc(11px * var(--k, 1)); margin-top:4px; }
+  .axes button { font:calc(11px * var(--k, 1)) system-ui, sans-serif; padding:0 6px; border:1px solid var(--line); background:transparent; color:var(--muted); border-radius:4px; cursor:pointer; }
   .zoomsel { position:fixed; pointer-events:none; background:color-mix(in srgb, var(--muted) 20%, transparent); border:1px solid var(--muted); z-index:5; }
   .bar button, h1 button, .toolbar button, .ctl button { font:calc(11px * var(--k, 1))/calc(18px * var(--k, 1)) system-ui, sans-serif; padding:0 6px; border:1px solid var(--line);
                            background:transparent; color:var(--muted); border-radius:4px; cursor:pointer; }
@@ -207,13 +220,26 @@
 <section id="tab_bvm" hidden>
   <div class="warnbox" id="bvm_warn" hidden></div>
   <div class="grid" data-grid="bvm">
+    <div class="card w2"><h2>Where the beam goes: the floor tool's tracks and the live finder's accepted tracks (top view, to scale)</h2>
+      <div class="ctl"><label><input type="checkbox" id="bv_exp" checked> expected</label><label><input type="checkbox" id="bv_live" checked> live tracks</label>
+        <label title="The finder measures where a track crosses T0, T1 and T2; between T0 and T1 (through the magnet) its path is not measured: a dotted straight line joins them"><input type="checkbox" id="bv_chord" checked> T0→T1 (not measured)</label>
+        <span class="axes" data-plot="c_bvm_view" title="wheel: zoom · drag: move · double-click: the whole setup. Empty fields: the whole setup"></span></div>
+      <canvas id="c_bvm_view"></canvas><div class="legend" id="leg_bvm_view"></div><div class="note" id="note_bvm_view"></div></div>
+    <div class="card w2"><h2>Momentum of accepted tracks: live against expected (each scaled to unit area, MeV/c)</h2>
+      <div class="ctl"><span class="axes" data-plot="c_bvm_p" title="wheel: zoom x · shift+wheel: zoom y · drag across: zoom into that span · double-click: automatic. Empty fields: automatic (fits the expected and live data)"></span></div>
+      <canvas id="c_bvm_p" class="zoom1"></canvas><div class="legend" id="leg_bvm_p"></div><table id="t_bvm_p"></table><div class="note" id="note_bvm_p"></div></div>
     <div class="card"><h2>Published by the floor tool</h2><table id="t_bvm_pub"></table><div class="note" id="note_bvm_pub"></div></div>
-    <div class="card"><h2>Momentum of accepted tracks: live against expected (each scaled to unit area, MeV/c)</h2>
-      <canvas id="c_bvm_p"></canvas><div class="legend" id="leg_bvm_p"></div><table id="t_bvm_p"></table><div class="note" id="note_bvm_p"></div></div>
-    <div class="card"><h2>T0: hits per channel, live against expected (share of the plane)</h2><canvas id="c_bvm_t0"></canvas><div class="legend" id="leg_bvm_t0"></div><table id="t_bvm_t0"></table><div class="note" id="note_bvm_t0"></div></div>
-    <div class="card"><h2>T1: hits per channel, live against expected (share of the plane)</h2><canvas id="c_bvm_t1"></canvas><div class="legend" id="leg_bvm_t1"></div><table id="t_bvm_t1"></table><div class="note" id="note_bvm_t1"></div></div>
-    <div class="card"><h2>T2: hits per channel, live against expected (share of the plane)</h2><canvas id="c_bvm_t2"></canvas><div class="legend" id="leg_bvm_t2"></div><table id="t_bvm_t2"></table><div class="note" id="note_bvm_t2"></div></div>
-    <div class="card"><h2>What the comparison can and cannot say</h2><table id="t_bvm_cav"></table></div>
+    <div class="card"><h2>T0: hits per channel, live against expected</h2>
+      <div class="ctl"><span class="axes" data-plot="c_bvm_t0" title="wheel: zoom x · shift+wheel: zoom y · drag across: zoom into that span · double-click: automatic. Empty fields: automatic (fits the expected and live data)"></span></div>
+      <canvas id="c_bvm_t0" class="zoom1"></canvas><div class="legend" id="leg_bvm_t0"></div><table id="t_bvm_t0"></table><div class="note" id="note_bvm_t0"></div></div>
+    <div class="card"><h2>T1: hits per channel, live against expected</h2>
+      <div class="ctl"><span class="axes" data-plot="c_bvm_t1" title="wheel: zoom x · shift+wheel: zoom y · drag across: zoom into that span · double-click: automatic. Empty fields: automatic (fits the expected and live data)"></span></div>
+      <canvas id="c_bvm_t1" class="zoom1"></canvas><div class="legend" id="leg_bvm_t1"></div><table id="t_bvm_t1"></table><div class="note" id="note_bvm_t1"></div></div>
+    <div class="card"><h2>T2: hits per channel, live against expected</h2>
+      <div class="ctl"><span class="axes" data-plot="c_bvm_t2" title="wheel: zoom x · shift+wheel: zoom y · drag across: zoom into that span · double-click: automatic. Empty fields: automatic (fits the expected and live data)"></span></div>
+      <canvas id="c_bvm_t2" class="zoom1"></canvas><div class="legend" id="leg_bvm_t2"></div><table id="t_bvm_t2"></table><div class="note" id="note_bvm_t2"></div></div>
+    <div class="card"><h2>This comparison: notes and warnings</h2><table id="t_bvm_cav"></table></div>
+    <div class="card"><h2>What each side counts</h2><table id="t_bvm_def"></table></div>
   </div>
 </section>
 
@@ -259,16 +285,23 @@ function setupCanvas(id){ const c=document.getElementById(id); const r=window.de
   const w=c.clientWidth, h=c.clientHeight; c.width=w*r; c.height=h*r; const g=c.getContext('2d'); g.setTransform(r,0,0,r,0,0); return {c,g,w,h}; }
 function message(id, text){ const {g,w,h}=setupCanvas(id); g.fillStyle=css('--muted'); g.font=cfont(12); g.textAlign='center'; g.fillText(text, w/2, h/2); }
 // spec: {xlog, ylog, x0, x1, xfmt, yfmt, xticks, series:[{kind:'bars'|'step'|'line', edges|x, y, color, colors, width, gap}], marks:[{x, color, label}], ylabel, empty}
+// view: {x0, x1, y0, y1} set by hand (null or missing: automatic); yfit: the automatic y fits the bins in view only
 function plot(id, spec){
   const {g,w,h}=setupCanvas(id); const L=Math.round(50*K),B=Math.round(24*K),T=8,R=10;   // room for the labels at this size
-  const own = spec.series.flatMap(s=>s.y).filter(v=>v!=null && isFinite(v) && (spec.ylog ? v>0 : true));
+  const V = spec.view || {};
+  let x0 = V.x0 ?? spec.x0, x1 = V.x1 ?? spec.x1;
+  if(!(x1 > x0) || (spec.xlog && !(x0 > 0))){ x0 = spec.x0; x1 = spec.x1; }
+  const inView = (s, i) => !spec.yfit || !s.edges || (s.edges[i+1] > x0 && s.edges[i] < x1);
+  const usable = v => v!=null && isFinite(v) && (spec.ylog ? v>0 : true);
+  let own = spec.series.flatMap(s=>s.y.filter((v,i)=>inView(s,i))).filter(usable);
+  if(spec.yfit && (!own.length || (!spec.ylog && !own.some(v=>v>0)))) own = spec.series.flatMap(s=>s.y).filter(usable);   // nothing in view: keep the plot (and its zoom)
   if(!own.length || (!spec.ylog && !own.some(v=>v>0))){ message(id, spec.empty || 'no entries yet'); PLOTS[id]=null; return null; }
   // spec.yall: the values of several plots that share one y scale
   const ys = spec.yall ? spec.yall.filter(v=>isFinite(v) && (spec.ylog ? v>0 : true)) : own;
   let y0, y1;
   if(spec.ylog){ y1 = Math.pow(10, Math.ceil(Math.log10(Math.max(...ys))+1e-9)); y0 = Math.pow(10, Math.floor(Math.log10(Math.min(...ys)))); if(y1<=y0) y1=y0*10; }
   else { y0 = Math.min(0, ...ys); y1 = Math.max(...ys)*1.08; }
-  const x0=spec.x0, x1=spec.x1;
+  if(!spec.ylog){ const a = V.y0 ?? y0, b = V.y1 ?? y1; if(b > a){ y0 = a; y1 = b; } }
   const tx = spec.xlog ? (v=>Math.log10(v)) : (v=>v), ty = spec.ylog ? (v=>Math.log10(v)) : (v=>v);
   const X = v => L + (tx(v)-tx(x0))/(tx(x1)-tx(x0)) * (w-L-R);
   const Y = v => h-B - (ty(spec.ylog ? Math.max(v, y0) : v)-ty(y0))/(ty(y1)-ty(y0)) * (h-B-T);
@@ -297,7 +330,8 @@ function plot(id, spec){
     g.strokeStyle=m.color||css('--muted'); g.setLineDash([4,3]); g.lineWidth=1; g.beginPath(); g.moveTo(X(m.x),T); g.lineTo(X(m.x),h-B); g.stroke(); g.setLineDash([]);
     if(m.label){ g.fillStyle=m.color||css('--muted'); g.textAlign='left'; g.fillText(m.label, X(m.x)+3, T+22); } }
   if(spec.ylabel){ g.fillStyle=css('--muted'); g.textAlign='left'; g.fillText(spec.ylabel, L+4, T+10); }
-  return (PLOTS[id] = {X, Y, L, B, T, R, w, h, inv:invX(x0, x1, spec.xlog, L, w-R)});
+  return (PLOTS[id] = {X, Y, L, B, T, R, w, h, x0, x1, y0, y1, inv:invX(x0, x1, spec.xlog, L, w-R),
+                       invY: spec.ylog ? null : py => y0 + (h-B-py)/(h-B-T)*(y1-y0)});
 }
 const PLOTS = {};
 function invX(x0, x1, xlog, pa, pb){ return px => { const f=Math.min(1, Math.max(0, (px-pa)/(pb-pa)));
@@ -824,17 +858,174 @@ async function fetchBvm(){
 function ageText(iso){ const t = Date.parse(iso); if(!isFinite(t)) return '–'; const s = Math.max(0, (Date.now()-t)/1000);
   return s < 120 ? `${s.toFixed(0)} s ago` : s < 7200 ? `${(s/60).toFixed(0)} min ago` : s < 172800 ? `${(s/3600).toFixed(1)} h ago` : `${(s/86400).toFixed(1)} days ago`; }
 const f2 = (v, d) => v==null || !isFinite(v) ? '–' : (+v).toFixed(d);
+// axes of the Beam vs map plots, kept in this browser: {pub: the publish they were set for, v: {plot id: {x0, x1, y0, y1}}}
+// (null or missing: automatic). A new publish fits every plot to it again.
+const AXK = 'fsudaq-bvm-axes';
+let AX = store.get(AXK, {pub:null, v:{}});
+if(!AX || typeof AX !== 'object' || !AX.v || typeof AX.v !== 'object') AX = {pub:null, v:{}};
+const BV_SHOW = Object.assign({exp:true, live:true, chord:true}, store.get('fsudaq-bvm-show', {}));
+function axFields(id){
+  const el = document.querySelector(`.axes[data-plot="${id}"]`); if(!el) return; const r = AX.v[id] || {};
+  for(const k of ['x0','x1','y0','y1']){ const i = el.querySelector('.'+k);
+    if(document.activeElement !== i) i.value = r[k]==null || !isFinite(r[k]) ? '' : +(+r[k]).toPrecision(5); } }
+function axSet(id, r){ AX.v[id] = r; store.set(AXK, AX); axFields(id); if(tab==='bvm') drawBvm(); }
+// the span that holds all but 0.2 % of each series at either end, padded, at least minSpan wide, within [lo, hi]
+function fitBins(edges, ys, lo, hi, minSpan){
+  let a = Infinity, b = -Infinity;
+  for(const y of ys){ if(!y) continue; const tot = y.reduce((t,v)=>t+(v>0?v:0), 0); if(!(tot>0)) continue;
+    let c = 0, i0 = 0, i1 = y.length-1;
+    for(let i=0;i<y.length;i++){ c += Math.max(0, y[i]); if(c > 0.002*tot){ i0 = i; break; } }
+    c = 0; for(let i=y.length-1;i>=0;i--){ c += Math.max(0, y[i]); if(c > 0.002*tot){ i1 = i; break; } }
+    a = Math.min(a, edges[i0]); b = Math.max(b, edges[i1+1]); }
+  if(!(b > a)) return [lo, hi];
+  const pad = Math.max(0.15*(b-a), (minSpan-(b-a))/2);
+  return [Math.max(lo, a-pad), Math.min(hi, b+pad)];
+}
+const intTick = v => Math.abs(v-Math.round(v)) < 1e-6 ? String(Math.round(v)) : '';
+// the publish's top view (GET /expected_view): asked for once per publish
+let BV = null, bvPub, bvAt = 0;
+async function fetchView(pub){
+  bvPub = pub; bvAt = Date.now(); if(!BV || BV.pub !== pub) BV = null; let d = null;
+  try { const r = await fetch('/expected_view', {cache:'no-store'}); d = await r.json(); if(!r.ok) d = {note: (d && d.note) || 'answer ' + r.status}; }
+  catch(e){ d = {note:'no answer from the dashboard'}; }
+  if(pub !== bvPub) return;
+  BV = Object.assign(d || {}, {pub}); if(tab==='bvm') drawBvmView();
+}
+const SP_COLOR = {'pi-':'#2a78d6', 'mu-':'#1baf7a', 'e-':'#eb6834'}, SP_LABEL = {'pi-':'π⁻', 'mu-':'μ⁻', 'e-':'e⁻'};
+const LIVE_TRK = '#d81b60';
+const rgba = (hex, a) => `rgba(${parseInt(hex.slice(1,3),16)},${parseInt(hex.slice(3,5),16)},${parseInt(hex.slice(5,7),16)},${a})`;
+function drawBvmView(){
+  const id = 'c_bvm_view', B = BVM, P = B && B.published, TR = B && B.tracks, note = document.getElementById('note_bvm_view');
+  if(!P){ message(id, B ? 'nothing published' : 'loading…'); PLOTS[id] = null; legend('leg_bvm_view', []); note.textContent = ''; return; }
+  if(!BV){ message(id, 'loading the top view…'); PLOTS[id] = null; return; }
+  if(!BV.top_view){ message(id, BV.note || 'no top view'); PLOTS[id] = null; legend('leg_bvm_view', []); note.textContent = ''; return; }
+  const TV = BV.top_view, V = TV.view, U = AX.v[id] || {};
+  const {g,w,h} = setupCanvas(id); const L = Math.round(50*K), Bm = Math.round(30*K), T = 8, R = 10;
+  let z0 = U.x0 ?? V.z_lo, z1 = U.x1 ?? V.z_hi, x0 = U.y0 ?? V.x_lo, x1 = U.y1 ?? V.x_hi;
+  if(!(z1 > z0)){ z0 = V.z_lo; z1 = V.z_hi; } if(!(x1 > x0)){ x0 = V.x_lo; x1 = V.x_hi; }
+  // to scale (a mm across is as long as a mm along): the range too short for the canvas grows about its centre
+  const pw = w-L-R, ph = h-Bm-T, sc = Math.min(pw/(z1-z0), ph/(x1-x0));
+  const zc = (z0+z1)/2, xc = (x0+x1)/2; z0 = zc - pw/sc/2; z1 = zc + pw/sc/2; x0 = xc - ph/sc/2; x1 = xc + ph/sc/2;
+  const X = z => L + (z-z0)*sc, Y = x => h-Bm - (x-x0)*sc;
+  const poly = pts => { g.beginPath(); pts.forEach((q,i)=> i ? g.lineTo(X(q[0]), Y(q[1])) : g.moveTo(X(q[0]), Y(q[1]))); };
+  g.font = cfont(10); g.lineWidth = 1;
+  for(const v of niceTicks(x0, x1, 5)){ g.strokeStyle = css('--line'); g.globalAlpha = .6; g.beginPath(); g.moveTo(L, Y(v)); g.lineTo(w-R, Y(v)); g.stroke(); g.globalAlpha = 1;
+    g.fillStyle = css('--muted'); g.textAlign = 'right'; g.fillText(sinum(v), L-4, Y(v)+3); }
+  g.textAlign = 'center'; for(const v of niceTicks(z0, z1, 8)) g.fillText(sinum(v), X(v), h-Bm+12);
+  g.fillText('z along the beam (mm)', L + pw/2, h-4);
+  g.strokeStyle = css('--line'); g.beginPath(); g.moveTo(L, T); g.lineTo(L, h-Bm); g.lineTo(w-R, h-Bm); g.stroke();
+  g.save(); g.beginPath(); g.rect(L, T, pw, ph); g.clip();
+  const pole = TV.pole; g.fillStyle = 'rgba(150,150,150,0.25)'; g.fillRect(X(pole.z0), Y(pole.x1), (pole.z1-pole.z0)*sc, (pole.x1-pole.x0)*sc);
+  g.fillStyle = css('--muted'); g.textAlign = 'center'; g.fillText('magnet pole', X((pole.z0+pole.z1)/2), Y(pole.x1)-4);
+  g.strokeStyle = '#c0392b'; g.lineWidth = 1.5; poly(TV.magnet_outline); g.stroke();
+  g.fillStyle = 'rgba(235,104,52,0.10)'; g.strokeStyle = '#eb6834'; poly(TV.cherenkov_box); g.fill(); g.stroke();
+  const top = TV.cherenkov_box.slice(0, 4).reduce((m, q)=> q[1] > m[1] ? q : m);
+  g.fillStyle = '#eb6834'; g.fillText('Cherenkov', X(top[0]), Y(top[1])-4);
+  g.strokeStyle = '#2a78d6'; g.lineWidth = 1; g.setLineDash([3,3]); g.beginPath(); g.moveTo(X(TV.pipe_exit_z_mm), T); g.lineTo(X(TV.pipe_exit_z_mm), h-Bm); g.stroke(); g.setLineDash([]);
+  g.fillStyle = '#2a78d6'; g.textAlign = 'left'; g.fillText('pipe exit', X(TV.pipe_exit_z_mm)+3, h-Bm-4);
+  if(BV_SHOW.exp){ g.lineWidth = 1;
+    for(const sp of Object.keys(TV.paths)){ g.strokeStyle = rgba(SP_COLOR[sp] || '#888888', 0.12);
+      for(const xs of TV.paths[sp]){ if(xs.length < 2) continue; g.beginPath(); xs.forEach((x,i)=> i ? g.lineTo(X(TV.z[i]), Y(x)) : g.moveTo(X(TV.z[i]), Y(x))); g.stroke(); } } }
+  g.fillStyle = '#2a78d6'; g.textAlign = 'center'; g.font = cfont(13); g.fillText('★', X(TV.focus.z), Y(TV.focus.x)+4); g.font = cfont(10);
+  g.lineWidth = Math.max(3, 5*K); g.strokeStyle = css('--fg');
+  for(const d of TV.detectors){ g.beginPath(); g.moveTo(X(d.z), Y(d.x_lo)); g.lineTo(X(d.z), Y(d.x_hi)); g.stroke(); }
+  g.fillStyle = css('--fg'); for(const d of TV.detectors) g.fillText(d.name, X(d.z), Y(d.x_lo)+12);
+  // live: each accepted track at its channels' centres on the finder's own planes (z from the publish's pipe exit)
+  let shown = 0, skipped = 0, off = [];
+  if(TR && TR.planes) TV.detectors.forEach((d, i)=>{ const q = TR.planes[i]; if(!q || !q.ch.length) return;
+    const lo = Math.min(...q.ch.map(c=>c[1])), hi = Math.max(...q.ch.map(c=>c[2])), z = TV.pipe_exit_z_mm + q.s_mm;
+    const dd = Math.max(Math.abs(lo - d.x_lo), Math.abs(hi - d.x_hi), Math.abs(z - d.z)); if(dd > 1) off.push(`${d.name} by ${dd.toFixed(0)} mm`); });
+  if(BV_SHOW.live && TR && TR.rows && TR.rows.length && TR.planes){
+    const pz = TR.planes.map(q => TV.pipe_exit_z_mm + q.s_mm);
+    const cx = TR.planes.map(q => new Map(q.ch.map(([c, lo, hi]) => [c, (lo+hi)/2])));
+    const zEnd = Math.max(...TV.cherenkov_box.map(q=>q[0]));
+    const nmax = TR.rows[0][3];
+    for(let j = TR.rows.length-1; j >= 0; j--){        // the most frequent last, on top
+      const r = TR.rows[j], xs = [cx[0].get(r[0]), cx[1].get(r[1]), cx[2].get(r[2])];
+      if(xs.some(v => v === undefined)){ skipped += r[3]; continue; }
+      shown += r[3];
+      const a = Math.min(0.9, 0.06 + 0.84*Math.sqrt(r[3]/nmax));
+      g.strokeStyle = rgba(LIVE_TRK, a); g.lineWidth = 1.5;
+      g.beginPath(); g.moveTo(X(pz[1]), Y(xs[1])); g.lineTo(X(pz[2]), Y(xs[2])); g.stroke();
+      const k = (xs[2]-xs[1])/(pz[2]-pz[1]);         // straight on after T2 (no field there): dashed, not measured
+      g.strokeStyle = rgba(LIVE_TRK, a*0.6); g.setLineDash([5,4]);
+      g.beginPath(); g.moveTo(X(pz[2]), Y(xs[2])); g.lineTo(X(zEnd), Y(xs[2] + k*(zEnd-pz[2]))); g.stroke();
+      if(BV_SHOW.chord){ g.setLineDash([1.5,3]); g.beginPath(); g.moveTo(X(pz[0]), Y(xs[0])); g.lineTo(X(pz[1]), Y(xs[1])); g.stroke(); }
+      g.setLineDash([]);
+      g.fillStyle = rgba(LIVE_TRK, a); for(let i=0;i<3;i++){ g.beginPath(); g.arc(X(pz[i]), Y(xs[i]), 2, 0, 2*Math.PI); g.fill(); } }
+  }
+  g.restore();
+  g.fillStyle = css('--muted'); g.textAlign = 'left'; g.fillText('x (mm, + = bend side)', L+4, T+10);
+  PLOTS[id] = {L, B:Bm, T, R, w, h, z0, z1, x0, x1, sc};
+  legend('leg_bvm_view', (BV_SHOW.exp ? Object.keys(TV.paths).filter(k=>TV.paths[k].length).map(k=>({name:`expected ${SP_LABEL[k] || k}`, color:SP_COLOR[k] || '#888'})) : [])
+    .concat(BV_SHOW.live ? [{name:`live accepted tracks (${num(TR ? TR.total : 0)})`, color:LIVE_TRK}] : []));
+  const X_ = B.context || {};
+  note.innerHTML = (TR && TR.error ? warn(esc(TR.error)) + ' ' : '') +
+    (off.length ? warn(`The finder places its channels elsewhere than the published detectors (${off.join(', ')}): its channels.csv was exported for another layout, so live tracks and drawn detectors differ.`) + ' ' : '') +
+    (TR && TR.total ? `Live: ${num(TR.total)} accepted tracks ${esc(X_.counted || '')} on ${num(TR.distinct)} channel triplets` +
+      (TR.rows && TR.rows.length < TR.distinct ? ` (the ${num(TR.rows.length)} most frequent drawn: ${num(TR.shown)} tracks)` : '') +
+      '; darker = more. Solid: T1→T2 measured; dashed: straight on; dotted: T0→T1, not measured (it bends in the magnet).' +
+      (skipped ? ' ' + warn(`${num(skipped)} tracks on channels the finder's channels.csv does not place: not drawn.`) : '')
+     : 'No live accepted track yet.');
+}
+document.querySelectorAll('#tab_bvm .axes').forEach(el=>{
+  const id = el.dataset.plot, xy = id === 'c_bvm_view', inp = c => `<input type="number" step="any" class="${c}" placeholder="auto">`;
+  el.innerHTML = `${xy ? 'z' : 'x'} ${inp('x0')}–${inp('x1')} ${xy ? 'x' : 'y'} ${inp('y0')}–${inp('y1')} <button class="axauto">auto</button>`;
+  el.addEventListener('change', e=>{ const k = ['x0','x1','y0','y1'].find(c=>e.target.classList.contains(c)); if(!k) return;
+    const r = Object.assign({}, AX.v[id]); const v = parseFloat(e.target.value); r[k] = isFinite(v) ? v : null; axSet(id, r); });
+  el.querySelector('.axauto').onclick = ()=>axSet(id, {});
+  axFields(id);
+});
+for(const [k, el] of [['exp','bv_exp'], ['live','bv_live'], ['chord','bv_chord']]){
+  const c = document.getElementById(el); c.checked = !!BV_SHOW[k];
+  c.onchange = ()=>{ BV_SHOW[k] = c.checked; store.set('fsudaq-bvm-show', BV_SHOW); drawBvmView(); }; }
+// zoom: as on the topic plots. 1-D plots: wheel zooms x, shift+wheel y, drag across zooms into that span; the top view:
+// wheel zooms, drag moves; double-click: automatic again
+const wheelK = e => Math.exp(Math.max(-200, Math.min(200, (e.deltaY || e.deltaX) * (e.deltaMode === 1 ? 33 : 1))) * 0.002);   // > 1: zoom out
+let axDrag = null, vDrag = null;
+for(const c of document.querySelectorAll('#tab_bvm canvas.zoom1')){ const id = c.id;
+  c.addEventListener('wheel', e=>{ const A = PLOTS[id]; if(!A || A.x0 == null) return; e.preventDefault();
+    const r = c.getBoundingClientRect(), k = wheelK(e), U = Object.assign({}, AX.v[id]);
+    if(e.shiftKey && A.invY){ const at = A.invY(e.clientY - r.top); U.y0 = at - (at - A.y0)*k; U.y1 = at + (A.y1 - at)*k; }
+    else { const at = A.inv(e.clientX - r.left); U.x0 = at - (at - A.x0)*k; U.x1 = at + (A.x1 - at)*k; }
+    axSet(id, U); }, {passive:false});
+  c.addEventListener('mousedown', e=>{ const A = PLOTS[id]; if(!A || A.x0 == null || e.button !== 0) return; e.preventDefault();
+    const r = c.getBoundingClientRect(); axDrag = {id, A, r, x:Math.min(Math.max(e.clientX, r.left+A.L), r.left+A.w-A.R)}; });
+  c.addEventListener('dblclick', ()=>axSet(id, {})); }
+{ const c = document.getElementById('c_bvm_view'), id = c.id;
+  c.addEventListener('wheel', e=>{ const A = PLOTS[id]; if(!A || A.sc == null) return; e.preventDefault();
+    const r = c.getBoundingClientRect(), k = wheelK(e);
+    const az = A.z0 + (e.clientX - r.left - A.L)/A.sc, ax = A.x0 + (A.h - A.B - (e.clientY - r.top))/A.sc;
+    axSet(id, {x0:az - (az - A.z0)*k, x1:az + (A.z1 - az)*k, y0:ax - (ax - A.x0)*k, y1:ax + (A.x1 - ax)*k}); }, {passive:false});
+  c.addEventListener('mousedown', e=>{ const A = PLOTS[id]; if(!A || A.sc == null || e.button !== 0) return; e.preventDefault();
+    vDrag = {A, px:e.clientX, py:e.clientY}; c.style.cursor = 'grabbing'; });
+  c.addEventListener('dblclick', ()=>axSet(id, {})); }
+window.addEventListener('mousemove', ev=>{
+  if(vDrag){ const {A} = vDrag, dz = -(ev.clientX - vDrag.px)/A.sc, dx = (ev.clientY - vDrag.py)/A.sc;
+    AX.v.c_bvm_view = {x0:A.z0 + dz, x1:A.z1 + dz, y0:A.x0 + dx, y1:A.x1 + dx}; drawBvmView(); return; }
+  if(!axDrag) return; const {A, r} = axDrag, x = Math.min(Math.max(ev.clientX, r.left+A.L), r.left+A.w-A.R);
+  Object.assign(zsel.style, {left:Math.min(x, axDrag.x)+'px', width:Math.abs(x-axDrag.x)+'px', top:(r.top+A.T)+'px', height:(A.h-A.B-A.T)+'px'}); zsel.hidden = false; });
+window.addEventListener('mouseup', ev=>{
+  if(vDrag){ vDrag = null; document.getElementById('c_bvm_view').style.cursor = ''; store.set(AXK, AX); axFields('c_bvm_view'); return; }
+  if(!axDrag) return; const {id, A, r} = axDrag; zsel.hidden = true;
+  const x = Math.min(Math.max(ev.clientX, r.left+A.L), r.left+A.w-A.R), a = Math.min(x, axDrag.x), b = Math.max(x, axDrag.x); axDrag = null;
+  if(b - a > 4) axSet(id, Object.assign({}, AX.v[id], {x0:A.inv(a - r.left), x1:A.inv(b - r.left)})); });
+
 function drawBvm(){
   const B = BVM, row = (k,v)=>`<tr><td>${k}</td><td class="l">${v}</td></tr>`, W = document.getElementById('bvm_warn');
   const ids = ['c_bvm_p','c_bvm_t0','c_bvm_t1','c_bvm_t2'];
-  if(!B){ ids.forEach(id=>message(id,'loading…')); return; }
+  if(!B){ ids.forEach(id=>message(id,'loading…')); drawBvmView(); return; }
   const P = B.published, C = B.compare;
   if(!P){
     W.hidden = false; W.innerHTML = warn(esc(B.error || 'nothing published yet')) + ' — the floor tool\'s <b>Publish to online</b> writes it (' + esc(B.path||'') + ').';
     ids.forEach(id=>{ message(id, 'nothing published'); PLOTS[id]=null; });
-    ['t_bvm_pub','t_bvm_p','t_bvm_t0','t_bvm_t1','t_bvm_t2','t_bvm_cav'].forEach(id=>document.getElementById(id).innerHTML='');
+    ['t_bvm_pub','t_bvm_p','t_bvm_t0','t_bvm_t1','t_bvm_t2','t_bvm_cav','t_bvm_def'].forEach(id=>document.getElementById(id).innerHTML='');
+    drawBvmView();
     return;
   }
+  if(AX.pub !== P.published_at){ AX = {pub:P.published_at, v:{}}; store.set(AXK, AX); ['c_bvm_view', ...ids].forEach(axFields); }   // a new publish: fit it
+  if(P.has_view && (bvPub !== P.published_at || (BV && !BV.top_view && Date.now() - bvAt > 30000))) fetchView(P.published_at);
+  else if(!P.has_view && bvPub !== P.published_at){ bvPub = P.published_at; BV = {pub:P.published_at, note:'this publish has no top view (an older floor tool wrote it): Publish again'}; }
   const S = P.settings || {}, X = B.context || {}, L = B.live || {};
   const top = (C ? C.mismatch : []).map(m=>`<div>${warn('NOT COMPARABLE: ' + esc(m))}</div>`).join('') +
     (B.error ? `<div>${warn(esc(B.error))}</div>` : '') +
@@ -853,48 +1044,56 @@ function drawBvm(){
         (fm.sha256_lf===L.map_sha256_lf ? ' · the same' : ' · ' + warn('different')) : warn('not named')) +
     row('tool', esc(P.tool_commit || 'not from git'));
   document.getElementById('note_bvm_pub').textContent = `Live numbers count ${X.counted || '–'} (${num(X.bunches)} bunches). The last Publish wins: one file for everyone.`;
-  // momentum
+  // momentum: the axes fit the expected and the live shapes (the expected alone until a live track is accepted)
   const M = C && C.momentum;
-  if(M && M.live && M.expected){
-    plot('c_bvm_p', {x0:0, x1:1000, series:[{kind:'bars', edges:M.edges, y:M.live, color:ST_COLOR.unique, gap:0},
-                                           {kind:'step', edges:M.edges, y:M.expected, color:css('--fg'), width:2}], ylabel:'share per 10 MeV/c'});
-    legend('leg_bvm_p', [{name:'live hist_p', color:ST_COLOR.unique}, {name:'expected (published, read with the ' + (M.read_with==='finder_map' ? "live finder's" : "tool's") + ' map)', color:css('--fg')}]);
+  if(M && M.expected){
+    const [m0, m1] = fitBins(M.edges, [M.live, M.expected], M.edges[0], M.edges[M.edges.length-1], 60), ser = [];
+    if(M.live) ser.push({kind:'bars', edges:M.edges, y:M.live, color:ST_COLOR.unique, gap:0});
+    ser.push({kind:'step', edges:M.edges, y:M.expected, color:css('--fg'), width:2});
+    plot('c_bvm_p', {x0:m0, x1:m1, view:AX.v.c_bvm_p, yfit:true, series:ser, ylabel:'share per 10 MeV/c'});
+    legend('leg_bvm_p', (M.live ? [{name:'live hist_p', color:ST_COLOR.unique}] : []).concat([{name:'expected (published, read with the ' + (M.read_with==='finder_map' ? "live finder's" : "tool's") + ' map)', color:css('--fg')}]));
     document.getElementById('t_bvm_p').innerHTML = '<tr><th></th><th>live</th><th>expected</th><th>live − expected</th></tr>' +
       `<tr><td>mean (MeV/c)</td><td>${f2(M.mean.live,1)}</td><td>${f2(M.mean.expected,1)}</td><td>${f2(M.mean.diff,1)}</td></tr>` +
       `<tr><td>sd (MeV/c)</td><td>${f2(M.sd.live,1)}</td><td>${f2(M.sd.expected,1)}</td><td>${f2(M.sd.diff,1)}</td></tr>`;
-    document.getElementById('note_bvm_p').textContent = `${num(M.live_tracks)} live accepted tracks. Mean and sd from the bins' centres, both alike ` +
-      `(the publish's own, from the exact momenta before any correction: ${f2(M.published_mean_MeV,1)} ± ${f2(M.published_sd_MeV,1)}). Electron correction: ${M.electron_correction}.`;
-  } else { message('c_bvm_p', M ? 'no live accepted track yet' : 'not compared (see the notes)'); PLOTS.c_bvm_p=null; legend('leg_bvm_p', []);
+    document.getElementById('note_bvm_p').textContent = (M.live ? `${num(M.live_tracks)} live accepted tracks.` : 'No live accepted track yet: the expected shape alone.') +
+      ` Mean, sd from the bins' centres (the publish's exact: ${f2(M.published_mean_MeV,1)} ± ${f2(M.published_sd_MeV,1)}). Electron correction: ${M.electron_correction}.`;
+  } else { message('c_bvm_p', 'not compared (see the notes)'); PLOTS.c_bvm_p=null; legend('leg_bvm_p', []);
     document.getElementById('t_bvm_p').innerHTML=''; document.getElementById('note_bvm_p').textContent=''; }
-  // planes
+  // planes: the axes fit the channels the expected and the live hits are on
   ['T0','T1','T2'].forEach((t,i)=>{ const Q = C && C.planes[t], id='c_bvm_t'+i, tb=document.getElementById('t_bvm_t'+i), nt=document.getElementById('note_bvm_t'+i);
     if(!Q){ message(id, 'not in the publish'); PLOTS[id]=null; tb.innerHTML=''; nt.textContent=''; legend('leg_bvm_t'+i, []); return; }
     const edges=[...Array(Q.n_channels+1).keys()].map(v=>v+0.5), ser=[];
+    const [c0, c1] = fitBins(edges, [Q.live_share, Q.expected_share], 0.5, Q.n_channels+0.5, 8);
     if(Q.live_share) ser.push({kind:'bars', edges, y:Q.live_share, color:PLANE_COLOR[i], gap:0.5});
     ser.push({kind:'step', edges, y:Q.expected_share, color:css('--fg'), width:2});
-    plot(id, {x0:0.5, x1:Q.n_channels+0.5, xfmt:v=>String(Math.round(v)), series:ser, ylabel:'share', empty:'no hits'});
+    plot(id, {x0:c0, x1:c1, view:AX.v[id], yfit:true, xfmt:intTick, series:ser, ylabel:'share', empty:'no hits'});
     legend('leg_bvm_t'+i, [{name:'live occupancy', color:PLANE_COLOR[i]}, {name:'expected', color:css('--fg')}]);
     tb.innerHTML = '<tr><th></th><th>live</th><th>expected</th></tr>' +
-      `<tr><td>centroid (channel)</td><td>${f2(Q.centroid_ch.live,2)}</td><td>${f2(Q.centroid_ch.expected,2)}</td></tr>` +
-      `<tr><td>width, sd (channels)</td><td>${f2(Q.width_ch.live,2)}</td><td>${f2(Q.width_ch.expected,2)}</td></tr>` +
-      `<tr><td>centroid (mm, lab x)</td><td>${f2(Q.centroid_mm.live,1)}</td><td>${f2(Q.centroid_mm.expected,1)}</td></tr>` +
-      `<tr><td>width, sd (mm)</td><td>${f2(Q.width_mm.live,1)}</td><td>${f2(Q.width_mm.expected,1)}</td></tr>` +
+      `<tr><td>centroid: ch (mm)</td><td>${f2(Q.centroid_ch.live,2)} (${f2(Q.centroid_mm.live,1)})</td><td>${f2(Q.centroid_ch.expected,2)} (${f2(Q.centroid_mm.expected,1)})</td></tr>` +
+      `<tr><td>width, sd: ch (mm)</td><td>${f2(Q.width_ch.live,2)} (${f2(Q.width_mm.live,1)})</td><td>${f2(Q.width_ch.expected,2)} (${f2(Q.width_mm.expected,1)})</td></tr>` +
       `<tr><td>overlap of the shapes</td><td colspan="2">${f2(Q.overlap,3)} (1 = the same shape)</td></tr>`;
-    nt.innerHTML = (L.placeholder ? warn('Shape only — placeholder cabling: the channel numbers are not known to be the detector\'s.') + ' ' : 'Shape only. ') +
-      `${num(Q.live_hits)} live hits. Channels 1-based; mm from the publish's channel spans.` + (Q.note ? ' ' + warn(esc(Q.note)) + '.' : ''); });
-  // caveats
-  const mn = P.meanings || {};
-  document.getElementById('t_bvm_cav').innerHTML =
-    (C ? C.notes : []).map(n=>row('note', esc(n))).join('') +
+    nt.innerHTML = (L.placeholder ? warn('Placeholder cabling: the channel numbers are not known to be the detector\'s.') + ' ' : '') +
+      `${num(Q.live_hits)} live hits.` + (Q.note ? ' ' + warn(esc(Q.note)) + '.' : ''); });
+  // the caveats, in two cards: this comparison's notes and warnings; what each side counts
+  const mn = P.meanings || {}, TR = B.tracks || {};
+  const cav = (C ? C.notes : []).map(n=>row('note', esc(n))).join('') +
     (P.warnings||[]).map(w=>row('the tool warned', warn(esc(w)))).join('') +
-    row('occupancy', 'live: every digitizer hit on a tracker channel (all bunches, no light cut while there are no gains, noise and pile-up included), counted, not a rate; expected: beam particles only, at the tool\'s threshold') +
-    row('momentum', 'live hist_p: accepted tracks (unique, and every track of "tracks"), without bunches the Cherenkov or the entrance veto marked; the tool models no pile-up, noise, veto, time or light tests') +
-    (mn.planes ? row('expected hits', esc(mn.planes)) : '') + (mn.momentum ? row('expected momentum', esc(mn.momentum)) : '') +
-    (mn.events ? row('simulated', esc(mn.events)) : '');
+    (TR.error ? row('live tracks', warn(esc(TR.error))) : '');
+  document.getElementById('t_bvm_cav').innerHTML = cav || row('–', 'nothing to note: the map, setting and field agree, and the tool gave no warning');
+  const tool = [['expected hits', mn.planes], ['expected momentum', mn.momentum], ['simulated', mn.events],
+                ['expected top view', BV && BV.top_view && BV.top_view.meaning]].filter(([, t])=>t);
+  document.getElementById('t_bvm_def').innerHTML =
+    row('hits', 'live: every hit on a tracker channel (noise and pile-up too; no light cut without gains), counted; expected: beam particles only, at the tool\'s threshold. Shape only: shares of the plane') +
+    row('momentum', 'live: accepted tracks, without bunches the Cherenkov or the veto marked; expected: no pile-up, noise, veto, time or light tests') +
+    row('top view', 'live: accepted tracks at their channels\' centres, as the finder places them (finder/channels.csv), measured at T0, T1, T2 only; expected: simulated tracks') +
+    row('channels', '1-based; mm = lab x, from the publish\'s channel spans') +
+    (tool.length ? `<tr><td colspan="2"><details><summary>the floor tool's own definitions</summary>${tool.map(([k, t])=>`<p><b>${esc(k)}</b>: ${esc(t)}</p>`).join('')}</details></td></tr>` : '');
+  drawBvmView();
 }
 
 // ---------------------------------------------------------------- card layout (per tab)
 const LAYOUT_KEY = 'fsudaq-dashboard-layout-2';
+const GRID_V = {bvm:2};   // a grid's default layout changed: what was saved for it before is not applied (the other grids keep theirs)
 const WIDTHS = ['', 'w2', 'wfull'], HEIGHTS = ['', 'tall1', 'tall2'];
 const grids = [...document.querySelectorAll('.grid')];
 const cards = grids.flatMap(gr => [...gr.querySelectorAll('.card')]);
@@ -902,7 +1101,7 @@ cards.forEach(c => { c.dataset.id = c.querySelector('[data-card],canvas,table').
 const defaults = Object.fromEntries(cards.map(c => [c.dataset.id, {w: Math.max(0, WIDTHS.findIndex(x=>x && c.classList.contains(x)))}]));
 const defaultOrder = Object.fromEntries(grids.map(gr => [gr.dataset.grid, [...gr.children].map(c=>c.dataset.id)]));
 function saveLayout(){
-  const L = { order:Object.fromEntries(grids.map(gr=>[gr.dataset.grid, [...gr.children].map(c=>c.dataset.id)])), w:{}, h:{}, c:{} };
+  const L = { order:Object.fromEntries(grids.map(gr=>[gr.dataset.grid, [...gr.children].map(c=>c.dataset.id)])), w:{}, h:{}, c:{}, v:GRID_V };
   L.r = {};
   for(const c of cards){ L.w[c.dataset.id]=+c.dataset.w||0; L.h[c.dataset.id]=+c.dataset.h||0; L.c[c.dataset.id]=c.classList.contains('collapsed');
                          if(c.classList.contains('newrow')) L.r[c.dataset.id]=true; }
@@ -913,6 +1112,9 @@ function setSize(c, w, h){ c.dataset.w = w; c.dataset.h = h;
   if(WIDTHS[w]) c.classList.add(WIDTHS[w]); if(HEIGHTS[h]) c.classList.add(HEIGHTS[h]); }
 function applyLayout(L){
   const byId = Object.fromEntries(cards.map(c=>[c.dataset.id, c]));
+  const fresh = gr => (GRID_V[gr] || 0) === ((L.v || {})[gr] || 0);
+  const keep = m => Object.fromEntries(Object.entries(m || {}).filter(([id])=>byId[id] && fresh(byId[id].dataset.grid)));
+  L = {order:Object.fromEntries(Object.entries(L.order || {}).filter(([gr])=>fresh(gr))), w:keep(L.w), h:keep(L.h), c:keep(L.c), r:keep(L.r)};
   for(const gr of grids){ const want=((L.order||{})[gr.dataset.grid]||[]).filter(id=>byId[id] && byId[id].dataset.grid===gr.dataset.grid);
     const def=defaultOrder[gr.dataset.grid];   // a card added since the layout was saved goes in after its default neighbour
     def.forEach((id,k)=>{ if(!want.includes(id)){ const at = k ? want.indexOf(def[k-1])+1 : 0; want.splice(at, 0, id); } });

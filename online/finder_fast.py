@@ -252,8 +252,9 @@ def _fast_bunch(nb, bp, bc, bq, bt, lut, map_p, gang, sigma_t, light_p, light_q,
                 max_cands, max_combos, veto, cher, cl_size, trk, W):
     """One bunch: bp/bc/bq/bt[:nb] = plane, channel, light, time of its tracker hits.
     Fills cl_size[3, NCL] for every cluster. Returns a status index, or SLOW when the reference
-    has to decide. For an accepted single track, trk = [p, R0, R1, R2, res01, res12, dt12, ncand] with
-    res = measured minus expected flight time between the planes, in ns."""
+    has to decide. For an accepted single track, trk = [p, R0, R1, R2, res01, res12, dt12, ncand, map row] with
+    res = measured minus expected flight time between the planes, in ns, and map row the index of its triplet
+    in the map (Tables.map_p)."""
     # scratch (allocated once by the caller): W = (idx, cstart, cnt, ncl, nr, r_code, r_kind, r_light, r_pair, r_t, r_sg)
     idx, cstart, cnt, ncl, nr, r_code, r_kind, r_light, r_pair, r_t, r_sg = W
     # per plane: hits sorted by (channel, light, time), as the reference's sorted(hits)
@@ -338,7 +339,7 @@ def _fast_bunch(nb, bp, bc, bq, bt, lut, map_p, gang, sigma_t, light_p, light_q,
     # candidates, in itertools.product order, a code counted once; two candidates go to the reference
     seen0 = np.int64(0); ns = 0
     ncand = 0
-    c0 = 0; c1 = 0; c2 = 0; cp = 0.0; cL = 0.0
+    c0 = 0; c1 = 0; c2 = 0; cp = 0.0; cL = 0.0; cm = -1
     for i0 in range(nr[0]):
         for i1 in range(nr[1]):
             for i2 in range(nr[2]):
@@ -369,7 +370,7 @@ def _fast_bunch(nb, bp, bc, bq, bt, lut, map_p, gang, sigma_t, light_p, light_q,
                     seen0 = key; ns += 1
                     ncand += 1
                     if ncand == 1:
-                        c0 = i0; c1 = i1; c2 = i2; cp = pm; cL = L
+                        c0 = i0; c1 = i1; c2 = i2; cp = pm; cL = L; cm = mi
                     else:
                         return SLOW           # two candidates: the set search is the reference's
     trk[7] = ncand
@@ -393,11 +394,12 @@ def _fast_bunch(nb, bp, bc, bq, bt, lut, map_p, gang, sigma_t, light_p, light_q,
     trk[4] = r_t[1, c1] - r_t[0, c0] - d0
     trk[5] = r_t[2, c2] - r_t[1, c1] - d1
     trk[6] = r_t[2, c2] - r_t[1, c1]
+    trk[8] = cm
     return 2                                  # unique
 
 
 @njit(cache=True, nogil=True)
-def _fill_track(trk, h_p, h_r, h_res, h_dt):
+def _fill_track(trk, h_p, h_r, h_res, h_dt, h_trip):
     b = _bin(trk[0], 0.0, 1000.0, h_p.size)
     if b >= 0:
         h_p[b] += 1
@@ -412,13 +414,16 @@ def _fill_track(trk, h_p, h_r, h_res, h_dt):
     b = _bin(trk[6], -15.0, 15.0, h_dt.size)
     if b >= 0:
         h_dt[b] += 1
+    m = int(trk[8])                           # accepted tracks per map triplet (Beam vs map: where they went)
+    if m >= 0 and m < h_trip.size:
+        h_trip[m] += 1
 
 
 @njit(cache=True, nogil=True)
 def _bunch_kernel(ts, board, chan, energy, order, plane_of, ch_of, counter_of, gain, installed, calibrated,
                   threshold, window, t0, t1,
                   lut, map_p, gang, sigma_t, light_p, light_q, s_mm, rule, k, has_nsig, nsig, max_cands, max_combos,
-                  occ, h_nhit, h_status, h_p, h_r, h_res, h_dt, h_cl, h_ncand, h_ntrk, h_lucite, n_fast,
+                  occ, h_nhit, h_status, h_p, h_r, h_res, h_dt, h_cl, h_ncand, h_ntrk, h_lucite, h_trip, n_fast,
                   sl_start, sl_plane, sl_ch, sl_q, sl_t, sl_aux):
     """Build bunches from the time-ordered hits (time offsets already removed) and decide each one as
     it closes. Bunches whose first hit is in [t0, t1) are kept. Slow bunches are written to the sl_* arrays (CSR);
@@ -427,7 +432,7 @@ def _bunch_kernel(ts, board, chan, energy, order, plane_of, ch_of, counter_of, g
     bp = np.empty(MAXB, np.int64); bc = np.empty(MAXB, np.int64)
     bq = np.empty(MAXB, np.float64); bt = np.empty(MAXB, np.float64)
     cl = np.zeros((3, NCL), np.int64)
-    trk = np.zeros(8, np.float64)
+    trk = np.zeros(9, np.float64)
     W = _scratch()
     nb = 0; aux = 0; nh = 0; over = False
     in_slice = False; first = np.int64(0)
@@ -452,7 +457,7 @@ def _bunch_kernel(ts, board, chan, energy, order, plane_of, ch_of, counter_of, g
                     for x in range(3):
                         for y in range(NCL):
                             cl[x, y] = 0
-                    for x in range(8):
+                    for x in range(9):
                         trk[x] = 0.0
                     veto = installed[0] and (aux & 1) != 0
                     cher = installed[1] and (aux & 2) != 0
@@ -480,7 +485,7 @@ def _bunch_kernel(ts, board, chan, energy, order, plane_of, ch_of, counter_of, g
                             h_ncand[min(int(trk[7]), h_ncand.size - 1)] += 1
                         if st == 2:
                             h_ntrk[1] += 1
-                            _fill_track(trk, h_p, h_r, h_res, h_dt)
+                            _fill_track(trk, h_p, h_r, h_res, h_dt, h_trip)
                             if installed[2]:
                                 h_lucite[0 if (aux & 4) != 0 else 1] += 1
             if j == n:
@@ -516,7 +521,7 @@ def _bunch_kernel(ts, board, chan, energy, order, plane_of, ch_of, counter_of, g
 class Result:
     """Histograms and counters of one slice; add() merges another."""
 
-    def __init__(self, n_slots):
+    def __init__(self, n_slots, n_map=0):
         self.occ = np.zeros(n_slots + 1, np.int64)
         self.h_nhit = np.zeros(NHIT, np.int64)
         self.h_status = np.zeros(len(STATUS), np.int64)
@@ -528,12 +533,13 @@ class Result:
         self.h_ncand = np.zeros(NCAND, np.int64)
         self.h_ntrk = np.zeros(NTRK, np.int64)
         self.h_lucite = np.zeros(2, np.int64)
+        self.h_trip = np.zeros(n_map, np.int64)       # accepted tracks per map row (Tables.map_n of them)
         self.n_fast = np.zeros(1, np.int64)
         self.n_bunches = 0; self.n_hits = 0; self.n_bad = 0; self.n_slow = 0; self.n_over = 0
         self.slow_s = 0.0
 
     ARRAYS = ("occ", "h_nhit", "h_status", "h_p", "h_r", "h_res", "h_dt", "h_cl", "h_ncand", "h_ntrk",
-              "h_lucite", "n_fast")
+              "h_lucite", "h_trip", "n_fast")
     SCALARS = ("n_bunches", "n_hits", "n_bad", "n_slow", "n_over", "slow_s")
 
     def add(self, o):
@@ -550,12 +556,13 @@ class Result:
 
 
 def _track_from_reference(T, tables, hits, cand):
-    """[p, R0, R1, R2, res01, res12, dt12] of a reference candidate, with the kernel's definitions."""
+    """[p, R0, R1, R2, res01, res12, dt12, 0, map row] of a reference candidate, with the kernel's definitions."""
     p = cand["p"]
     d = of.dt_expected(T, p)
     t = [r["t"] for r in cand["readings"]]
     return np.asarray([p, cand["R"][0], cand["R"][1], cand["R"][2],
-                       t[1] - t[0] - d[0], t[2] - t[1] - d[1], t[2] - t[1], 0.0], np.float64)
+                       t[1] - t[0] - d[0], t[2] - t[1] - d[1], t[2] - t[1], 0.0,
+                       float(tables.lut[tuple(cand["code"])])], np.float64)
 
 
 def decide_slow(tables, chans, res, sl_start, sl_plane, sl_ch, sl_q, sl_t, sl_aux, n_slow):
@@ -580,7 +587,7 @@ def decide_slow(tables, chans, res, sl_start, sl_plane, sl_ch, sl_q, sl_t, sl_au
         if r["tracks"]:
             res.h_ntrk[min(len(r["tracks"]), NTRK - 1)] += 1
             for c in r["tracks"]:
-                _fill_track(_track_from_reference(T, tables, hits, c), res.h_p, res.h_r, res.h_res, res.h_dt)
+                _fill_track(_track_from_reference(T, tables, hits, c), res.h_p, res.h_r, res.h_res, res.h_dt, res.h_trip)
             if luc is not None:
                 res.h_lucite[0 if luc else 1] += 1
     res.slow_s += _time.perf_counter() - t_start
@@ -598,7 +605,7 @@ def process_hits(tables, chans, ts, board, chan, energy, window_ps, t0=None, t1=
     ok = (board >= 0) & (board < chans.toff_ps.shape[0]) & (chan >= 0) & (chan < chans.toff_ps.shape[1])
     ts = np.asarray(ts, np.int64) - np.where(ok, chans.toff_ps[np.where(ok, board, 0), np.where(ok, chan, 0)], 0)
     order = np.argsort(ts, kind="stable")
-    res = Result(chans.n_slots)
+    res = Result(chans.n_slots, tables.map_n)
     n = order.size
     cap_b = max(1024, n // 50); cap_h = max(4096, n // 10)
     while True:
@@ -606,14 +613,14 @@ def process_hits(tables, chans, ts, board, chan, energy, window_ps, t0=None, t1=
         sl_plane = np.zeros(cap_h, np.int64); sl_ch = np.zeros(cap_h, np.int64)
         sl_q = np.zeros(cap_h, np.float64); sl_t = np.zeros(cap_h, np.float64)
         sl_aux = np.zeros(cap_b, np.int64)
-        r0 = Result(chans.n_slots)
+        r0 = Result(chans.n_slots, tables.map_n)
         out = _bunch_kernel(np.ascontiguousarray(ts, np.int64), np.ascontiguousarray(board, np.int64),
                             np.ascontiguousarray(chan, np.int64), np.ascontiguousarray(energy, np.float64),
                             np.ascontiguousarray(order, np.int64), chans.plane, chans.ch, chans.counter,
                             chans.gain, chans.installed, tables.calibrated, tables.threshold,
                             np.int64(window_ps), np.int64(t0), np.int64(t1), *tables.kernel_args(),
                             r0.occ, r0.h_nhit, r0.h_status, r0.h_p, r0.h_r, r0.h_res, r0.h_dt, r0.h_cl,
-                            r0.h_ncand, r0.h_ntrk, r0.h_lucite, r0.n_fast,
+                            r0.h_ncand, r0.h_ntrk, r0.h_lucite, r0.h_trip, r0.n_fast,
                             sl_start, sl_plane, sl_ch, sl_q, sl_t, sl_aux)
         n_b, n_hits, n_bad, n_slow, n_sh, n_over, full = out
         if not full:
@@ -630,18 +637,18 @@ def process_hits(tables, chans, ts, board, chan, energy, window_ps, t0=None, t1=
 def _fast_many(starts, bp_all, bc_all, bq_all, bt_all, aux_all, installed, lut, map_p, gang, sigma_t, light_p,
                light_q, s_mm, rule, k, has_nsig, nsig, max_cands, max_combos, st_out, trk_out):
     cl = np.zeros((3, NCL), np.int64)
-    trk = np.zeros(8, np.float64)
+    trk = np.zeros(9, np.float64)
     W = _scratch()
     for b in range(starts.size - 1):
         a = starts[b]; nb = starts[b + 1] - a
-        for x in range(8):
+        for x in range(9):
             trk[x] = 0.0
         veto = installed[0] and (aux_all[b] & 1) != 0
         cher = installed[1] and (aux_all[b] & 2) != 0
         st_out[b] = _fast_bunch(nb, bp_all[a:a + nb], bc_all[a:a + nb], bq_all[a:a + nb], bt_all[a:a + nb], lut,
                                 map_p, gang, sigma_t, light_p, light_q, s_mm, rule, k, has_nsig, nsig, max_cands,
                                 max_combos, veto, cher, cl, trk, W)
-        for x in range(8):
+        for x in range(9):
             trk_out[b, x] = trk[x]
 
 
@@ -699,7 +706,7 @@ def selftest(n=200000, seed=1):
                         bp.append(i); bc.append(ch); bq.append(q); bt.append(t)
                 starts.append(len(bp)); auxv.append(aux)
             installed = np.asarray([True, True, True])
-            st = np.zeros(len(bunches), np.int64); trk = np.zeros((len(bunches), 8))
+            st = np.zeros(len(bunches), np.int64); trk = np.zeros((len(bunches), 9))
             _fast_many(np.asarray(starts, np.int64), np.asarray(bp, np.int64), np.asarray(bc, np.int64),
                        np.asarray(bq, np.float64), np.asarray(bt, np.float64), np.asarray(auxv, np.int64), installed,
                        *tb.kernel_args(), st, trk)
@@ -714,7 +721,7 @@ def selftest(n=200000, seed=1):
                     okb = int(trk[b, 7]) == len(r["candidates"])
                 if okb and r["status"] == "unique":
                     ref = _track_from_reference(T, tb, hits, r["tracks"][0])
-                    okb = np.allclose(ref[:7], trk[b, :7], rtol=0, atol=1e-9)
+                    okb = np.allclose(ref[:7], trk[b, :7], rtol=0, atol=1e-9) and ref[8] == trk[b, 8]
                 if not okb:
                     mism.append(b)
             bad += len(mism)
@@ -785,7 +792,7 @@ def selftest_stream(n=50000, seed=2):
         # the same bunches, built in Python on the corrected times and decided by the reference only
         tc = ts - np.round(np.asarray([offs[(serials[b], c)] for b, c in zip(bd, chv)]) * 1000).astype(np.int64)
         order = np.argsort(tc, kind="stable")
-        ref = Result(chans.n_slots)
+        ref = Result(chans.n_slots, tb.map_n)
         o = order
         starts = np.flatnonzero(np.diff(np.concatenate([[tc[o[0]] - 2 * window], tc[o]])) > window)
         bounds = list(starts) + [o.size]
@@ -810,13 +817,13 @@ def selftest_stream(n=50000, seed=2):
             if r["tracks"]:
                 ref.h_ntrk[min(len(r["tracks"]), NTRK - 1)] += 1
                 for c in r["tracks"]:
-                    _fill_track(_track_from_reference(T, tb, hits, c), ref.h_p, ref.h_r, ref.h_res, ref.h_dt)
+                    _fill_track(_track_from_reference(T, tb, hits, c), ref.h_p, ref.h_r, ref.h_res, ref.h_dt, ref.h_trip)
                 ref.h_lucite[0 if aux & 4 else 1] += 1
             for i in range(3):
                 for cc in of.clusters(hits[i]):
                     ref.h_cl[i, min(len(cc["chans"]), NCL) - 1] += 1
         diffs = [a for a in ("occ", "h_nhit", "h_status", "h_p", "h_r", "h_res", "h_dt", "h_cl", "h_ncand", "h_ntrk",
-                             "h_lucite") if not np.array_equal(getattr(res, a), getattr(ref, a))]
+                             "h_lucite", "h_trip") if not np.array_equal(getattr(res, a), getattr(ref, a))]
         ok = not diffs and res.n_bunches == len(bounds) - 1
         ok_all &= ok
         print(f"stream calibrated={calibrated!s:5s} {spacing[0] // 1000}-{spacing[1] // 1000} ns apart"

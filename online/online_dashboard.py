@@ -60,6 +60,7 @@ from __future__ import annotations
 import argparse
 import collections
 import concurrent.futures as cf
+import csv
 import datetime
 import glob
 import hashlib
@@ -265,6 +266,25 @@ def map_field(map_path):
         except (OSError, ValueError, TypeError, AttributeError):
             continue
     return None, None
+
+
+TRACKS_MAX = 3000                       # Beam vs map: the most frequent map triplets sent to the page
+
+
+def finder_geometry(setting, tables):
+    """Where the live finder puts its tracker channels and planes, to draw its accepted tracks (Beam vs map):
+    finder/channels.csv a_lo_mm/a_hi_mm (lab x as the floor tool exports it, 1-based channels) for this setting,
+    and the planes' distance from the pipe exit (handoff_meta.json planes_s_mm). codes: the map's triplets, in the
+    order of Tables.map_p (= Result.h_trip)."""
+    try:
+        planes = [dict(s_mm=float(v), ch=[]) for v in tables.T["s_mm"]]
+        with open(os.path.join(ff.FINDER_DIR, "channels.csv"), newline="") as f:
+            for r in csv.DictReader(f):
+                if r["setting"] == setting:
+                    planes[int(r["plane"])]["ch"].append([int(r["ch"]), float(r["a_lo_mm"]), float(r["a_hi_mm"])])
+        return dict(planes=planes, codes=[list(c) for c in tables.T["map"]], error=None)
+    except (OSError, ValueError, KeyError, IndexError, TypeError) as ex:
+        return dict(planes=None, codes=None, error=f"the finder's channels.csv was not read: {ex!r}")
 
 
 class BeamExpected:
@@ -514,6 +534,7 @@ class Setup:
             warnings.append("no cable time offsets: the timing tests see the raw delays")
         self.tables = ff.Tables(self.setting, map_path=cfg["map"], calibrated=gains is not None)
         plane_channels = [max(self.tables.T["gang"][i]) for i in range(3)]
+        self.track_geometry = finder_geometry(self.setting, self.tables)   # Beam vs map: where tracks are drawn
         rows, cab_problems = ff.check_cabling(rows, serials, nch, plane_channels)
         problems += cab_problems
         self.chans = ff.Channels(serials, rows, gains, offs)
@@ -582,7 +603,7 @@ def slice_task(task: dict) -> dict:
         daq = dh.process_ordered(tc, slot, np.argsort(tc, kind="stable"), t0, t1, task["ref"], chans.n_slots)
         owned = int(np.count_nonzero((tc >= t0) & (tc < t1)))   # hits whose own time (offset removed) is in the slice
     else:
-        res = ff.Result(chans.n_slots)
+        res = ff.Result(chans.n_slots, tables.map_n)
         daq = dh.DaqResult(chans.n_slots, np.uint32)
         owned = 0
     return dict(t0=t0, t1=t1, res=res.to_dict(), daq=daq.to_dict(), ref=task["ref"], owned=owned, dt=time.perf_counter() - t_start)
@@ -892,7 +913,8 @@ class Online:
         self.skip_existing = not from_start
         self.skip_marks = None                  # live start: each file's size (words) when the dashboard started
         self.since = None                       # live start: the time from which data are read
-        self.acc = ff.Result(S.chans.n_slots)   # the finder's histograms and counters
+        self.acc = ff.Result(S.chans.n_slots, S.tables.map_n)   # the finder's histograms and counters
+        self.trip_skipped = 0                   # slices whose track counts did not fit the map (Beam vs map)
         self.daq = dh.DaqResult(S.chans.n_slots)
         self.secs = {}                          # second of data time -> hits per slot
         self.slices = []                        # (t0, t1, bunches, statuses, tracks) of every folded slice
@@ -1450,7 +1472,11 @@ class Online:
                 res = r["res"]
                 if epoch == self.epoch:
                     for k in ff.Result.ARRAYS:
-                        getattr(self.acc, k)[...] += res[k]
+                        a = getattr(self.acc, k)
+                        if k == "h_trip" and a.shape != np.shape(res[k]):
+                            self.trip_skipped += 1   # counted with other tables (another map): not added, not a crash
+                            continue
+                        a[...] += res[k]
                     for k in ff.Result.SCALARS:
                         setattr(self.acc, k, getattr(self.acc, k) + res[k])
                     d = r["daq"]
@@ -1497,19 +1523,43 @@ class Online:
             context = dict(folder=self.folder, inspect=self.inspect if self.inspect == self.folder else None, mode=self.mode,
                            counted="since the reading began" if not cleared else f"since the last {cleared[-1]['what']} change",
                            bunches=int(self.acc.n_bunches))
-        out = dict(path=self.expected.path, error=err, published=None, compare=None, context=context,
+            # where the accepted tracks went: count per map triplet, most frequent first, drawn with the finder's own
+            # channel positions (the publish's top view gives the z frame: its pipe exit)
+            G, trip = S.track_geometry, self.acc.h_trip
+            tracks = dict(planes=G["planes"], error=G["error"], rows=None, total=int(trip.sum()), shown=0, distinct=0)
+            if G["codes"] is not None and trip.size == len(G["codes"]):
+                nz = np.flatnonzero(trip)
+                nz = nz[np.argsort(-trip[nz], kind="stable")][:TRACKS_MAX]
+                tracks.update(rows=[[*G["codes"][j], int(trip[j]), round(float(S.tables.map_p[j]), 1)] for j in nz],
+                              shown=int(trip[nz].sum()), distinct=int(np.count_nonzero(trip)))
+            elif G["codes"] is not None:
+                tracks["error"] = "the track counts do not match the map loaded (not shown)"
+            if getattr(self, "trip_skipped", 0):
+                tracks["error"] = (tracks["error"] + "; " if tracks["error"] else "") + \
+                    f"{self.trip_skipped} slice(s) counted with another map: their tracks are not in the picture"
+        out = dict(path=self.expected.path, error=err, published=None, compare=None, context=context, tracks=tracks,
                    live={k: v for k, v in live.items() if k not in ("occupancy", "hist_p", "p_edges")})
         if doc is not None:
             M = doc.get("momentum") or {}
             out["published"] = dict(
                 published_at=doc.get("published_at"), tool_commit=doc.get("tool_commit"), settings=doc.get("settings"),
                 map={k: v for k, v in (doc.get("map") or {}).items()}, warnings=doc.get("warnings") or [],
+                has_view=isinstance(doc.get("top_view"), dict),
                 meanings=dict(planes=(doc.get("planes") or {}).get("meaning"), momentum=M.get("meaning"), events=M.get("events")))
             try:
                 out["compare"] = compare_beam(doc, live)
             except (KeyError, TypeError, ValueError, IndexError) as ex:
                 out["error"] = f"the published file cannot be compared: {ex!r}"
         return out
+
+    def expected_view(self):
+        """GET /expected_view: the publish's top view (outlines, sample tracks), apart from /expected: it is large
+        and changes only with a new publish (the page asks again when published_at changes)."""
+        doc, err = self.expected.get()
+        tv = (doc or {}).get("top_view")
+        if not isinstance(tv, dict):
+            return 404, dict(note=err or "the publish has no top view (written by an older floor tool: Publish again)")
+        return 200, dict(published_at=doc.get("published_at"), top_view=tv)
 
     def _board_rows(self, now):
         """Per board: files, what is read, late and early hits, and the live checks (state()["boards"])."""
@@ -1821,7 +1871,8 @@ class Online:
         with self.lock:
             if why == "Clear":
                 self._agg_event("clear", "the page's Clear: the finder's results and the late and early counts start again")
-            self.acc = ff.Result(self.setup.chans.n_slots)
+            self.acc = ff.Result(self.setup.chans.n_slots, self.setup.tables.map_n)
+            self.trip_skipped = 0
             self.daq = dh.DaqResult(self.setup.chans.n_slots)
             self.owned = 0
             self.late_log.clear()
@@ -2936,6 +2987,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, dict(runs=self.online.runs(), inspect=self.online.inspect, backfill=self.online.backfill_state()))
         if path == "/expected":    # the floor tool's published expectation against the live finder, for anyone: read-only
             return self.reply(200, self.online.beam_vs_map())
+        if path == "/expected_view":   # the publish's top view (large, changes only with a new publish), for anyone
+            return self.reply(*self.online.expected_view())
         if path == "/summary":     # a recorded run's summary, for anyone: read-only, nothing changes for the others
             code, d = self.online.summary_reply(q.get("run", [""])[0])
             return self.reply(code, d)

@@ -1879,11 +1879,45 @@ def scenario_beam_vs_map(tmp):
             return False
     srv = od.ThreadingHTTPServer(("127.0.0.1", 0), Remote)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+
+    def get(url):
+        try:
+            with urllib.request.urlopen(base + url) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as ex:
+            return ex.code, json.loads(ex.read())
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{srv.server_address[1]}/expected") as r:
-            code, d = r.status, json.loads(r.read())
+        code, d = get("/expected")
+        v_code, v = get("/expected_view")                  # this publish has no top view
+        with open(path, "w") as f:
+            json.dump(dict(expected_doc(sha, p0=250.5), top_view={"view": {"z_lo": 0}}), f)
+        v2_code, v2 = get("/expected_view")
+        has_view = get("/expected")[1]["published"]["has_view"]
     finally:
         srv.shutdown()
+    # where the accepted tracks went: one count per map triplet, every accepted track once, most frequent first,
+    # with the finder's own channel positions
+    A = online.acc
+    codes = [tuple(c) for c in online.setup.tables.T["map"]]
+    n_acc = int((A.h_ntrk * np.arange(ff.NTRK)).sum())
+    good &= check(d["tracks"]["total"] == int(A.h_trip.sum()) == n_acc and A.h_trip.size == len(codes),
+                  f"bvm: accepted {n_acc}, counted on triplets {d['tracks']['total']}")
+    with online.lock:                                  # known counts on three triplets (the synthetic run accepts none)
+        A.h_trip[[5, 9, 2]] += [3, 7, 1]
+    tr = online.beam_vs_map()["tracks"]
+    rows = tr["rows"] or []
+    good &= check([tuple(r[:3]) for r in rows[:3]] == [codes[9], codes[5], codes[2]] and [r[3] for r in rows[:3]] == [int(A.h_trip[9]), int(A.h_trip[5]), int(A.h_trip[2])],
+                  f"bvm: triplet order {rows[:3]}")
+    good &= check(tr["error"] is None and tr["total"] == int(A.h_trip.sum()) and tr["distinct"] == len(rows)
+                  and tr["shown"] == tr["total"] and all(tuple(r[:3]) in codes for r in rows)
+                  and [r[3] for r in rows] == sorted((r[3] for r in rows), reverse=True)
+                  and all(r[4] == round(online.setup.tables.map_p[codes.index(tuple(r[:3]))], 1) for r in rows)
+                  and len(tr["planes"]) == 3 and all(q["ch"] and all(lo < hi for _, lo, hi in q["ch"]) for q in tr["planes"])
+                  and [q["s_mm"] for q in tr["planes"]] == list(online.setup.tables.T["s_mm"]),
+                  f"bvm: live tracks {tr['total']} of {n_acc} accepted, {tr['distinct']} triplets, {tr['error']}")
+    good &= check(v_code == 404 and "no top view" in v["note"] and v2_code == 200 and v2["top_view"] == {"view": {"z_lo": 0}}
+                  and v2["published_at"] and has_view is True, f"bvm: /expected_view {v_code} {v} {v2_code} {has_view}")
     good &= check(code == 200 and d["live"]["map_sha256_lf"] == sha and d["published"]["settings"]["p0_MeV"] == 250.5
                   and not d["compare"]["mismatch"] and d["compare"]["planes"]["T0"]["note"].startswith("the live finder has 8 channels")
                   and d["compare"]["momentum"] is not None, f"bvm: /expected {code} {d.get('error')} {d.get('compare', {}).get('mismatch')}")
@@ -1892,7 +1926,8 @@ def scenario_beam_vs_map(tmp):
     if good:
         ok("shapes, centroids, widths (channels and mm), overlap and the electron-corrected momentum match the hand-computed "
            "values; another map, setting, field or no finder map are flagged; missing, broken, foreign, valid and changed files; "
-           "/expected open to all, the live map recognised by its LF sha256")
+           "/expected open to all, the live map recognised by its LF sha256; every accepted track counted once on its map "
+           "triplet, drawn at the finder's channel positions; /expected_view only with a top view")
 
 
 def main():
