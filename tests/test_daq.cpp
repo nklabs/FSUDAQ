@@ -255,15 +255,20 @@ public:
     CHECK(dialogs.isEmpty(), "dialogs: %s", qPrintable(dialogs.join(" | ")));
     if( nFail == 0 ) OK("6 boards, %d files for Digi-15880, record and snapshots in place; %ld aggregates were still on Digi-15880 at Stop", NumFiles(runDir, 15880), behind);
 
-    // the next number already on disk (a stale lastRun.sh): "Go back" (the default) gives the number back
+    // the next number already on disk (a stale lastRun.sh): skipped, never asked about; run 1 untouched (and read-only)
     int failBefore = nFail;
+    const QStringList run1Files = QDir(runDir).entryList(QDir::Files, QDir::Name);
+    CHECK(!(QFileInfo(runDir + "/temp_001_15880_PSD.bin").permissions() & (QFileDevice::WriteOwner | QFileDevice::WriteGroup | QFileDevice::WriteOther))
+          && !(QFileInfo(runDir + "/temp_001_run_protocol.json").permissions() & QFileDevice::WriteOwner), "run 1's snapshot or protocol copy is writable");
     w->runID = 0; w->leRunID->setText("0");
     dialogs.clear();
     w->AutoRun();
-    CHECK(!w->inDataRun && Dialogs("Run number already used") == 1, "no question, or the run started over run 1");
-    CHECK(w->runID == 0 && w->leRunID->text() == "0", "after Go back the run number is %u (field \"%s\"), expected 0", w->runID, qPrintable(w->leRunID->text()));
-    CHECK(RecordLines().size() == 2, "Go back was recorded");
-    if( nFail == failBefore ) OK("run number on disk: Go back keeps run 1's files and gives the number back");
+    CHECK(w->inDataRun && dialogs.isEmpty() && w->runID == 2 && w->leRunID->text() == "2", "number on disk: run %d as %u (field \"%s\"), dialogs %s",
+          w->inDataRun, w->runID, qPrintable(w->leRunID->text()), qPrintable(dialogs.join(" | ")));
+    Pump(100); w->StopPressed();
+    CHECK(QDir(runDir).entryList(QDir::Files, QDir::Name) == run1Files && Log().contains("Run-001 already has files"), "run 1's files changed, or the skip not logged");
+    CHECK(RecordLines().size() == 4 && RecordLines()[2].startsWith("Start Run | 2 |"), "run record: %s", qPrintable(RecordLines().join(" / ")));
+    if( nFail == failBefore ) OK("run number on disk: skipped to run 2 unasked; run 1's files untouched and read-only");
     w->CloseDigitizers();
   }
 
@@ -627,6 +632,12 @@ public:
     QString runDir = w->RunFolder();
     QStringList before = QDir(runDir).entryList(QDir::Files, QDir::Name);
     qint64 bytes = 0; for( auto & f : before ) bytes += QFileInfo(runDir + "/" + f).size();
+    // a number typed by hand that is on disk: asked, "Go back" (the default) keeps the files and the number
+    dialogs.clear();
+    w->leRunID->setText("7");
+    w->AutoRun();
+    CHECK(!w->inDataRun && Dialogs("Run number already used") == 1 && w->leRunID->text() == "7" && QDir(runDir).entryList(QDir::Files, QDir::Name) == before,
+          "typed number on disk: run %d, field \"%s\", dialogs %s", w->inDataRun, qPrintable(w->leRunID->text()), qPrintable(dialogs.join(" | ")));
     fake_caen_fail(1443, "malloc");
     answers["Run number already used"] = "Overwrite files and continue";
     dialogs.clear();
@@ -1430,7 +1441,7 @@ public:
   }
 
   void UnsavedEditsAtStart(){
-    printf("== Start with settings not in the set: asked once (default Start anyway), saved only when sure, put back if the start fails\n");
+    printf("== Start with settings not in the set: never asked, logged and marked on Save to set; Save to set writes the set in place\n");
     int nFail0 = nFail;
     NewWorkDir(); AddBoards(20, 1); NewFSUDAQ();
     Open();
@@ -1441,42 +1452,37 @@ public:
     Reg thr = DPP::PSD::TriggerThreshold;
     const uint32_t fileThr = Word(file0, thr, 2);
     auto StartStop = [&](){ w->AutoRun(); QString d = w->RunFolder(); if( w->inDataRun ){ Pump(100); w->StopPressed(); } return d; };
+    auto Marked = [&](){ return w->bnSaveToSet->text().endsWith("*"); };
+    auto Tip = [&](){ return w->bnSaveToSet->toolTip(); };
 
     fake_caen_set_reg(15880, 0x10A8, 0x3C);   // a temperature: never a difference
     dialogs.clear();
     w->AutoRun();
-    CHECK(w->inDataRun && dialogs.isEmpty(), "nothing edited: run %d, dialogs %s", w->inDataRun, qPrintable(dialogs.join(" | ")));
+    CHECK(w->inDataRun && dialogs.isEmpty() && !Marked(), "nothing edited: run %d, dialogs %s, button \"%s\"", w->inDataRun, qPrintable(dialogs.join(" | ")), qPrintable(w->bnSaveToSet->text()));
     Pump(100); w->StopPressed();
 
-    //---- an edit: asked, Enter starts this run only; the snapshot has it, the set not
+    //---- an edit: no question; the run starts with it and its snapshot has it, the set not; logged, Save to set marked
     w->digi[0]->WriteRegister(DPP::PSD::TriggerThreshold, 0x55, 2);
     dialogs.clear();
     QString runDir = StartStop();
-    CHECK(Dialogs("Settings not saved") == 1 && dialogs.join("|").contains("=> Start anyway (this run only)"), "the default is not Start anyway: %s", qPrintable(dialogs.join(" | ")));
-    CHECK(Word(runDir + "/" + QFileInfo(runDir).fileName() + "_15880_PSD.bin", thr, 2) == 0x55 && FileBytes(file0) == fileBefore, "snapshot or set wrong after Start anyway");
-    CHECK(Log().contains(QString::asprintf("Digi-15880: 0x%04X TriggerThreshold ch2: file 0x%08X, board 0x%08X", ThrAddr(2), fileThr, 0x55u)), "the register is not named in the log");
-    //---- the same again: not asked, said in the log
-    dialogs.clear();
-    StartStop();
-    CHECK(dialogs.isEmpty() && Log().contains("Unsaved changes kept for this run only"), "asked again for the same changes: %s", qPrintable(dialogs.join(" | ")));
-    //---- a per-run protocol field: never asked, in the run's copy
+    CHECK(dialogs.isEmpty() && Marked() && Tip().contains("last Start: Digi-15880 ("), "an edit: dialogs %s, button \"%s\"", qPrintable(dialogs.join(" | ")), qPrintable(w->bnSaveToSet->text()));
+    CHECK(Word(runDir + "/" + QFileInfo(runDir).fileName() + "_15880_PSD.bin", thr, 2) == 0x55 && FileBytes(file0) == fileBefore, "snapshot or set wrong after the start");
+    CHECK(Log().contains(QString::asprintf("Digi-15880: 0x%04X TriggerThreshold ch2: file 0x%08X, board 0x%08X", ThrAddr(2), fileThr, 0x55u)) && Log().contains("this run starts with them"),
+          "the register is not named in the log");
+    //---- a per-run protocol field: no difference, in the run's copy
     w->sbLedDelaySec->setValue(3.5);
     dialogs.clear();
     runDir = StartStop();
-    CHECK(dialogs.isEmpty() && ReadJson(runDir + "/" + QFileInfo(runDir).fileName() + "_run_protocol.json")["ledDelaySec"].toDouble() == 3.5, "per-run field: dialogs %s", qPrintable(dialogs.join(" | ")));
-    //---- a new difference (a set field of the protocol, and 32 registers): asked; Cancel
-    answers["Settings not saved"] = "Cancel";
+    CHECK(dialogs.isEmpty() && Tip().contains("last Start: Digi-15880 (") && ReadJson(runDir + "/" + QFileInfo(runDir).fileName() + "_run_protocol.json")["ledDelaySec"].toDouble() == 3.5,
+          "per-run field: dialogs %s, tooltip %s", qPrintable(dialogs.join(" | ")), qPrintable(Tip().left(80)));
+    //---- a set field of the protocol, and 32 registers: logged (capped), both marked
     w->sbFileSizeMB->setValue(300);
     w->digi[0]->WriteRegister(DPP::PSD::ShortGateWidth, 0x21, -1);
     w->digi[0]->WriteRegister(DPP::PSD::LongGateWidth, 0x61, -1);
-    const unsigned int run0 = w->runID;
     dialogs.clear();
-    w->AutoRun();
-    CHECK(!w->inDataRun && Dialogs("Settings not saved") == 1 && w->runID == run0 && dialogs.join("|").contains("the run protocol"), "Cancel: run %d, dialogs %s", w->inDataRun, qPrintable(dialogs.join(" | ")));
+    StartStop();
+    CHECK(dialogs.isEmpty() && Tip().contains("last Start: Digi-15880, the run protocol ("), "protocol field: dialogs %s, tooltip %s", qPrintable(dialogs.join(" | ")), qPrintable(Tip().left(80)));
     CHECK(Log().contains("Digi-15880: ... and 13 more") && Log().contains("maxFileSizeMB: set "), "the log is not capped or lacks the protocol field");
-    answers.clear();
-    dialogs.clear();
-    StartStop();   // Start anyway (the default)
     //---- Live Setting Update on: the check still compares the board with the file (and does not write it first)
     fake_caen_set_reg(15880, ThrAddr(5), 0x99);   // changed behind FSUDAQ's back
     w->digi[0]->SetSettingFileUpdate(true);
@@ -1484,72 +1490,32 @@ public:
     dialogs.clear();
     StartStop();
     w->digi[0]->SetSettingFileUpdate(false);
-    CHECK(Dialogs("Settings not saved") == 1 && Log().contains("Live Setting Update is on") && Word(file0, thr, 5) == fileThr5, "Live Setting Update: dialogs %s, file 0x%X", qPrintable(dialogs.join(" | ")), Word(file0, thr, 5));
+    CHECK(dialogs.isEmpty() && Log().contains("Live Setting Update is on") && Log().contains(QString::asprintf("TriggerThreshold ch5: file 0x%08X, board 0x%08X", fileThr5, 0x99u))
+          && Word(file0, thr, 5) == fileThr5, "Live Setting Update: dialogs %s, file 0x%X", qPrintable(dialogs.join(" | ")), Word(file0, thr, 5));
 
-    //---- "Start anyway", then "Go back" at the run-number question: not remembered, asked again
-    w->digi[0]->WriteRegister(DPP::PSD::TriggerThreshold, 0x5A, 6);
-    {
-      const unsigned int last = w->runID;
-      w->runID = last - 1; w->leRunID->setText(QString::number(last - 1));
-      dialogs.clear();
-      w->AutoRun();
-      CHECK(!w->inDataRun && Dialogs("Settings not saved") == 1 && Dialogs("Run number already used") == 1, "Start anyway + Go back: %s", qPrintable(dialogs.join(" | ")));
-      w->runID = last; w->leRunID->setText(QString::number(last));
-      dialogs.clear();
-      StartStop();
-      CHECK(Dialogs("Settings not saved") == 1, "a start that went back remembered the answer: %s", qPrintable(dialogs.join(" | ")));
-    }
-    //---- Save to set chosen but a set file cannot be read (to keep it): not saved, no run, what was saved put back
-    answers["Settings not saved"] = "Save to set and start";
-    {
-      const QByteArray protoNow = FileBytes(proto);
-      chmod(qPrintable(proto), 0200);
-      dialogs.clear();
-      w->AutoRun();
-      chmod(qPrintable(proto), 0644);
-      CHECK(!w->inDataRun && dialogs.join(" ").contains("cannot read " + proto + " to keep what it holds"), "unreadable set file: run %d, dialogs %s", w->inDataRun, qPrintable(dialogs.join(" | ")));
-      CHECK(FileBytes(proto) == protoNow && FileBytes(file0) == fileBefore, "an unreadable set file was written over, or the board file not put back");
-    }
-    //---- Save to set chosen, then "Go back" at the run-number question: the set untouched
-    answers["Settings not saved"] = "Save to set and start";
-    w->digi[0]->WriteRegister(DPP::PSD::TriggerThreshold, 0x56, 3);
-    const QByteArray protoBefore = FileBytes(proto);
-    {
-      const unsigned int last = w->runID;
-      w->runID = last - 1; w->leRunID->setText(QString::number(last - 1));
-      dialogs.clear();
-      w->AutoRun();
-      CHECK(!w->inDataRun && Dialogs("Settings not saved") == 1 && Dialogs("Run number already used") == 1, "Go back: run %d, dialogs %s", w->inDataRun, qPrintable(dialogs.join(" | ")));
-      CHECK(FileBytes(file0) == fileBefore && FileBytes(proto) == protoBefore, "the set was saved although the start went back");
-      w->runID = last; w->leRunID->setText(QString::number(last));
-    }
-    //---- a settings file that cannot be written: no run
+    //---- Save to set into a folder that cannot be written: nothing saved, said, still marked
     chmod(qPrintable(settingsPath), 0555);
-    {
-      const unsigned int last = w->runID;
-      dialogs.clear();
-      w->AutoRun();
-      CHECK(!w->inDataRun && Dialogs("Run not started") == 1 && dialogs.join(" ").contains("cannot write its settings file") && w->runID == last, "unwritable set: run %d, dialogs %s", w->inDataRun, qPrintable(dialogs.join(" | ")));
-    }
+    dialogs.clear();
+    CHECK(!w->SaveToSet() && dialogs.isEmpty() && Marked() && Log().contains("Save to set settings: not saved"), "unwritable set: dialogs %s", qPrintable(dialogs.join(" | ")));
     chmod(qPrintable(settingsPath), 0755);
     CHECK(FileBytes(file0) == fileBefore, "the unwritable set changed");
-    //---- the start fails after the save: the set put back as it was
-    fake_caen_fail(1443, "malloc");
+    //---- Save to set: the boards (read back) and the protocol, in place, unasked; the next Start finds nothing
     dialogs.clear();
-    w->AutoRun();
-    fake_caen_fail(1443, "");
-    for( int s : Serials ) fake_caen_forget(s);
-    CHECK(!w->inDataRun && FileBytes(file0) == fileBefore && FileBytes(proto) == protoBefore && Log().contains(file0 + " put back as before the start."), "a failed start left the set changed");
-    //---- Save to set and start
+    CHECK(w->SaveToSet() && dialogs.isEmpty() && !Marked(), "Save to set: dialogs %s, button \"%s\"", qPrintable(dialogs.join(" | ")), qPrintable(w->bnSaveToSet->text()));
+    CHECK(Word(file0, thr, 2) == 0x55 && Word(file0, thr, 5) == 0x99 && ReadJson(proto)["maxFileSizeMB"].toInt() == 300
+          && FileBytes(file0) == QByteArray((const char *) w->digi[0]->GetSettings(), SETTINGSIZE * 4), "Save to set: file 0x%X, protocol %d", Word(file0, thr, 2), ReadJson(proto)["maxFileSizeMB"].toInt());
     dialogs.clear();
     StartStop();
-    CHECK(Dialogs("Settings not saved") == 1 && Word(file0, thr, 3) == 0x56 && ReadJson(proto)["maxFileSizeMB"].toInt() == 300, "Save to set: file 0x%X, protocol %d", Word(file0, thr, 3), ReadJson(proto)["maxFileSizeMB"].toInt());
+    CHECK(dialogs.isEmpty() && !Marked(), "not as in the set after saving: %s", qPrintable(Tip().left(80)));
+    //---- Digitizer Settings' Save to set: this board's file in the set, no question
+    w->digi[0]->WriteRegister(DPP::PSD::TriggerThreshold, 0x57, 4);
+    w->OpenDigiSettings();
+    w->digiSettings->ID = 0;
     dialogs.clear();
-    StartStop();
-    CHECK(dialogs.isEmpty(), "asked after saving: %s", qPrintable(dialogs.join(" | ")));
-    answers.clear();
+    w->digiSettings->SaveSettingToSet();
+    CHECK(dialogs.isEmpty() && Word(file0, thr, 4) == 0x57, "the panel's Save to set: dialogs %s, file 0x%X", qPrintable(dialogs.join(" | ")), Word(file0, thr, 4));
 
-    //---- a series: the next run never waits on the question
+    //---- a series: the next run never waits on a question
     w->sbRunTimeMin->setDecimals(3);
     w->sbRunTimeMin->setValue(0.01);
     w->chkRepeatRun->setChecked(true);
@@ -1561,13 +1527,14 @@ public:
     CHECK(WaitFor([&](){ return w->pauseTimer->isActive(); }, 3000), "no pause");
     w->digi[1]->WriteRegister(DPP::PSD::TriggerThreshold, 0x66, 0);   // an edit in the pause (the panel is locked; a script is not)
     CHECK(WaitFor([&](){ return w->inDataRun && w->runID == first + 1; }, 3000), "the next run of the series did not start");
-    CHECK(dialogs.isEmpty() && Log().contains("this run of the series starts with them"), "series: dialogs %s", qPrintable(dialogs.join(" | ")));
+    const QString edited1 = "Digi-" + QString::number(w->digi[1]->GetSerialNumber());
+    CHECK(dialogs.isEmpty() && Log().contains(edited1 + ": not as in the settings set") && Tip().contains("last Start: " + edited1 + " ("), "series: dialogs %s", qPrintable(dialogs.join(" | ")));
     w->StopPressed();
     Pump(1500);
     w->sbRunTimeMin->setValue(0);
     w->chkRepeatRun->setChecked(false);
     w->CloseDigitizers();
-    if( nFail == nFail0 ) OK("default Start anyway; same changes not asked again; per-run field never; new ones asked (Cancel keeps the number); Live Setting Update compared; saved only once sure, put back if the start fails");
+    if( nFail == nFail0 ) OK("never asked; differences logged (capped) and marked on Save to set; per-run field never; Live Setting Update compared; Save to set writes boards and protocol in place, Digitizer Settings' too; a series starts and logs");
   }
 
   void SettingsFromRun(){
@@ -1632,16 +1599,15 @@ public:
     CHECK(FileBytes(snap2) == snap2Bytes && FileBytes(run2 + "/" + name2 + "_run_protocol.json") == protoBytes2, "a file of run %s was written", qPrintable(name2));
     CHECK(Word(settingsPath + "/Digi-15880_PSD.bin", thr, 1) == 0x39
           && FileBytes(settingsPath + "/Digi-15880_PSD.bin") == QByteArray((const char *) w->digi[0]->GetSettings(), SETTINGSIZE * 4), "Live Setting Update: the set's file is not the board's whole image");
-    //---- the board the set lacks: compared with its snapshot, offered to the set
-    answers["Settings not saved"] = "Save to set and start";
+    //---- the board the set lacks: compared with its snapshot, marked; Save to set puts it into the set, never into the run
     dialogs.clear();
     w->AutoRun();
     const QString run3 = w->RunFolder();
     Pump(100); w->StopPressed();
-    answers.clear();
-    CHECK(Dialogs("Settings not saved") == 1 && dialogs.join("|").contains("Digi-30508") && Log().contains("Digi-30508: not in the set (" + settingsPath + "/Digi-30508_PSD.bin); compared with " + run2),
+    CHECK(dialogs.isEmpty() && w->bnSaveToSet->toolTip().contains("Digi-30508") && Log().contains("Digi-30508: not in the set (" + settingsPath + "/Digi-30508_PSD.bin); compared with " + run2),
           "the board without a file in the set: dialogs %s", qPrintable(dialogs.join(" | ")));
-    CHECK(FileBytes(settingsPath + "/Digi-30508_PSD.bin").size() == SETTINGSIZE * 4 && FileBytes(run2 + "/" + name2 + "_30508_PSD.bin") != QByteArray(), "Save did not put Digi-30508 into the set");
+    CHECK(w->SaveToSet() && FileBytes(settingsPath + "/Digi-30508_PSD.bin").size() == SETTINGSIZE * 4 && FileBytes(run2 + "/" + name2 + "_30508_PSD.bin") != QByteArray()
+          && FileBytes(snap2) == snap2Bytes, "Save to set did not put Digi-30508 into the set, or wrote the run");
     (void) set30508;
     QJsonObject rf = RunFile(run3, QFileInfo(run3).fileName() + "_run.json");
     QJsonObject rc = rf["run_control"].toObject();
@@ -1667,7 +1633,7 @@ public:
     w->OpenDigitizers();
     CHECK(w->digi == nullptr && Dialogs("Settings from a run") == 1, "no run: digi %p, dialogs %s", (void *) w->digi, qPrintable(dialogs.join(" | ")));
     w->cbOpenMethod->setCurrentIndex(w->cbOpenMethod->findData(1));
-    if( nFail == nFail0 ) OK("newest run offered first and named; boards from its snapshots, the one without from the set (warned); protocol restored, not saved; run files untouched; a board the set lacks offered to it");
+    if( nFail == nFail0 ) OK("newest run offered first and named; boards from its snapshots, the one without from the set (warned); protocol restored, not saved; run files untouched; a board the set lacks marked, Save to set puts it there");
   }
 
   void RunCopies(){

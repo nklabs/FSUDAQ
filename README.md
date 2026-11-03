@@ -165,11 +165,23 @@ Opening the digitizers:
   from the set instead, with a warning. The run folder is never written.
 - **w/o settings**: the boards keep what they hold; not compared with the set at Start.
 
-Whatever was loaded, a board's settings file stays its file in the active set: Save (Digitizer
-Settings) and Live Setting Update write there; Save to another path writes a copy. **Save as new
-set…** writes every open board (read back) and the run protocol into a new folder beside the set and
-makes it the active set; the old set is not touched. **Save protocol to set** writes only
-`run_protocol.json`.
+**Every run folder keeps what the run used**, whatever is saved in the set: each board's settings as
+read back just before the start (`<prefix>_<run>_<serial>_<DPP>.bin`), the run protocol
+(`<prefix>_<run>_run_protocol.json`), `programSettings.txt` (token and password masked) and the run
+file. They are read-only once the run is on, and never written again. So saving into the set is never
+needed for a run, and FSUDAQ never asks about it.
+
+Saving, in two verbs:
+
+| button | what it does |
+|---|---|
+| **Save to set** (main window) | the open boards (read back) and the run protocol into the active set, in place, unasked. The next runs start from them. Shows **Save to set \*** (orange) when the last Start found settings not in the set; its tooltip says which. |
+| **Save to set** (Digitizer Settings) | this board's file in the active set, in place, unasked |
+| **Save as new set…** | a named copy: the open boards and the run protocol into a new folder beside the set, which becomes the active set; the old set is not touched |
+| **Save copy as…** (Digitizer Settings) | this board's settings into a file you choose; the board keeps saving to the set |
+
+Whatever was loaded, a board's settings file stays its file in the active set: Save to set and Live
+Setting Update write there, never into a run's snapshot or another file loaded.
 
 Run protocol (`run_protocol.json`): run length, repeat, pause, file size, run numbering, board order,
 LED trigger. Run length, pause, numbering and the LED on/delay/hold are per run: loaded as defaults,
@@ -178,11 +190,13 @@ commands belong to the set. **Repeat is never restored** (from a set, a run or p
 Start never begins a series unasked. Changes in the window reach the set only when saved.
 
 At Start (Save Data on), the boards and the set fields of the protocol are compared with the set
-(read-only registers, the trace bit and what FSUDAQ derives at each start are left out). If they
-differ, the log lists every register (file → board) and FSUDAQ asks: **Start anyway (this run only)**
-(the default: Enter starts), **Save to set and start** (written only once nothing can cancel the
-start, put back if the start then fails), or Cancel. The same differences are not asked about again
-until the boards are reopened or the set is saved; runs of a repeated series never ask, they log.
+(read-only registers, the trace bit and what FSUDAQ derives at each start are left out). Nothing is
+asked: if they differ, the run starts with what the boards hold, the log lists every register
+(file → board), and Save to set is marked until it is pressed or the boards are reopened.
+
+Run numbers: with **Auto-increment run no.** a number that already has files in the data path (a
+stale `lastRun.sh`, a run folder copied in) is skipped, unasked and logged; nothing is written over.
+Only a number typed by hand that is already on disk asks (default **Go back**).
 
 ## LED trigger
 

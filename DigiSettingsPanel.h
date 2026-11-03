@@ -37,7 +37,8 @@ public slots:
   void UpdateReadOutStatus(uint32_t status);
   void UpdateBoardAndChannelsStatus(); // directly read from register
 
-  void SaveSetting(int opt);
+  void SaveSetting(int opt);    // Save copy as...: asks where
+  void SaveSettingToSet();      // Save to set: the board's file in the active set, no question
   void LoadSetting();
   bool SaveSettingFile(QString filePath, int opt); // Save after its dialog: the active set's file, else a copy (the board keeps its file)
   bool LoadSettingFile(const QString & fileName);  // Load after its dialog: programs the board; its settings file stays in the active set
@@ -120,6 +121,7 @@ private:
   QPushButton * bnSetNoTrace;
   //QPushButton * bnSendSoftwareClockSyncSignal;
   QPushButton * bnSaveSettings;
+  QPushButton * bnSaveSettingsAs;
   QPushButton * bnLoadSettings;
   //QPushButton * bnSaveSettingsToText;
   QCheckBox   * chkCoupledSettingFile;

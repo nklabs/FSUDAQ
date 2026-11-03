@@ -16,6 +16,16 @@ inert so far (no "truncating" messages). Recovery recipe after ANY DAQ crash: cl
 program, `rm /dev/shm/CAENV_LCK_*`, then reopen; power-cycle only if a board still does not
 answer the probe.
 
+### 3 Nov: saving without questions
+Users keep their settings with the data and do not want to be asked at every Start. Start never asks about
+settings not in the set: it logs them and marks the main window's **Save to set \*** (orange, tooltip lists
+them). "Save protocol to set" and the Start question's "Save to set and start" / "Start anyway (this run only)"
+become one **Save to set** button: the open boards (read back) and the run protocol into the active set, in
+place, unasked. Digitizer Settings: **Save to set** writes the board's file in the set with no file dialog;
+**Save copy as...** is the old dialog. With auto-increment, a run number already on disk is skipped (logged)
+instead of asked; a number typed by hand still asks. A run's snapshots and copies (.bin, run_protocol.json,
+programSettings.txt) are made read-only once the run is on.
+
 ### 1 Nov: settings sets, run protocol, Start check (branch feature/run-settings, not yet on odin)
 Settings live in named sets: folders of `Digi-<serial>_<DPP>.bin` plus `run_protocol.json` beside the
 active one (`settingsPath`, e.g. .../PSI_2026_DAQtest_settings/cosmics; programSettings.txt unchanged).

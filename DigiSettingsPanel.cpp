@@ -233,9 +233,15 @@ DigiSettingsPanel::DigiSettingsPanel(Digitizer ** digi, unsigned int nDigi, QStr
         UpdateBoardAndChannelsStatus();
       });
 
-      bnLoadSettings = new QPushButton("Load Settings", this);
+      bnLoadSettings = new QPushButton("Load Settings...", this);
+      bnLoadSettings->setToolTip("Program this board from a settings file you choose (another set, a run's snapshot); its settings file stays its file in the active set.");
       buttonLayout->addWidget(bnLoadSettings, rowID, 2);
       connect(bnLoadSettings, &QPushButton::clicked, this, &DigiSettingsPanel::LoadSetting);
+
+      bnSaveSettingsAs = new QPushButton("Save copy as...", this);
+      bnSaveSettingsAs->setToolTip("Write a copy of this board's settings to a file you choose; the board keeps saving to its file in the active set.");
+      buttonLayout->addWidget(bnSaveSettingsAs, rowID, 3);
+      connect(bnSaveSettingsAs, &QPushButton::clicked, this, [=](){ SaveSetting(0);});
 
       rowID ++; //---------------------------
       // bnSendSoftwareTriggerSignal = new QPushButton("Send SW Trigger Signal", this);
@@ -276,9 +282,11 @@ DigiSettingsPanel::DigiSettingsPanel(Digitizer ** digi, unsigned int nDigi, QStr
         }
       });
 
-      bnSaveSettings = new QPushButton("Save Settings", this);
+      bnSaveSettings = new QPushButton("Save to set", this);
+      bnSaveSettings->setToolTip("Write this board's settings into its file in the active settings set (the path above), in place: the next runs start from it. "
+                                 "Nothing is asked: every run folder keeps its own snapshot of what the board held in that run.");
       buttonLayout->addWidget(bnSaveSettings, rowID, 3);
-      connect(bnSaveSettings, &QPushButton::clicked, this, [=](){ SaveSetting(0);});
+      connect(bnSaveSettings, &QPushButton::clicked, this, &DigiSettingsPanel::SaveSettingToSet);
     }
 
     {//^======================= Board Settings
@@ -4181,6 +4189,12 @@ QString DigiSettingsPanel::DefaultSettingsFile(const QString & boardFile, const 
 
 QString DigiSettingsPanel::BoardSetFile() const {
   return settingsDir + "/Digi-" + QString::number(digi[ID]->GetSerialNumber()) + "_" + QString::fromStdString(digi[ID]->GetData()->DPPTypeStr) + ".bin";
+}
+
+void DigiSettingsPanel::SaveSettingToSet(){
+  DebugPrint("%s", "DigiSettingsPanel");
+  if( settingsDir.isEmpty() ){ SaveSetting(0); return; }   // no settings set (older settings in the data path): ask where
+  SaveSettingFile(BoardSetFile(), 0);
 }
 
 void DigiSettingsPanel::SaveSetting(int opt){

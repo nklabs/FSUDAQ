@@ -145,21 +145,18 @@ FSUDAQ::FSUDAQ(QWidget *parent) : QMainWindow(parent){
       bnSetSettingsPath = new QPushButton("Set Path", this);
       bnSetSettingsPath->setToolTip("Choose a settings set folder anywhere; the folders beside it are the other sets.");
       connect(bnSetSettingsPath, &QPushButton::clicked, this, &FSUDAQ::OpenSettingsPath);
+      bnSaveToSet = new QPushButton("Save to set", this);
+      connect(bnSaveToSet, &QPushButton::clicked, this, &FSUDAQ::SaveToSet);
+      MarkSetUnsaved(QStringList());   // its label and tooltip
       bnSaveNewSet = new QPushButton("Save as new set...", this);
-      bnSaveNewSet->setToolTip("Write every open board's settings (read back from the board) and the run protocol into a new set beside the active one, and make it the active set. The set they came from is not changed.");
+      bnSaveNewSet->setToolTip("Save a copy under a new name: every open board's settings (read back from the board) and the run protocol go into a new set beside the active one, which becomes the active set. The set they came from is not changed.");
       connect(bnSaveNewSet, &QPushButton::clicked, this, &FSUDAQ::PromptSaveAsNewSet);
-      bnSaveProtocol = new QPushButton("Save protocol to set", this);
-      bnSaveProtocol->setToolTip("Write the run protocol (run length, repeat, pause, file size, numbering, board order, LED trigger) into the active set's run_protocol.json.");
-      connect(bnSaveProtocol, &QPushButton::clicked, this, [this](){
-        const QString set = digi ? openSettingsDir : settingsPath;
-        if( SaveSetProtocol(set) ){ acceptedDiffs.remove(set); LogMsg("Run protocol saved to <b>" + SetProtocolFile(set) + "</b>."); }
-      });
       hl->addWidget(lbSettingsPath);
       hl->addWidget(cbSettingsSet);
       hl->addWidget(leSettingsPath, 1);
       hl->addWidget(bnSetSettingsPath);
+      hl->addWidget(bnSaveToSet);
       hl->addWidget(bnSaveNewSet);
-      hl->addWidget(bnSaveProtocol);
       layout->addWidget(row, 0, 0, 1, 4);
     }
 
@@ -661,12 +658,59 @@ bool FSUDAQ::SaveAsNewSet(const QString & name, QString & why){
   const QString from = openSettingsDir;
   settingsPath = target;
   openSettingsDir = target;
-  acceptedDiffs.clear();
+  MarkSetUnsaved(QStringList());
   if( digiSettings ){ digiSettings->SetSettingsDir(target); digiSettings->UpdatePanelFromMemory(); }
   UpdateSettingsSetView();
   SaveProgramSettings();
   LogMsg("New settings set <b>" + name + "</b> (" + target + "): " + written.join(", ") + " and run_protocol.json, from the boards; it is the active set now (" + from + " unchanged).");
   return true;
+}
+
+bool FSUDAQ::SaveToSet(){
+  // in place and unasked: the set is the starting point of the next runs, and every run folder keeps its own snapshots
+  // and copies whatever is saved here. Without open boards, the run protocol only.
+  const QString set = digi ? openSettingsDir : settingsPath;
+  const QString name = QFileInfo(set).fileName();
+  if( set.isEmpty() || !QFileInfo(set).isDir() ){
+    LogMsg("<font style=\"color: red;\">Save to set: there is no settings set folder" + (set.isEmpty() ? QString() : " (" + set + ")") + "; choose one with Set Path. Nothing saved.</font>");
+    return false;
+  }
+  if( inDataRun || series.active || pauseTimer->isActive() || scopeShown ){
+    LogMsg("<font style=\"color: red;\">Save to set: not while a run, a series or the scope is going. Nothing saved.</font>");
+    return false;
+  }
+  QStringList written, failed;
+  const std::vector<bool> readFailed = digi ? ReadBackBoards() : std::vector<bool>();
+  for( unsigned int i = 0; digi && i < nDigi; i++ ){
+    if( digi[i]->IsBoardDisabled() ) continue;
+    const QString digiName = "Digi-" + QString::number(digi[i]->GetSerialNumber());
+    const QString base = "Digi-" + QString::number(digi[i]->GetSerialNumber()) + "_" + QString::fromStdString(digi[i]->GetData()->DPPTypeStr) + ".bin";
+    QString file = QString::fromStdString(digi[i]->GetSettingFileName());
+    if( file.isEmpty() || Digitizer::IsRunSnapshotPath(file.toStdString()) ) file = set + "/" + base;   // a run snapshot is never written
+    if( readFailed[i] ){ failed << digiName + " (its settings could not be read back)"; continue; }
+    if( !digi[i]->SaveAllSettingsAsBin(file.toStdString()) ){ failed << digiName + " (cannot write " + file + ")"; continue; }
+    digi[i]->SetSettingFileTarget(file.toStdString(), true);
+    written << QFileInfo(file).fileName();
+  }
+  if( SaveSetProtocol(set) ) written << "run_protocol.json"; else failed << "the run protocol";
+  if( digiSettings ) digiSettings->UpdatePanelFromMemory();
+  if( !failed.isEmpty() ){
+    LogMsg("<font style=\"color: red;\">Save to set " + name + ": not saved: " + failed.join(", ") + "." + (written.isEmpty() ? QString() : " Saved: " + written.join(", ") + ".") + "</font>");
+    return false;
+  }
+  MarkSetUnsaved(QStringList());
+  LogMsg("Saved to settings set <b>" + name + "</b> (" + set + "): " + written.join(", ") + ".");
+  return true;
+}
+
+void FSUDAQ::MarkSetUnsaved(const QStringList & edited){
+  const QString tip = "Save the open boards' settings (read back from the boards) and the run protocol (file size, board order, LED relay, ...) "
+                      "into the active settings set, in place: the next runs start from them. Nothing is asked: every run folder keeps its own "
+                      "copy of the settings and protocol it ran with, whatever is saved here.";
+  bnSaveToSet->setText(edited.isEmpty() ? "Save to set" : "Save to set *");
+  bnSaveToSet->setStyleSheet(edited.isEmpty() ? "" : "color: darkorange;");
+  bnSaveToSet->setToolTip(edited.isEmpty() ? tip : "Not as in the set at the last Start: " + edited.join(", ") + " (the differences are in the log; "
+                                                   "the runs' folders have them).\n\n" + tip);
 }
 
 void FSUDAQ::UpdateDataPathEnabled(){
@@ -979,11 +1023,9 @@ FSUDAQ::SetCompare FSUDAQ::CompareWithSet(const std::vector<bool> & readFailed){
     const size_t shown = 20;   // the rest are in the snapshot
     for( size_t k = 0; k < lines.size() && k < shown; k++ ){
       LogMsg("<font style=\"color: orange;\">&nbsp;&nbsp;" + name + ": " + QString::fromStdString(lines[k]) + "</font>");
-      c.details << name + ": " + QString::fromStdString(lines[k]);
     }
     if( lines.size() > shown ){
       LogMsg("<font style=\"color: orange;\">&nbsp;&nbsp;" + name + ": ... and " + QString::number(lines.size() - shown) + " more</font>");
-      c.details << name + ": ... and " + QString::number(lines.size() - shown) + " more";
     }
   };
   for( unsigned int i = 0; i < nDigi; i++ ){
@@ -1019,24 +1061,10 @@ FSUDAQ::SetCompare FSUDAQ::CompareWithSet(const std::vector<bool> & readFailed){
     }
     if( inSet && diffs.empty() ) continue;
     c.edited << digiName;
-    c.toSave.push_back(i);
     c.nDiff += diffs.size();
-    if( !inSet ){
-      const QString line = "not in the set (" + file + ")" + (ref.isEmpty() ? QString() : "; compared with " + ref);
-      LogMsg("<font style=\"color: orange;\">" + digiName + ": " + line + "</font>");
-      c.details << digiName + ": " + line;
-      QString key = digiName + ": not in " + file;
-      if( ref.isEmpty() ){   // nothing to list differences against: the board's whole compared image, so any edit asks again
-        std::vector<std::string> all = digi[i]->SettingsDifferences(std::vector<unsigned int>(SETTINGSIZE, 0), true);
-        QCryptographicHash h(QCryptographicHash::Sha1);
-        for( auto & a : all ) h.addData(QByteArray::fromStdString(a));
-        key += " (board " + h.result().toHex().left(16) + ")";
-      }
-      c.keys << key;
-    }
+    if( !inSet ) LogMsg("<font style=\"color: orange;\">" + digiName + ": not in the set (" + file + ")" + (ref.isEmpty() ? QString() : "; compared with " + ref) + "</font>");
     if( !diffs.empty() ) LogMsg("<font style=\"color: orange;\">" + digiName + ": " + QString::number(diffs.size()) + " register(s) differ from " + ref + ":</font>");
     Detail(digiName, diffs);
-    for( auto & d : diffs ) c.keys << digiName + ": " + QString::fromStdString(d);
   }
   // the run protocol: only the fields that belong to the set; the per-run ones go into the run's copy
   const QString protoPath = SetProtocolFile(openSettingsDir);
@@ -1047,7 +1075,6 @@ FSUDAQ::SetCompare FSUDAQ::CompareWithSet(const std::vector<bool> & readFailed){
     for( const QString & d : ProtocolDifferences(saved, ProtocolJson()) ){
       if( IsPerRunProtocolKey(d.section(':', 0, 0)) ) continue;
       protoDiffs.push_back(d.toStdString());
-      c.keys << "run protocol: " + d;
     }
     if( !protoDiffs.empty() ){
       c.edited << "the run protocol";
@@ -1056,7 +1083,7 @@ FSUDAQ::SetCompare FSUDAQ::CompareWithSet(const std::vector<bool> & readFailed){
       Detail("run protocol", protoDiffs);
     }
   }else{
-    LogMsg("<font style=\"color: orange;\">Settings set " + QFileInfo(openSettingsDir).fileName() + " has no run protocol yet (Save protocol to set writes it); the run's copy records this run's.</font>");
+    LogMsg("<font style=\"color: orange;\">Settings set " + QFileInfo(openSettingsDir).fileName() + " has no run protocol yet (Save to set writes it); the run's copy records this run's.</font>");
   }
   return c;
 }
@@ -1197,7 +1224,7 @@ void FSUDAQ::OpenDigitizers(){
   }else{
     openedFromRun.clear();
   }
-  acceptedDiffs.clear();   // a new start for "Start anyway (this run only)"
+  MarkSetUnsaved(QStringList());   // nothing compared with the set since this open
 
   // placeholder for USB
   // if( cbOpenDigitizers->currentData().toInt() == 3 ) {
@@ -1480,7 +1507,7 @@ void FSUDAQ::OpenDigitizers(){
       for( auto & q : problems ) LogMsg("<font style=\"color: orange;\">&nbsp;&nbsp;" + q.toHtmlEscaped() + "</font>");
     }
   }
-  acceptedDiffs.clear();   // a new start for "Start anyway (this run only)"
+  MarkSetUnsaved(QStringList());   // nothing compared with the set since this open
   if( !openedWithSettings ) LogMsg("<font style=\"color: orange;\">Opened without settings files: the boards keep their registers (apart from what the CAEN library sets when it opens them).</font>");
   if( !settingsProblems.isEmpty() ){
     QStringList notProgrammed = BoardsNotProgrammed();
@@ -2287,49 +2314,6 @@ void FSUDAQ::StartACQ(){
     }
   }
 
-  // the boards and the run protocol against the active set, on a manual Start (a series run logs them after its
-  // late read-back). Nothing has to be saved for a run to start: its snapshots and copies record what it used either
-  // way; the question only offers to put it into the set, and is not asked again for changes answered "this run only"
-  struct SetFileBefore { QString path; QByteArray bytes; bool existed; };
-  std::vector<unsigned int> saveAtStart;   // "Save to set and start": saved once nothing can cancel the start
-  bool saveProtocolAtStart = false;
-  QSet<QString> acceptOnStart;              // "Start anyway": remembered once the run has started
-  bool acceptWhenStarted = false;
-  if( save && needManualComment ){
-    SetCompare c = CompareWithSet(ReadBackBoards());
-    if( !c.edited.isEmpty() ){
-      const QSet<QString> now(c.keys.begin(), c.keys.end());
-      if( acceptedDiffs.contains(openSettingsDir) && acceptedDiffs[openSettingsDir].contains(now) ){
-        LogMsg("<font style=\"color: orange;\">Unsaved changes kept for this run only: " + c.edited.join(", ") + " (as answered before; the run's snapshot keeps them).</font>");
-      }else{
-        QMessageBox box(this);
-        box.setIcon(QMessageBox::Question);
-        box.setWindowTitle("Settings not saved");
-        box.setText(c.edited.join(", ") + ": not as in the settings set " + QFileInfo(openSettingsDir).fileName() +
-                    " (" + QString::number(c.nDiff) + " difference(s), listed in the log and in the details).");
-        box.setInformativeText("The run's snapshot and copies record what this run uses either way. Save them into the set, or keep them for this run only (not asked again for the same changes).");
-        box.setDetailedText(c.details.join("\n"));
-        QPushButton * bnAnyway = box.addButton("Start anyway (this run only)", QMessageBox::AcceptRole);
-        QPushButton * bnSave = box.addButton("Save to set and start", QMessageBox::ApplyRole);
-        QPushButton * bnCancel = box.addButton("Cancel", QMessageBox::RejectRole);
-        box.setDefaultButton(bnAnyway);
-        box.setEscapeButton(bnCancel);
-        box.exec();
-        if( box.clickedButton() == bnSave ){
-          saveAtStart = c.toSave;
-          saveProtocolAtStart = true;
-        }else if( box.clickedButton() == bnAnyway ){
-          acceptOnStart = now;
-          acceptWhenStarted = true;
-          LogMsg("<font style=\"color: orange;\">Unsaved changes kept for this run only: " + c.edited.join(", ") + " (the run's snapshot keeps them).</font>");
-        }else{
-          LogMsg("Run not started (Cancel): " + c.edited.join(", ") + " not as in the settings set.");
-          return;
-        }
-      }
-    }
-  }
-
   // the prefix typed in the field applies to this run (it used to take effect one run late)
   if( save && lePrefix->text() != prefix ) {
     prefix = lePrefix->text();
@@ -2354,6 +2338,17 @@ void FSUDAQ::StartACQ(){
     // This matters when auto-increment is off and a number is typed in by hand, but it also
     // catches a stale lastRun.sh.
     QStringList existing = ExistingRunFiles();
+    if( !existing.isEmpty() && chkAutoIncrement->isChecked() ){
+      // FSUDAQ numbers the runs: a number already on disk (a stale lastRun.sh, a run folder copied in) is skipped,
+      // never asked about and never written over
+      const QString taken = runIDStr;
+      while( !ExistingRunFiles().isEmpty() && runID < 999999 ) runID ++;
+      runIDStr = QString::number(runID).rightJustified(3, '0');
+      runDir = RunFolder();
+      leRunID->setText(QString::number(runID));
+      existing = ExistingRunFiles();
+      LogMsg("<font style=\"color: orange;\">Run-" + taken + " already has files in " + rawDataPath + ": this run is Run-" + runIDStr + " (nothing written over).</font>");
+    }
     if( !existing.isEmpty() && series.active && !needManualComment ){
       // the next run of a repeated series starts unattended: never ask, never delete a run
       LogMsg("<font style=\"color: red;\">Start Run-" + runIDStr + " not started: " + QString::number(existing.size()) + " file(s) for this prefix and run number already exist in " + runDir + ".</font>");
@@ -2416,42 +2411,6 @@ void FSUDAQ::StartACQ(){
     else LogMsg("Digi-" + QString::number(digi[i]->GetSerialNumber()) + " (" + QString::fromStdString(digi[i]->GetModelName()) + "): ADCs calibrated in " + QString::number(ms) + " ms.");
   }
 
-  //---- "Save to set and start": only now, with every question answered (a "Go back" or a cancelled comment leaves
-  //     the set as it was); what the files held before is kept, to be put back if the start fails
-  std::vector<SetFileBefore> setBefore;
-  auto KeepBefore = [&](const QString & path){   // false: what the file holds cannot be kept, so it is not written
-    SetFileBefore b{path, QByteArray(), QFileInfo::exists(path)};
-    if( b.existed ){
-      QFile f(path);
-      if( !f.open(QIODevice::ReadOnly) ) return false;
-      b.bytes = f.readAll();
-      if( b.bytes.size() != f.size() ) return false;
-    }
-    setBefore.push_back(b);
-    return true;
-  };
-  if( problems.isEmpty() ){
-    for( unsigned int i : saveAtStart ){
-      const QString digiName = "Digi-" + QString::number(digi[i]->GetSerialNumber());
-      QString file = QString::fromStdString(digi[i]->GetSettingFileName());
-      if( file.isEmpty() ) file = openSettingsDir + "/" + "Digi-" + QString::number(digi[i]->GetSerialNumber()) + "_" + QString::fromStdString(digi[i]->GetData()->DPPTypeStr) + ".bin";
-      if( Digitizer::IsRunSnapshotPath(file.toStdString()) ){ problems << digiName + ": its settings file " + file + " is a run snapshot; not written."; break; }
-      if( !KeepBefore(file) ){ problems << digiName + ": cannot read its settings file " + file + " to keep what it holds; not saved."; break; }
-      if( !digi[i]->SaveAllSettingsAsBin(file.toStdString()) ){   // written whole, then renamed over the old one
-        setBefore.pop_back();
-        problems << digiName + ": cannot write its settings file " + file + ".";
-        break;
-      }
-      LogMsg(digiName + ": settings saved to <b>" + file + "</b>.");
-    }
-    if( saveProtocolAtStart && problems.isEmpty() ){
-      if( !KeepBefore(SetProtocolFile(openSettingsDir)) ) problems << "cannot read " + SetProtocolFile(openSettingsDir) + " to keep what it holds; not saved.";
-      else if( SaveSetProtocol(openSettingsDir) ) LogMsg("Run protocol saved to <b>" + SetProtocolFile(openSettingsDir) + "</b>.");
-      else { setBefore.pop_back(); problems << "cannot write the run protocol " + SetProtocolFile(openSettingsDir) + "."; }
-    }
-    if( saveProtocolAtStart ) acceptedDiffs.remove(openSettingsDir);
-  }
-
   //---- what FSUDAQ derives from the settings at each start, before the snapshot: the snapshot is what the run uses
   for( unsigned int i = 0; i < nDigi; i++ ){
     if( digi[i]->IsBoardDisabled() || !problems.isEmpty() ) continue;
@@ -2462,14 +2421,17 @@ void FSUDAQ::StartACQ(){
   std::vector<bool> readBackFailed(nDigi, false);
   if( save && problems.isEmpty() ){
     readBackFailed = ReadBackBoards();
-    if( !needManualComment ){   // a series run: never a question, the differences in the log
-      SetCompare c = CompareWithSet(readBackFailed);
-      if( !c.edited.isEmpty() ) LogMsg("<font style=\"color: orange;\">" + c.edited.join(", ") + ": not as in the settings set; this run of the series starts with them, its snapshot keeps them.</font>");
-    }
+    // against the active set: never a question (nothing has to be saved for a run to start, its snapshots and copies
+    // record what it used); the differences go into the log and onto the Save to set button
+    SetCompare c = CompareWithSet(readBackFailed);
+    if( !c.edited.isEmpty() ) LogMsg("<font style=\"color: orange;\">" + c.edited.join(", ") + ": not as in the settings set " + QFileInfo(openSettingsDir).fileName() +
+                                     "; this run starts with them and its snapshot keeps them (Save to set makes them the set's).</font>");
+    MarkSetUnsaved(c.edited);
   }
 
   //---- 1. every board: its settings as they are on the board now, and its data file; none starts yet
   QStringList createdFiles;
+  QStringList runCopies;   // the snapshots and copies of what the run uses: read-only once it is on, as its data files once closed
   for( unsigned int i = 0; i < nDigi; i++){
     if( digi[i]->IsBoardDisabled() || !save ) continue;
     QString digiName = "Digi-" + QString::number(digi[i]->GetSerialNumber());
@@ -2477,7 +2439,7 @@ void FSUDAQ::StartACQ(){
     // what the board holds: read back just above
     if( readBackFailed[i] ) problems << digiName + ": its settings could not be read back for the run's snapshot.";
     digi[i]->SaveAllSettingsAsTextForRun(snapshot.toStdString());
-    if( QFile::exists(snapshot) ) createdFiles << snapshot; else problems << digiName + ": cannot write the settings snapshot " + snapshot + ".";
+    if( QFile::exists(snapshot) ){ createdFiles << snapshot; runCopies << snapshot; }else problems << digiName + ": cannot write the settings snapshot " + snapshot + ".";
     digi[i]->GetData()->SetMaxFileSize((uint64_t) sbFileSizeMB->value() * 1024 * 1024);
     if( digi[i]->GetData()->OpenSaveFile((runDir + "/" + prefix + "_" + runIDStr).toStdString()) ){
       createdFiles << QString::fromStdString(digi[i]->GetData()->GetOutFileName());
@@ -2490,7 +2452,7 @@ void FSUDAQ::StartACQ(){
     // run protocol this run is taken with, beside the snapshots
     auto WriteCopy = [&](const QString & path, const QByteArray & text){
       QSaveFile f(path);
-      if( f.open(QIODevice::WriteOnly) && f.write(text) == text.size() && f.commit() ) createdFiles << path;
+      if( f.open(QIODevice::WriteOnly) && f.write(text) == text.size() && f.commit() ){ createdFiles << path; runCopies << path; }
       else problems << "cannot write " + path + ".";
     };
     QFile ps(programSettingsFilePath);
@@ -2545,11 +2507,6 @@ void FSUDAQ::StartACQ(){
     }else if( elogID > 0 && chkElog->isChecked() && save ){
       AppendElog("Run-" + runIDStr + " was not started.<p>");
     }
-    // the set as it was before "Save to set and start"
-    for( auto it = setBefore.rbegin(); it != setBefore.rend(); ++it ){
-      const bool ok = it->existed ? WriteFileAtomic(it->path, it->bytes) : (!QFileInfo::exists(it->path) || QFile::remove(it->path));
-      LogMsg(ok ? it->path + " put back as before the start." : "<font style=\"color: red;\">Cannot put back " + it->path + " as before the start.</font>");
-    }
     if( save ) QDir().rmdir(runDir); // only if empty
     for( const QString & p : problems ) LogMsg("<font style=\"color: red;\">" + p + "</font>");
     LogMsg("<font style=\"color: red;\">The run was not started; no board is running.</font>");
@@ -2562,6 +2519,7 @@ void FSUDAQ::StartACQ(){
   if( save ){
     LogMsg("<font style=\"color: orange;\">===================== <b>Start a new Run-" + QString::number(runID) + "</b></font>");
     LogMsg("Run folder : <b>" + runDir + "</b>");
+    for( const QString & f : runCopies ) QFile::setPermissions(f, QFileDevice::ReadOwner | QFileDevice::ReadUser | QFileDevice::ReadGroup | QFileDevice::ReadOther);
     TellDashboard("run", runDir);
     WriteRunTimestamp(true, QDateTime::currentDateTime().toString("yyyy.MM.dd hh:mm:ss"));
     SaveLastRunFile();
@@ -2574,7 +2532,6 @@ void FSUDAQ::StartACQ(){
 
   inDataRun = true;
   isACQStarted = true;
-  if( acceptWhenStarted ) acceptedDiffs[openSettingsDir] = acceptOnStart;   // only now: the start can no longer be undone
 
   // if( scalar ) scalarTimer->start(ScalarUpdateinMiliSec); 
   if( scalar ) scalarTimingThread->Start();
@@ -2831,8 +2788,8 @@ void FSUDAQ::UpdateRunControls(){
   EnableRunLengthControls(open && !busy);
   EnableLedControls(!busy);
   sbFileSizeMB->setEnabled(!busy);
+  bnSaveToSet->setEnabled(!busy && !scopeShown);
   bnSaveNewSet->setEnabled(open && !busy && !scopeShown);
-  bnSaveProtocol->setEnabled(!busy);
   if( digiSettings && !scopeShown ) digiSettings->EnableButtons(!busy);
 }
 

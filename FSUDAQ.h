@@ -137,16 +137,19 @@ private:
   QString settingsPath;         // the active settings set: a folder of Digi-<serial>_<DPP>.bin and run_protocol.json; empty in programSettings.txt = the data path
 
   //@----- settings sets: the folders beside the active one (in its parent, the settings root), each a group of settings
-  //       for a purpose (cosmics, noise_run, ...). The boards are opened with the active set; Save, Live Setting Update and
-  //       "Save to settings file and start" write it; "Save as new set" makes a new one from the boards and the run protocol.
+  //       for a purpose (cosmics, noise_run, ...). The boards are opened with the active set; Save to set (here and in
+  //       Digitizer Settings) and Live Setting Update write it, in place and unasked: every run folder keeps its own copies
+  //       of what the run used. "Save as new set" makes a new one from the boards and the run protocol.
   RComboBox * cbSettingsSet;
+  QPushButton * bnSaveToSet;
   QPushButton * bnSaveNewSet;
-  QPushButton * bnSaveProtocol;
   QString SettingsRoot() const;   // the active set's parent; none when the settings are the data path itself
   static QStringList SettingsSets(const QString & root);   // the subfolders holding a Digi-*.bin, by name
   void UpdateSettingsSetView();
   bool SaveAsNewSet(const QString & name, QString & why);  // the open boards (read back) and the run protocol into <root>/<name>, made active
   void PromptSaveAsNewSet();
+  bool SaveToSet();             // the open boards (read back) and the run protocol into the active set, in place; logs what it wrote
+  void MarkSetUnsaved(const QStringList & edited);   // Save to set shows what the last Start found not in the set (empty: nothing)
   QString openSettingsDir;      // the set the open boards were opened with (or saved to as a new set)
   QString openedFromRun;        // opened "w/ settings from a run": that run folder's name
   struct SettingsRun { QString folder, name; QDateTime time; int boards; };
@@ -154,8 +157,8 @@ private:
   bool PickSettingsRun(QString & runDir);   // asks which run (newest first); false: cancelled or none
 
   //@----- run protocol: the run-control fields an experiment reuses, kept with the set in <set>/run_protocol.json.
-  //       Loaded when the boards are opened with the set; written only by an explicit save (a GUI change is unsaved
-  //       until then, and the Start check asks about it). programSettings.txt keeps the last values as before.
+  //       Loaded when the boards are opened with the set; written only by Save to set or Save as new set (a GUI change
+  //       is unsaved until then: the Start check logs it and marks Save to set). programSettings.txt keeps the last values.
   static QString SetProtocolFile(const QString & set) { return set + "/run_protocol.json"; }
   QJsonObject ProtocolJson() const;
   static QByteArray ProtocolFileText(const QJsonObject & protocol);
@@ -163,11 +166,10 @@ private:
   static QStringList ProtocolDifferences(const QJsonObject & saved, const QJsonObject & now); // "key: set X, now Y"
   bool SaveSetProtocol(const QString & set);   // atomic; logs a failure
   static bool WriteFileAtomic(const QString & path, const QByteArray & bytes);
-  static bool IsPerRunProtocolKey(const QString & key);  // chosen run by run: never asked about at Start
-  struct SetCompare { QStringList edited, details, keys; std::vector<unsigned int> toSave; int nDiff = 0; };
+  static bool IsPerRunProtocolKey(const QString & key);  // chosen run by run: never compared with the set at Start
+  struct SetCompare { QStringList edited; int nDiff = 0; };
   std::vector<bool> ReadBackBoards();                           // every enabled board into memory, never into a file: true = failed
   SetCompare CompareWithSet(const std::vector<bool> & readFailed); // memory against the active set (logged), the protocol's set fields too
-  QMap<QString, QSet<QString>> acceptedDiffs;   // per set: the differences last answered "Start anyway (this run only)"
 
   //@----- at Start: board settings edited since their file was written, and the run's copies of the program settings
   static QByteArray MaskedProgramSettings(const QByteArray & text); // the influx token and the elog password masked
