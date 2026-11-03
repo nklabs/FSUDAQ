@@ -129,7 +129,8 @@ def default_cabling(serials, n_channels, planes=None, counters=COUNTERS):
 
 
 def load_cabling(path):
-    """CSV with columns serial, channel, kind (trk / veto / cherenkov / lucite), plane, ch."""
+    """CSV with columns serial, channel, kind (trk / veto / cherenkov / lucite / rf), plane, ch.
+    rf: the accelerator RF reference (one channel); the finder leaves it out, the dashboard times hits to it."""
     rows = []
     with open(path, newline="") as f:
         for r in csv.DictReader(f):
@@ -156,8 +157,11 @@ def check_cabling(rows, serials, n_channels, plane_channels):
             if (p, ch) in seen_plane:
                 problems.append(f"{where}: T{p}:{ch} already on {seen_plane[(p, ch)]}"); continue
             seen_plane[(p, ch)] = where
+        elif kind == "rf":
+            if "rf" in seen_dig.values():
+                problems.append(f"{where}: a second rf channel, row ignored"); continue
         elif kind not in COUNTERS:
-            problems.append(f"{where}: unknown kind '{kind}' (trk, " + ", ".join(COUNTERS) + ")"); continue
+            problems.append(f"{where}: unknown kind '{kind}' (trk, " + ", ".join(COUNTERS) + ", rf)"); continue
         if (s, c) in seen_dig:
             problems.append(f"{where}: given twice"); continue
         seen_dig[(s, c)] = kind
@@ -190,6 +194,7 @@ class Channels:
         self.uncalibrated = []                   # cabled tracker channels a gains file does not give
         self.rows = rows
         self.installed = np.zeros(len(COUNTERS), np.bool_)
+        self.rf_slot = None                      # the RF reference's slot (kind rf), unused by the finder (plane -2)
         for s, c, kind, p, ch in rows:
             if s not in bidx or not (0 <= c < board_channels):
                 continue
@@ -199,6 +204,8 @@ class Channels:
             elif kind in COUNTERS:
                 k = COUNTERS.index(kind)
                 self.plane[b, c] = -1; self.counter[b, c] = k; self.installed[k] = True
+            elif kind == "rf":
+                self.rf_slot = b * board_channels + c
         if gains is not None:
             self.gain[...] = np.nan               # no light unless the file gives it
             for (s, c), v in gains.items():

@@ -240,6 +240,12 @@ def setup_identity(setting, record, window_ps, serials, nch):
 # ---------------------------------------------------------------- beam vs map: the floor tool's published expectation
 EXPECTED_FORMAT = "floor-tool-expected/1"     # pion-spectrometer-simulations tool/README.md "Publish to online"
 EXPECTED_DEFAULT = os.path.expanduser("~/pion-spectrometer-simulations/tool/published/expected.json")
+# RF timing tab: the accelerator RF (PSI HIPA) on the digitizers' clock (a 60-s fit of the RF channel, Digi-62839,
+# 2 Nov 2026: 50,633,194 Hz). Only the cycle count between two RF triggers uses it: right while the triggers are
+# less than 1 / (2 x the error) apart (0.5 s for 1 Hz); the period itself is measured between each pair.
+RFTOF_HZ = 50.633194e6
+RFTOF_NT = 100                                  # TOF bins over one RF period (198 ps)
+RFTOF_NQ, RFTOF_QMAX = 128, 8192                # Qlong bins (64 ADC each; above: the top bin)
 EXPECTED_MAX_BYTES = 50 << 20
 CHERENKOV_E_EFF = 1.0                         # share of electrons whose bunch the gas Cherenkov marks "electron" (assumed:
                                               # all; muons and pions below its threshold never fire it)
@@ -595,18 +601,51 @@ def slice_task(task: dict) -> dict:
     if parts:
         ts = np.concatenate([p[0] for p in parts]); ch = np.concatenate([p[1] for p in parts]).astype(np.int64)
         e = np.concatenate([p[2] for p in parts]); bd = np.concatenate([p[3] for p in parts])
-        res = ff.process_hits(tables, chans, ts, bd, ch, e.astype(np.float64), window_ps, t0, t1)
         slot = bd * chans.board_channels + ch
+        # the RF reference is no particle: kept out of the finder's bunches (it would only count as "uncabled"),
+        # still in the DAQ tab's channel histograms and the RF timing tab
+        fin = slot != chans.rf_slot if chans.rf_slot is not None else np.ones(slot.size, np.bool_)
+        res = ff.process_hits(tables, chans, ts[fin], bd[fin], ch[fin], e[fin].astype(np.float64), window_ps, t0, t1)
         tc = ts - _toff_of(slot)
         # on the finder's clock (offsets removed): with the boards' raw times, the -217 to -239 ns offsets of
         # 1399, 1443 and 30505 put their peak outside the +-200 ns of "time to the reference" (1 Nov 2026)
         daq = dh.process_ordered(tc, slot, np.argsort(tc, kind="stable"), t0, t1, task["ref"], chans.n_slots)
-        owned = int(np.count_nonzero((tc >= t0) & (tc < t1)))   # hits whose own time (offset removed) is in the slice
+        owned = int(np.count_nonzero(fin & (tc >= t0) & (tc < t1)))   # the finder's hits whose own time (offset removed) is in the slice
+        rft = rft_none = None
+        if chans.rf_slot is not None:
+            rft, rft_none = rftof_hist(tc, slot, e, chans.plane[bd, ch], chans.rf_slot, t0, t1)
     else:
         res = ff.Result(chans.n_slots, tables.map_n)
         daq = dh.DaqResult(chans.n_slots, np.uint32)
         owned = 0
-    return dict(t0=t0, t1=t1, res=res.to_dict(), daq=daq.to_dict(), ref=task["ref"], owned=owned, dt=time.perf_counter() - t_start)
+        rft = rft_none = None
+    return dict(t0=t0, t1=t1, res=res.to_dict(), daq=daq.to_dict(), ref=task["ref"], owned=owned, rft=rft, rft_none=rft_none,
+                dt=time.perf_counter() - t_start)
+
+
+def rftof_hist(tc, slot, e, plane, rf_slot, t0, t1):
+    """TOF modulo the RF of the tracker hits the slice owns ([t0, t1), offsets removed), against Qlong:
+    counts (plane, TOF bin, Qlong bin), and the number of those hits without an RF phase (fewer than two RF
+    triggers in the slice). A hit's phase is taken between the RF triggers on either side of it, with the local
+    period from their spacing; before the first or after the last RF trigger of the slice, from the nearest pair."""
+    H = np.zeros((3, RFTOF_NT, RFTOF_NQ), np.uint32)
+    trk = (plane >= 0) & (tc >= t0) & (tc < t1)
+    n = int(np.count_nonzero(trk))
+    T = 1e12 / RFTOF_HZ
+    t_rf = np.sort(tc[slot == rf_slot])
+    if t_rf.size:
+        t_rf = t_rf[np.r_[True, np.diff(t_rf) > T / 2]]    # one trigger per RF cycle
+    if n == 0 or t_rf.size < 2:
+        return H, n
+    d = np.diff(t_rf).astype(np.float64)
+    period = d / np.rint(d / T)
+    th = tc[trk]
+    i = np.clip(np.searchsorted(t_rf, th, side="right") - 1, 0, t_rf.size - 2)
+    ph = ((th - t_rf[i]) / period[i]) % 1.0
+    ti = np.minimum((ph * RFTOF_NT).astype(np.int64), RFTOF_NT - 1)
+    qi = np.minimum(np.asarray(e[trk], np.int64) * RFTOF_NQ // RFTOF_QMAX, RFTOF_NQ - 1)
+    np.add.at(H, (plane[trk], ti, qi), 1)
+    return H, 0
 
 
 class _Done:
@@ -914,9 +953,12 @@ class Online:
         self.skip_marks = None                  # live start: each file's size (words) when the dashboard started
         self.since = None                       # live start: the time from which data are read
         self.acc = ff.Result(S.chans.n_slots, S.tables.map_n)   # the finder's histograms and counters
+        self.rftof = np.zeros((3, RFTOF_NT, RFTOF_NQ), np.int64)  # RF timing tab: TOF modulo RF x Qlong, per plane
+        self.rftof_none = 0                     # tracker hits without an RF phase
         self.trip_skipped = 0                   # slices whose track counts did not fit the map (Beam vs map)
         self.daq = dh.DaqResult(S.chans.n_slots)
         self.secs = {}                          # second of data time -> hits per slot
+        self.clear_s = None                     # the first second the page's rates show after a Clear
         self.slices = []                        # (t0, t1, bunches, statuses, tracks) of every folded slice
         self.proc_s = 0.0; self.steps = 0
         self.lost = 0                           # tasks that failed twice, this run
@@ -968,7 +1010,7 @@ class Online:
                 role = ""
                 if not S.cabling.startswith("placeholder"):
                     pl_, chn, cn = ch.plane[bi, c], ch.ch[bi, c], ch.counter[bi, c]
-                    role = f"T{pl_}:{chn}" if pl_ >= 0 else (ff.COUNTERS[cn] if pl_ == -1 else "")
+                    role = f"T{pl_}:{chn}" if pl_ >= 0 else (ff.COUNTERS[cn] if pl_ == -1 else "RF" if sl == ch.rf_slot else "")
                 self.slots.append(sl)
                 self.labels[sl] = dict(board=sn, ch=c, role=role)
 
@@ -1453,8 +1495,11 @@ class Online:
                 # the whole reading, for the summary (as secs: every epoch, Clear does not reset it)
                 np.add.at(self.run_counts, slots, cnt)
                 bd = slots // self.setup.chans.board_channels
-                bins = secs // RUN_BIN_S
+                rf = self.setup.chans.rf_slot
+                bins = secs // RUN_BIN_S if rf is None else np.where(slots == rf, -1, secs // RUN_BIN_S)   # board rates: no RF
                 for k in np.unique(bins):
+                    if k < 0:
+                        continue
                     row = self.run_daq_bins.get(int(k))
                     if row is None:
                         if len(self.run_daq_bins) >= RUN_BINS_MAX:
@@ -1484,6 +1529,8 @@ class Online:
                         d = dict(d); d["dt"] = np.zeros_like(d["dt"])
                     self.daq.add(d)
                     self.owned += r["owned"]
+                    if r.get("rft") is not None:
+                        self.rftof += r["rft"]; self.rftof_none += r["rft_none"]
                 n_trk = int((res["h_ntrk"] * np.arange(ff.NTRK)).sum())
                 status = {ff.STATUS[i]: int(c) for i, c in enumerate(res["h_status"]) if c}
                 k = int(r["t0"] // (RUN_BIN_S * PS))      # by the slice's start: a slice (<= --max-slice-s) is not split
@@ -1495,9 +1542,10 @@ class Online:
                 else:
                     row[0] += (r["t1"] - r["t0"]) / PS; row[1] += int(res["n_bunches"]); row[2] += n_trk
                     row[3:] += np.asarray(res["h_status"])
-                self.slices.append((r["t0"], r["t1"], int(res["n_bunches"]), status, n_trk))
-                newest = max(s[1] for s in self.slices)
-                self.slices = [s for s in self.slices if s[1] > newest - HISTORY_S * PS]
+                if epoch == self.epoch:          # a slice cut before a Clear is not drawn after it
+                    self.slices.append((r["t0"], r["t1"], int(res["n_bunches"]), status, n_trk))
+                    newest = max(s[1] for s in self.slices)
+                    self.slices = [s for s in self.slices if s[1] > newest - HISTORY_S * PS]
 
     # ------------------------------------------------------------ what the page shows
     def _finder_done(self):
@@ -1560,6 +1608,19 @@ class Online:
         if not isinstance(tv, dict):
             return 404, dict(note=err or "the publish has no top view (written by an older floor tool: Publish again)")
         return 200, dict(published_at=doc.get("published_at"), top_view=tv)
+
+    def rftof_view(self):
+        """GET /rftof: the RF timing tab's TOF modulo the RF against Qlong, per tracker plane with hits, since the
+        reading began (or Clear). Apart from /state: it is large and only the tab asks for it."""
+        with self.lock:
+            ch = self.setup.chans
+            if ch.rf_slot is None:
+                return dict(rf=None, note="no RF reference in the cabling: give its digitizer channel kind rf")
+            b, c = divmod(ch.rf_slot, ch.board_channels)
+            return dict(rf=dict(serial=self.serials[b], ch=int(c)), period_ns=1e9 / RFTOF_HZ, nt=RFTOF_NT, nq=RFTOF_NQ,
+                        qmax=RFTOF_QMAX, rf_hits=int(self.run_counts[ch.rf_slot]), no_phase=int(self.rftof_none),
+                        planes=[dict(plane=p, n=int(self.rftof[p].sum()), counts=self.rftof[p].tolist())
+                                for p in range(3) if self.rftof[p].any()])
 
     def _board_rows(self, now):
         """Per board: files, what is read, late and early hits, and the live checks (state()["boards"])."""
@@ -1745,7 +1806,9 @@ class Online:
         first = -(-min(firsts) // PS) if firsts else 0
         if self.t_first is not None:
             first = max(first, -(-self.t_first // PS))
-        hold = {(b.bi, c) for b, c in holding}
+        if self.clear_s is not None:
+            first = max(first, self.clear_s)    # the page's Clear: its rates start again too
+        hold ={(b.bi, c) for b, c in holding}
         slow = {(b.bi, c) for b in boards for c in range(8) if (b.bi, c) not in hold and b.newest[c] < (last + 1) * PS}
         return [s for s in sorted(self.secs) if first <= s <= last], slow
 
@@ -1763,19 +1826,26 @@ class Online:
         except OSError:
             disk = None
         nbc = self.setup.chans.board_channels
+        rf = self.setup.chans.rf_slot           # the RF reference: not in the total or the board rates, a line of its own
         t0s = self.t_first // PS if self.t_first is not None else (secs[0] if secs else 0)
-        known = [v for v in rate.values() if v is not None]
+        known = [v for sl, v in rate.items() if v is not None and sl != rf]
+
+        def board_hits(s, bi):
+            row = self.secs[s]
+            return int(row[bi * nbc:(bi + 1) * nbc].sum() - (row[rf] if rf is not None and rf // nbc == bi else 0))
         return dict(
             slots=[dict(slot=sl, **self.labels[sl], count=int(D.counts[sl]), rate=rate.get(sl), late=int(D.late[sl]),
                         early=int(D.early[sl]), written=bool(self.boards[self.serials[sl // nbc]].newest[(sl % nbc) // 2] >= 0))
                    for sl in self.slots],
-            ref=self.ref_slot, total_rate=sum(known) if rate else None, rate_unknown=len(rate) - len(known),
+            ref=self.ref_slot, rf=rf, total_rate=sum(known) if rate else None,
+            rate_unknown=len([v for sl, v in rate.items() if v is None and sl != rf]),
             rate_second=None if not rate else secs[-1] - t0s,
             lag_s=None if newest is None or done is None else max(0.0, (newest - done) / PS),
             in_flight=len(self.pending), backpressure=self.status.startswith("falling behind"),
             run_bytes=sum(b["bytes"] for b in boards), files=sum(b["files"] for b in boards), disk=disk, n_windows=D.n_seg,
-            seconds=[dict(t=s - t0s, boards=[None if s >= self._known_until(bi, slow) else int(self.secs[s][bi * nbc:(bi + 1) * nbc].sum())
-                                             for bi in range(len(self.serials))])
+            seconds=[dict(t=s - t0s, boards=[None if s >= self._known_until(bi, slow) else board_hits(s, bi)
+                                             for bi in range(len(self.serials))],
+                          rf=None if rf is None or s >= self._known_until(rf // nbc, slow, (rf % nbc) // 2) else int(self.secs[s][rf]))
                      for s in secs[-HISTORY_S:]])
 
     def _known_until(self, bi, slow, couple=None):
@@ -1872,10 +1942,15 @@ class Online:
             if why == "Clear":
                 self._agg_event("clear", "the page's Clear: the finder's results and the late and early counts start again")
             self.acc = ff.Result(self.setup.chans.n_slots, self.setup.tables.map_n)
+            self.rftof = np.zeros((3, RFTOF_NT, RFTOF_NQ), np.int64); self.rftof_none = 0
             self.trip_skipped = 0
             self.daq = dh.DaqResult(self.setup.chans.n_slots)
             self.owned = 0
             self.late_log.clear()
+            # the rate charts and bunches per second too, from the next whole second (a second already being
+            # counted would read low); the run summary keeps its own whole-run counts
+            self.clear_s = max(self.secs) + 1 if self.secs else None
+            self.slices = []
             self.epoch += 1
 
     def set_window(self, ns):
@@ -2989,6 +3064,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, self.online.beam_vs_map())
         if path == "/expected_view":   # the publish's top view (large, changes only with a new publish), for anyone
             return self.reply(*self.online.expected_view())
+        if path == "/rftof":       # the RF timing tab: TOF modulo the RF against Qlong, for anyone: read-only
+            return self.reply(200, self.online.rftof_view())
         if path == "/summary":     # a recorded run's summary, for anyone: read-only, nothing changes for the others
             code, d = self.online.summary_reply(q.get("run", [""])[0])
             return self.reply(code, d)

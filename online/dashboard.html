@@ -140,7 +140,7 @@
   <div class="tile"><span class="big" id="t_gb">–</span><small>this run, GB in files</small></div>
   <div class="tile"><span class="big" id="t_disk">–</span><small>disk free</small></div>
 </div>
-<div class="tabs"><button data-tab="daq" class="on">DAQ channels</button><button data-tab="trk">Tracker (track finder)</button><button data-tab="bvm">Beam vs map</button></div>
+<div class="tabs"><button data-tab="daq" class="on">DAQ channels</button><button data-tab="trk">Tracker (track finder)</button><button data-tab="bvm">Beam vs map</button><button data-tab="rft">RF timing</button></div>
 
 <section id="tab_daq">
   <div class="toolbar">
@@ -243,6 +243,21 @@
   </div>
 </section>
 
+<section id="tab_rft" hidden>
+  <div class="toolbar">
+    <span>Plane <select id="rft_plane"><option value="0">T0</option><option value="1">T1</option><option value="2">T2</option></select></span>
+    <label title="Turn the period so the most-populated time bin is in the middle; the axis then counts from it"><input type="checkbox" id="rft_center" checked> centre on the peak</label>
+    <span title="The same period drawn once, or twice side by side, so what lies across its ends is seen whole">Show <select id="rft_np"><option value="1">1 period</option><option value="2">2 periods</option></select></span>
+    <label title="Log scale for the time-of-flight histogram (all charges): the floor and the tails"><input type="checkbox" id="rft_log"> log scale</label>
+    <span id="rft_note"></span>
+  </div>
+  <div class="grid" data-grid="rft">
+    <div class="card w2 tall1"><h2>Time of flight modulo the RF against Qlong</h2><canvas id="c_rft_q"></canvas>
+      <div class="note">Each tracker hit's time after the RF reference, modulo the accelerator period, its phase taken between the RF triggers on either side of it. Shade: log of the count. Zero is the RF reference's own phase (or the peak), not the production time.</div></div>
+    <div class="card w2"><h2>Time of flight modulo the RF, all charges</h2><canvas id="c_rft_t"></canvas></div>
+  </div>
+</section>
+
 <section id="tab_sum">
   <div class="grid" data-grid="sum">
     <div class="card"><h2>Recorded run</h2><table id="t_sum_run"></table><div class="note" id="note_sum_run"></div></div>
@@ -309,7 +324,7 @@ function plot(id, spec){
   const yt = spec.ylog ? logTicks(y0,y1) : niceTicks(y0,y1,4);
   for(const v of yt){ g.strokeStyle=css('--line'); g.globalAlpha=.6; g.beginPath(); g.moveTo(L,Y(v)); g.lineTo(w-R,Y(v)); g.stroke(); g.globalAlpha=1;
     g.fillStyle=css('--muted'); g.textAlign='right'; g.fillText((spec.yfmt||sinum)(v), L-4, Y(v)+3); }
-  if(spec.xticks !== false){ const xt = spec.xlog ? logTicks(x0,x1) : niceTicks(x0,x1,6);
+  if(spec.xticks !== false){ const xt = spec.xlog ? logTicks(x0,x1) : niceTicks(x0,x1,spec.nxt||6);
     g.textAlign='center'; g.fillStyle=css('--muted'); for(const v of xt) g.fillText((spec.xfmt||sinum)(v), X(v), h-7); }
   g.strokeStyle=css('--line'); g.beginPath(); g.moveTo(L,T); g.lineTo(L,h-B); g.lineTo(w-R,h-B); g.stroke();
   const base = Y(spec.ylog ? y0 : 0);
@@ -427,7 +442,8 @@ function boardIndex(serial){ return S ? S.boards.findIndex(b=>b.serial===serial)
 function showTab(t){ tab=t; store.set('fsudaq-tab', t);
   document.querySelectorAll('.tabs button').forEach(b=>b.classList.toggle('on', b.dataset.tab===t));
   document.getElementById('tab_daq').hidden = t!=='daq'; document.getElementById('tab_trk').hidden = t!=='trk';
-  document.getElementById('tab_bvm').hidden = t!=='bvm'; if(t==='bvm') fetchBvm(); draw(); }
+  document.getElementById('tab_bvm').hidden = t!=='bvm'; if(t==='bvm') fetchBvm();
+  document.getElementById('tab_rft').hidden = t!=='rft'; if(t==='rft') fetchRft(); draw(); }
 document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>showTab(b.dataset.tab));
 
 function fillSelects(){
@@ -451,7 +467,14 @@ async function applyWindow(){
 document.getElementById('win_apply').onclick = applyWindow;
 winIn.oninput = ()=>{ winIn.dataset.edited = '1'; };
 winIn.onkeydown = e=>{ if(e.key==='Enter') applyWindow(); };
-document.getElementById('btn_clear').onclick = async ()=>{ await fetch('/clear'); document.getElementById('clear_note').textContent='cleared at '+new Date().toLocaleTimeString(); await tick(); fetchChannel(); };
+document.getElementById('btn_clear').onclick = async ()=>{
+  const note = document.getElementById('clear_note');
+  let res = null; try { res = await fetch('/clear', {cache:'no-store'}); } catch(e){}
+  if(!res || !res.ok){   // say so: a refused Clear that said "cleared" looked like a broken one
+    note.innerHTML = warn(res && res.status===403 ? 'not cleared: view only here (Clear works on odin or through the ssh tunnel, ssh -N FSUDAQ-dash)' : 'not cleared: the dashboard did not answer');
+    return; }
+  note.textContent = 'cleared at '+new Date().toLocaleTimeString()+': counts, histograms and rates start again';
+  await tick(); fetchChannel(); };
 ['occ_mode','occ_log','q_log','dt_log','spec_which','grid_log','grid_own'].forEach(id=>document.getElementById(id).onchange=()=>{ if(id==='spec_which') fetchChannel(); else draw(); });
 
 let lastOK = null, MBPS = null, BYTES = [];   // when /state last answered; the MB/s, from (server time, run bytes) of the last ~10 s
@@ -465,10 +488,11 @@ async function tick(){
   if(S && !(r.server_time > S.server_time)) return;   // an older answer that came late: never over a newer one
   if(r.can_control===false && !document.body.classList.contains('viewonly')){   // another machine: look, not steer
     document.body.classList.add('viewonly');
-    ['sel_ref','btn_clear','win_ns','win_apply'].forEach(id=>{ const e=document.getElementById(id); e.disabled=true; e.title='view only: changed on odin or through the ssh tunnel'; }); }
+    ['sel_ref','btn_clear','win_ns','win_apply'].forEach(id=>{ const e=document.getElementById(id); e.disabled=true; e.title='view only: changed on odin or through the ssh tunnel'; });
+    document.getElementById('clear_note').textContent = 'view only on this machine: Clear and the settings work on odin or through the ssh tunnel (ssh -N FSUDAQ-dash, then http://localhost:8050)'; }
   const newRun = S && r.folder!==S.folder;
   if(newRun){   // another run: nothing cleared in it yet, and no histogram of the one before stays up under its name
-    document.getElementById('clear_note').textContent = '';
+    if(!document.body.classList.contains('viewonly')) document.getElementById('clear_note').textContent = '';
     CH = SPEC_ALL = GRID = CMPD = null; BYTES = []; }
   // MB/s over ~10 s: the size is taken when the analysis reads the files, not when the page asks, so two
   // answers 1 s apart could show the same size (0 MB/s) and then two steps' growth (twice the rate)
@@ -550,7 +574,7 @@ function draw(){
   const tn=document.getElementById('t_lag_note');
   tn.textContent = 'track finder behind the newest data on disk' + (D.lag_s==null ? '' : behind ? ' · FALLING BEHIND' : ' · keeping up');
   tn.className = behind ? 'warn' : '';
-  if(tab==='daq') drawDaq(); else if(tab==='trk') drawTrk(); else drawBvm();
+  if(tab==='daq') drawDaq(); else if(tab==='trk') drawTrk(); else if(tab==='rft') drawRft(); else drawBvm();
 }
 
 // MB/s with the decimals a slow run needs (0.042, not 0.0): two significant figures below 1 MB/s
@@ -562,7 +586,7 @@ function drawDaq(){
   const mode=document.getElementById('occ_mode').value, ylog=document.getElementById('occ_log').checked;
   const vals = slots.map(s=>mode==='rate' ? (s.rate??0) : s.count);
   const edges = slots.map((_,i)=>i).concat([slots.length]);
-  const colors = slots.map(s=>s.slot===selSlot ? css('--sel') : BOARD_COLOR[boardIndex(s.board)%BOARD_COLOR.length]);
+  const colors = slots.map(s=>s.slot===selSlot ? css('--sel') : s.slot===D.rf ? css('--muted') : BOARD_COLOR[boardIndex(s.board)%BOARD_COLOR.length]);
   const A = plot('c_chan', {x0:0, x1:slots.length, ylog, xticks:false, series:[{kind:'bars', edges, y:vals, colors, gap:1}],
                             empty: mode==='rate' && D.total_rate==null ? (S.mode==='running' ? 'no complete second yet' : 'no rate: no data are being written now (show "hits since Clear" for the counts)') : 'no hits yet',
                             ylabel: mode==='rate'?'Hz':'hits'});
@@ -572,7 +596,8 @@ function drawDaq(){
   document.getElementById('c_chan').onclick = ev=>{ if(!A) return; const r=ev.target.getBoundingClientRect(); const x=ev.clientX-r.left;
     const i=Math.floor((x-A.L)/((A.w-A.L-A.R)/slots.length)); if(i>=0 && i<slots.length && (ev.ctrlKey || ev.metaKey)){ toggleCmp(slots[i].slot); return; }
     if(i>=0 && i<slots.length){ selSlot=slots[i].slot; store.set('fsudaq-sel-slot', selSlot); fillSelects(); fetchChannel(); } };
-  legend('leg_chan', S.boards.map((b,i)=>({name:'Digi-'+b.serial, color:BOARD_COLOR[i%BOARD_COLOR.length]})).concat([{name:'selected channel', color:css('--sel')}]));
+  legend('leg_chan', S.boards.map((b,i)=>({name:'Digi-'+b.serial, color:BOARD_COLOR[i%BOARD_COLOR.length]})).concat([{name:'selected channel', color:css('--sel')}])
+    .concat(D.rf!=null ? [{name:'RF reference (not a particle)', color:css('--muted')}] : []));
   const slowCh = D.total_rate==null ? [] : slots.filter(s=>s.rate==null && s.written);
   const pauseLate = S.pause_flush_s!=null;
   document.getElementById('note_chan').innerHTML = (mode==='rate' && D.rate_second!=null ? `Rate: second ${D.rate_second} of the run, the newest whose hits are all counted. ` : '') +
@@ -586,8 +611,11 @@ function drawDaq(){
   // a board's second not known yet (a slow channel pair has not written up to it) is null: a gap, not a dip
   ser.push({kind:'line', x:secs.map(s=>s.t), y:secs.map(s=>s.boards.some(b=>b==null) ? null : s.boards.reduce((a,b)=>a+b,0)), color:css('--fg'), width:2});
   S.boards.forEach((bd,i)=>ser.push({kind:'line', x:secs.map(s=>s.t), y:secs.map(s=>s.boards[i]===undefined ? 0 : s.boards[i]), color:BOARD_COLOR[i%BOARD_COLOR.length]}));
-  if(secs.length>1) plot('c_total', {x0:secs[0].t, x1:secs[secs.length-1].t, xfmt:v=>sinum(v)+' s', series:ser, marks:ledMarks(), ylabel:'Hz'}); else message('c_total','no data yet');
-  legend('leg_total', [{name:'all channels', color:css('--fg')}].concat(S.boards.map((b,i)=>({name:'Digi-'+b.serial, color:BOARD_COLOR[i%BOARD_COLOR.length]}))));
+  if(D.rf!=null) ser.push({kind:'line', x:secs.map(s=>s.t), y:secs.map(s=>s.rf), color:css('--muted'), width:1});
+  if(secs.length>1) plot('c_total', {x0:secs[0].t, x1:secs[secs.length-1].t, xfmt:v=>sinum(v)+' s', series:ser, marks:ledMarks(), ylabel:'Hz'});
+  else message('c_total', document.getElementById('clear_note').textContent.startsWith('cleared') ? 'cleared: waiting for the next complete second' : 'no data yet');
+  legend('leg_total', [{name:'all channels (without RF)', color:css('--fg')}].concat(S.boards.map((b,i)=>({name:'Digi-'+b.serial, color:BOARD_COLOR[i%BOARD_COLOR.length]})))
+    .concat(D.rf!=null ? [{name:'RF reference, on its own', color:css('--muted')}] : []));
   drawGrid();
   drawCompare();
   if(!CH || CH.slot!==selSlot){ ['c_q','c_psd','c_iat','c_dt','c_crate'].forEach(id=>{ message(id,'loading…'); PLOTS[id]=null; }); }
@@ -845,6 +873,72 @@ function drawTrk(){
     (S.early ? row('before the start', `${S.early.toLocaleString()} hits from before the dashboard started: not in the finder`) : '');
 }
 
+// ---------------------------------------------------------------- RF timing: TOF modulo the accelerator RF against Qlong (GET /rftof)
+let RFT = null, rftSeq = 0;
+async function fetchRft(){
+  const my = ++rftSeq; let d = null;
+  try { const r = await fetch('/rftof', {cache:'no-store'}); if(r.ok) d = await r.json(); } catch(e){}
+  if(my !== rftSeq) return;
+  RFT = d || {error:'no answer from the dashboard (an analysis older than this page has no RF timing)'};
+  if(tab==='rft') draw();
+}
+document.getElementById('rft_plane').value = store.get('fsudaq-rft-plane', 0);
+document.getElementById('rft_plane').onchange = e=>{ store.set('fsudaq-rft-plane', +e.target.value); draw(); };
+document.getElementById('rft_center').checked = store.get('fsudaq-rft-center', true);
+document.getElementById('rft_center').onchange = e=>{ store.set('fsudaq-rft-center', e.target.checked); draw(); };
+document.getElementById('rft_np').value = store.get('fsudaq-rft-np', 2);
+document.getElementById('rft_np').onchange = e=>{ store.set('fsudaq-rft-np', +e.target.value); draw(); };
+document.getElementById('rft_log').checked = store.get('fsudaq-rft-log', false);
+document.getElementById('rft_log').onchange = e=>{ store.set('fsudaq-rft-log', e.target.checked); draw(); };
+// 2-D histogram with a real y axis: counts[ix][iy], equal bins over x0..x1 and y0..y1; shade = log of the count
+function plotHeat(id, spec){
+  const {g,w,h}=setupCanvas(id); const L=Math.round(50*K),B=Math.round(24*K),T=8,R=10;
+  let mx=0; for(const col of spec.counts) for(const v of col) if(v>mx) mx=v;
+  if(!mx){ message(id, spec.empty || 'no entries yet'); PLOTS[id]=null; return null; }
+  const {x0, x1, y0, y1} = spec, nx = spec.counts.length, ny = spec.counts[0].length;
+  const X = v => L + (v-x0)/(x1-x0) * (w-L-R), Y = v => h-B - (v-y0)/(y1-y0) * (h-B-T);
+  g.font=cfont(10); g.lineWidth=1;
+  for(const v of niceTicks(y0,y1,4)){ g.strokeStyle=css('--line'); g.globalAlpha=.6; g.beginPath(); g.moveTo(L,Y(v)); g.lineTo(w-R,Y(v)); g.stroke(); g.globalAlpha=1;
+    g.fillStyle=css('--muted'); g.textAlign='right'; g.fillText((spec.yfmt||sinum)(v), L-4, Y(v)+3); }
+  g.textAlign='center'; for(const v of niceTicks(x0,x1,spec.nxt||6)) g.fillText((spec.xfmt||sinum)(v), X(v), h-7);
+  g.strokeStyle=css('--line'); g.beginPath(); g.moveTo(L,T); g.lineTo(L,h-B); g.lineTo(w-R,h-B); g.stroke();
+  g.save(); g.beginPath(); g.rect(L, T, w-L-R, h-B-T); g.clip(); g.fillStyle=spec.color;
+  const lm = Math.log(1+mx), dx = (x1-x0)/nx, dy = (y1-y0)/ny;
+  spec.counts.forEach((col,i)=>{ const xa=X(x0+i*dx), xb=X(x0+(i+1)*dx);
+    col.forEach((v,j)=>{ if(!v) return; g.globalAlpha = 0.12 + 0.88*Math.log(1+v)/lm;
+      const ya=Y(y0+(j+1)*dy), yb=Y(y0+j*dy); g.fillRect(xa, ya, Math.max(1, xb-xa), Math.max(1, yb-ya)); }); });
+  g.restore(); g.globalAlpha=1;
+  for(const m of (spec.marks||[])){ if(!(m.x>=x0 && m.x<=x1)) continue;
+    g.strokeStyle=m.color||css('--muted'); g.setLineDash([4,3]); g.lineWidth=1; g.beginPath(); g.moveTo(X(m.x),T); g.lineTo(X(m.x),h-B); g.stroke(); g.setLineDash([]);
+    if(m.label){ g.fillStyle=m.color||css('--muted'); g.textAlign='left'; g.fillText(m.label, X(m.x)+3, T+22); } }
+  if(spec.ylabel){ g.fillStyle=css('--muted'); g.textAlign='left'; g.fillText(spec.ylabel, L+4, T+10); }
+  return (PLOTS[id] = {X, Y, L, B, T, R, w, h, max:mx});
+}
+function drawRft(){
+  const note = document.getElementById('rft_note'), none = t=>{ message('c_rft_q', t); message('c_rft_t', t); };
+  if(!RFT){ note.textContent = 'reading…'; return; }
+  if(RFT.error){ note.innerHTML = warn(esc(RFT.error)); none('–'); return; }
+  if(!RFT.rf){ note.innerHTML = warn(esc(RFT.note)); none('no RF reference'); return; }
+  const p = +document.getElementById('rft_plane').value, P = RFT.planes.find(x=>x.plane===p), per = RFT.period_ns;
+  note.textContent = `RF: Digi-${RFT.rf.serial} ch${RFT.rf.ch} · period ${per.toFixed(3)} ns · ${sinum(RFT.rf_hits)} RF triggers · `
+    + (P ? `T${p}: ${sinum(P.n)} hits with an RF phase` : `T${p}: none yet`) + (RFT.no_phase ? ` · ${sinum(RFT.no_phase)} without (no RF trigger near them)` : '');
+  if(!P){ none(`no T${p} hits with an RF phase yet`); return; }
+  let counts = P.counts, x0 = 0, x1 = per;
+  const tsum0 = counts.map(col=>col.reduce((a,b)=>a+b,0));
+  if(document.getElementById('rft_center').checked){   // the peak bin to the middle, the axis counted from it
+    const n = counts.length, k = tsum0.indexOf(Math.max(...tsum0)), sh = (k - Math.floor(n/2) + n) % n;
+    counts = counts.map((_,i)=>P.counts[(i + sh) % n]); x0 = -(Math.floor(n/2) + 0.5) * per / n; x1 = x0 + per;
+  }
+  const np_ = +document.getElementById('rft_np').value === 1 ? 1 : 2;   // the period drawn once or twice side by side
+  if(np_ === 2){ counts = counts.concat(counts); x1 = x0 + 2*per; }
+  const marks = np_ === 2 ? [{x:x0 + per, label:`+${per.toFixed(2)} ns: the same period again`}] : [];
+  const tsum = counts.map(col=>col.reduce((a,b)=>a+b,0)), edges = tsum.map((_,i)=>x0 + i*per/P.counts.length).concat([x1]);
+  const nxt = np_ === 2 ? 16 : 10;   // ticks every 2.5 ns over two periods, 1-2 ns over one
+  plotHeat('c_rft_q', {counts, x0, x1, y0:0, y1:RFT.qmax, color:PLANE_COLOR[p], ylabel:'Qlong (ADC)', xfmt:v=>sinum(v)+' ns', nxt, marks});
+  plot('c_rft_t', {x0, x1, series:[{kind:'step', edges, y:tsum, color:PLANE_COLOR[p]}], ylabel:'hits / bin', xfmt:v=>sinum(v)+' ns', nxt, marks,
+                   ylog:document.getElementById('rft_log').checked});
+}
+
 // ---------------------------------------------------------------- beam vs map: the floor tool's published expectation (GET /expected)
 // Live view only: a recorded run's summary is not compared with today's publish (its settings may not be the run's).
 let BVM = null, bvmSeq = 0;
@@ -1098,7 +1192,8 @@ const WIDTHS = ['', 'w2', 'wfull'], HEIGHTS = ['', 'tall1', 'tall2'];
 const grids = [...document.querySelectorAll('.grid')];
 const cards = grids.flatMap(gr => [...gr.querySelectorAll('.card')]);
 cards.forEach(c => { c.dataset.id = c.querySelector('[data-card],canvas,table').id; c.dataset.grid = c.parentElement.dataset.grid; });
-const defaults = Object.fromEntries(cards.map(c => [c.dataset.id, {w: Math.max(0, WIDTHS.findIndex(x=>x && c.classList.contains(x)))}]));
+const defaults = Object.fromEntries(cards.map(c => [c.dataset.id, {w: Math.max(0, WIDTHS.findIndex(x=>x && c.classList.contains(x))),
+                                                                    h: Math.max(0, HEIGHTS.findIndex(x=>x && c.classList.contains(x)))}]));
 const defaultOrder = Object.fromEntries(grids.map(gr => [gr.dataset.grid, [...gr.children].map(c=>c.dataset.id)]));
 function saveLayout(){
   const L = { order:Object.fromEntries(grids.map(gr=>[gr.dataset.grid, [...gr.children].map(c=>c.dataset.id)])), w:{}, h:{}, c:{}, v:GRID_V };
@@ -1119,7 +1214,7 @@ function applyLayout(L){
     const def=defaultOrder[gr.dataset.grid];   // a card added since the layout was saved goes in after its default neighbour
     def.forEach((id,k)=>{ if(!want.includes(id)){ const at = k ? want.indexOf(def[k-1])+1 : 0; want.splice(at, 0, id); } });
     for(const id of want) gr.appendChild(byId[id]); }
-  for(const c of cards){ const id=c.dataset.id; setSize(c, (L.w||{})[id] ?? defaults[id].w, (L.h||{})[id]||0); c.classList.toggle('collapsed', !!(L.c||{})[id]);
+  for(const c of cards){ const id=c.dataset.id; setSize(c, (L.w||{})[id] ?? defaults[id].w, (L.h||{})[id] ?? defaults[id].h); c.classList.toggle('collapsed', !!(L.c||{})[id]);
                          c.classList.toggle('newrow', !!(L.r||{})[id]); }
 }
 // below each grid while a card is dragged: drop it there and it starts a new row (dropped on a card, it joins that row)
@@ -1406,8 +1501,9 @@ function drawSumHists(s){
 }
 
 viewControls();
-showTab(location.hash==='#trk' ? 'trk' : location.hash==='#daq' ? 'daq' : location.hash==='#bvm' ? 'bvm' : tab);
+showTab(location.hash==='#trk' ? 'trk' : location.hash==='#daq' ? 'daq' : location.hash==='#bvm' ? 'bvm' : location.hash==='#rft' ? 'rft' : tab);
 setInterval(()=>{ if(tab==='bvm' && !SUM) fetchBvm(); }, 5000);
+setInterval(()=>{ if(tab==='rft' && !SUM) fetchRft(); }, 3000);
 tick().then(fetchChannel); setInterval(tick, 1000); setInterval(fetchChannel, 2000);
 { const h = location.hash.match(/^#summary=(.+)$/); if(h) openSummary(decodeURIComponent(h[1])); }   // a link to a run's summary
 </script>

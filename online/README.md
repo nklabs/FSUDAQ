@@ -18,6 +18,12 @@ one given by its path, and shows it to every viewer; **back to live** returns to
 taken, and a run FSUDAQ starts takes the dashboard back to live by itself. The **size** slider
 scales text and plots (kept in the browser; `?size=1.5` in the link sets it).
 
+**Clear accumulated** (odin and ssh tunnels only) starts everything the live page counts again: the
+per-channel counts and histograms, the finder's results, the RF timing, and the rate charts (total,
+per channel, bunches per second), which go on from the next whole second of data. The run summary
+is not cleared: it counts the whole run and records the Clear. Opened from another machine the page
+is view only and says so next to the button.
+
 #### Beam vs map
 
 The floor tool (pion-spectrometer-simulations `tool/`, **Publish to online**) writes what the live data
@@ -48,6 +54,22 @@ publish's head and the comparison; the **Beam vs map** tab shows it (live view o
 
 A recorded run's summary is not compared with the publish: today's publish need not be the settings of
 that run, so the tab is hidden there.
+
+#### RF timing
+
+Each tracker hit's time after the accelerator RF, modulo the RF period (19.75 ns at PSI), against its Qlong,
+per plane (T0 by default; **Plane** picks another): the time of flight modulo the accelerator cycle. The RF
+reference is the digitizer channel the cabling gives kind `rf` (one channel; `62839,15,rf,,` now). It is no
+particle, so its hits never reach the finder (no bunches, no "uncabled" count) and are left out of the total
+and per-board rates (the DAQ tab draws the RF as a grey line and bar of its own, labelled `RF`); its own
+channel histograms stay in the DAQ tab. In every slice, a hit's phase is taken between the RF triggers on either side of it,
+with the local period from their spacing (the cycle count between them uses `RFTOF_HZ`, the RF on the
+digitizers' clock); a hit before the first or after the last RF trigger of its slice uses the nearest pair,
+and with fewer than two RF triggers in a slice its hits are counted as "without an RF phase". Times have the
+cable offsets removed, as in the finder, so zero is the RF reference's own phase, not the production time;
+**centre on the peak** turns the period so the fullest bin is in the middle. Qlong 0-8192 in 64-ADC bins
+(higher: the top bin), 100 time bins (198 ps). Counts since the reading began or the last Clear.
+`GET /rftof` (read-only, for anyone) returns them; the tab asks for it every 3 s while it is open.
 
 ### Run summary
 
