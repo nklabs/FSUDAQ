@@ -486,7 +486,7 @@ document.getElementById('btn_clear').onclick = async ()=>{
   const note = document.getElementById('clear_note');
   let res = null; try { res = await fetch('/clear', {cache:'no-store'}); } catch(e){}
   if(!res || !res.ok){   // say so: a refused Clear that said "cleared" looked like a broken one
-    note.innerHTML = warn(res && res.status===403 ? 'not cleared: view only here (Clear works on odin or through the ssh tunnel, ssh -N FSUDAQ-dash)' : 'not cleared: the dashboard did not answer');
+    note.innerHTML = warn(res && res.status===403 ? 'not cleared: view only here (Clear works on odin, the counting room PC or through the ssh tunnel, ssh -N FSUDAQ-dash)' : 'not cleared: the dashboard did not answer');
     return; }
   note.textContent = 'cleared at '+new Date().toLocaleTimeString()+': counts, histograms and rates start again';
   await tick(); fetchChannel(); };
@@ -503,8 +503,8 @@ async function tick(){
   if(S && !(r.server_time > S.server_time)) return;   // an older answer that came late: never over a newer one
   if(r.can_control===false && !document.body.classList.contains('viewonly')){   // another machine: look, not steer
     document.body.classList.add('viewonly');
-    ['sel_ref','btn_clear','win_ns','win_apply'].forEach(id=>{ const e=document.getElementById(id); e.disabled=true; e.title='view only: changed on odin or through the ssh tunnel'; });
-    document.getElementById('clear_note').textContent = 'view only on this machine: Clear and the settings work on odin or through the ssh tunnel (ssh -N FSUDAQ-dash, then http://localhost:8050)'; }
+    ['sel_ref','btn_clear','win_ns','win_apply'].forEach(id=>{ const e=document.getElementById(id); e.disabled=true; e.title='view only: changed on odin, the counting room PC or through the ssh tunnel'; });
+    document.getElementById('clear_note').textContent = 'view only on this machine: Clear and the settings work on odin, the counting room PC (experiment.json control_hosts) or through the ssh tunnel (ssh -N FSUDAQ-dash, then http://localhost:8050)'; }
   const newRun = S && r.folder!==S.folder;
   if(newRun){   // another run: nothing cleared in it yet, and no histogram of the one before stays up under its name
     if(!document.body.classList.contains('viewonly')) document.getElementById('clear_note').textContent = '';

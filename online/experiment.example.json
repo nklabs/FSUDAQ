@@ -4,5 +4,7 @@
   "cabling": "cabling.csv",
   "gains": "gains.csv",
   "time_offsets": "time_offsets.csv",
-  "map": null
+  "map": null,
+  "control_hosts": [],
+  "_control_hosts": "host names of machines besides odin whose browser may use Clear and the settings (looked up again every 30 s); everyone else gets the view-only page"
 }

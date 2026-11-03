@@ -2,5 +2,7 @@
   "_comment": "The rack at PSI (Oct 2026): boards in FSUDAQ's boardOrder, tracker channels in sequence over them, Cherenkov on Digi-1443 ch6-7. Read by online_dashboard.py at every new run; see experiment.example.json.",
   "cabling": "cabling.csv",
   "window_ns": 25.0,
-  "time_offsets": "time_offsets_pulser.csv"
+  "time_offsets": "time_offsets_pulser.csv",
+  "control_hosts": ["WS15-TDOYLE.psi.ch"],
+  "_control_hosts": "machines besides odin whose browser may use Clear and the settings (host names: looked up again every 30 s, as DHCP renumbers the network). WS15-TDOYLE = the counting room PC."
 }

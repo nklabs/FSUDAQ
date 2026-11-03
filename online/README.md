@@ -3,7 +3,8 @@
 `online_dashboard.py` follows the run FSUDAQ is writing, merges the boards' `.fsu`
 streams in time, builds bunches, runs the pion-spectrometer track finder on every bunch
 and serves a dashboard at http://localhost:8050/ (http://odin.psi.ch:8050/ for anyone
-on the network; the controls answer odin and ssh tunnels only). The **Online Dashboard**
+on the network; the controls answer odin, ssh tunnels and the `control_hosts` in `experiment.json` only:
+the counting room PC, WS15-TDOYLE.psi.ch, by name, looked up again every 30 s). The **Online Dashboard**
 button in FSUDAQ shows it, and starts it on the current data path first if nothing answers
 on port 8050. It runs in its own session, so it keeps running when FSUDAQ closes; the next
 FSUDAQ finds it on its port. Its output goes to `online/dashboard.log`; to stop it,
@@ -13,12 +14,12 @@ FSUDAQ finds it on its port. Its output goes to `online/dashboard.log`; to stop 
 start, comment, size and summary). **summary** shows that run's summary in this browser only,
 under a banner "Recorded run … — summary, not live" with **Back to live**; everyone else keeps
 the live view, and none of the live checks is applied to it (`#summary=<run folder>` in the link
-opens it). **re-read (odin)** (odin and ssh tunnels only) reads a run folder whole again, also
+opens it). **re-read (odin)** (odin, ssh tunnels and control hosts only) reads a run folder whole again, also
 one given by its path, and shows it to every viewer; **back to live** returns to the run being
 taken, and a run FSUDAQ starts takes the dashboard back to live by itself. The **size** slider
 scales text and plots (kept in the browser; `?size=1.5` in the link sets it).
 
-**Clear accumulated** (odin and ssh tunnels only) starts everything the live page counts again: the
+**Clear accumulated** (odin, ssh tunnels and control hosts only) starts everything the live page counts again: the
 per-channel counts and histograms, the finder's results, the RF timing, and the rate charts (total,
 per channel, bunches per second), which go on from the next whole second of data. The run summary
 is not cleared: it counts the whole run and records the Clear. Opened from another machine the page

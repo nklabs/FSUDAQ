@@ -3060,6 +3060,38 @@ def open_page(url, display=""):
 
 # ---------------------------------------------------------------- HTTP
 CONTROLS = ("/open", "/run", "/stopped", "/clear", "/window", "/set", "/load", "/live")   # FSUDAQ's calls, the page's shared controls
+CONTROL_TTL_S = 30.0          # how long a control host's looked-up address is trusted (DHCP renumbers the network)
+_CONTROL = {"key": None, "at": 0.0, "ips": frozenset()}
+_CONTROL_LOCK = threading.Lock()
+
+
+def control_ips(config_path) -> frozenset:
+    """The addresses of the machines besides odin whose browsers may use the controls: the host names in the config
+    file's "control_hosts" (e.g. the counting room PC), looked up again every CONTROL_TTL_S and when the file changes.
+    A name that does not resolve is left out (said once in the log)."""
+    try:
+        key = (config_path, os.path.getmtime(config_path)) if config_path else None
+    except OSError:
+        key = None
+    with _CONTROL_LOCK:
+        if key == _CONTROL["key"] and time.time() - _CONTROL["at"] < CONTROL_TTL_S:
+            return _CONTROL["ips"]
+        hosts = []
+        if key is not None:
+            try:
+                with open(config_path) as f:
+                    hosts = json.load(f).get("control_hosts") or []
+            except (OSError, ValueError, AttributeError):
+                hosts = []
+        ips = set()
+        for h in hosts:
+            try:
+                ips |= {ai[4][0] for ai in socket.getaddrinfo(str(h), None)}
+            except OSError as ex:
+                if key != _CONTROL["key"]:
+                    say(f"control_hosts: {h} not found ({ex}): it gets the view-only page")
+        _CONTROL.update(key=key, at=time.time(), ips=frozenset(ips))
+        return _CONTROL["ips"]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -3075,14 +3107,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body)))
         self.end_headers(); self.wfile.write(body)
 
-    def local(self):                       # FSUDAQ, or a browser on odin (or through an ssh tunnel)
-        return self.client_address[0] in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+    def local(self):                       # FSUDAQ, a browser on odin (or through an ssh tunnel), or a control host
+        ip = self.client_address[0]
+        if ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+            return True
+        return ip.removeprefix("::ffff:") in control_ips(self.online.a.config)
 
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
         path, q = u.path, urllib.parse.parse_qs(u.query)   # every route by its exact path: "/clear/" is no way past the check below
         if path in CONTROLS and not self.local():   # others may look, not steer what everyone sees
-            body = json.dumps(dict(note="view only: changed on odin or through the ssh tunnel")).encode()
+            body = json.dumps(dict(note="view only: changed on odin, the counting room PC or through the ssh tunnel")).encode()
             self.send_response(403)
             self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body)))
             self.end_headers(); self.wfile.write(body); return
