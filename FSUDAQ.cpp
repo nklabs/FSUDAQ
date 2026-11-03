@@ -54,6 +54,8 @@ private:
 static const char * InputCellStyle = "background-color: #F0F0F0;";
 static const char * AmberCellStyle = "background-color: #f8dc9c;";
 static const char * RedCellStyle   = "background-color: #f4b4b4;";
+// Run Monitor's first size at most: fits one 1920 x 1080 monitor with its task bar (see SetUpScalar)
+static const int ScalarMaxWidth = 1800, ScalarMaxHeight = 1000;
 // Trigger number marked by the F-th "1024 trigger counted" flag (extras bit 13) since the start. The
 // board's counter starts at zero and is exact, but the flag at its 16-bit wrap is never set: flags
 // mark triggers 1024, 2048, ... 64512, then 66560 (65536 has none), so 63 flags per 65536 triggers
@@ -2038,20 +2040,28 @@ void FSUDAQ::SetupScalar(){
   scalarBoards.clear();
   for( unsigned int i : RackOrder() ) scalarBoards.push_back(byPort[i]);
 
-  // as many boards side by side as the screen takes, at most all of them; narrower or wider
-  // windows re-flow the boards (no sideways scrolling unless one board does not fit)
+  // as many boards side by side as one monitor takes, at most all of them; narrower or wider
+  // windows re-flow the boards (no sideways scrolling unless one board does not fit). One monitor at
+  // most: shown through VcXsrv, the X screen is every monitor together (3853 x 2280 on the
+  // counting-room PC, 3 Nov 2026) and a window sized to it spread over all four
   int blockW = 0;
   for( QWidget * b : scalarBoards ) blockW = std::max(blockW, b->sizeHint().width());
   QRect screen = QGuiApplication::primaryScreen() ? QGuiApplication::primaryScreen()->availableGeometry() : QRect(0, 0, 1600, 1000);
+  const QSize monitor(std::min(screen.width(), ScalarMaxWidth), std::min(screen.height(), ScalarMaxHeight));
   const int gap = scalarLayout->horizontalSpacing(), frame = 60;
-  int perRow = std::max(1, std::min((int) nDigi, (screen.width() - frame + gap) / (blockW + gap)));
+  int perRow = std::max(1, std::min((int) nDigi, (monitor.width() - frame + gap) / (blockW + gap)));
   int height = frame + topLayout->sizeHint().height();   // each row is as high as its highest board (16 or 8 channels)
   for( size_t i = 0; i < scalarBoards.size(); i += perRow ){
     int rowH = 0;
     for( size_t j = i; j < std::min(scalarBoards.size(), i + perRow); j++ ) rowH = std::max(rowH, scalarBoards[j]->sizeHint().height());
     height += rowH + scalarLayout->verticalSpacing();
   }
-  scalar->resize(perRow * (blockW + gap) - gap + frame, std::min(screen.height(), height));
+  scalar->resize(std::min(monitor.width(), perRow * (blockW + gap) - gap + frame), std::min(monitor.height(), height));
+  // just below and right of the main window, so on its monitor (left alone, it opened at the X screen's corner)
+  QPoint at = geometry().topLeft() + QPoint(40, 40);
+  at.setX(std::max(screen.left(), std::min(at.x(), screen.right() - scalar->width())));
+  at.setY(std::max(screen.top(), std::min(at.y(), screen.bottom() - scalar->height())));
+  scalar->move(at);
   ReflowScalar();
   scalarScroll->viewport()->installEventFilter(new ResizeWatcher(scalar, [this](){ ReflowScalar(); }));
 
