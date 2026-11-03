@@ -7,8 +7,8 @@ https://discord.gg/xVsRhNZF8G
 Prepared for data taking with six DPP-PSD boards on optical links (Oct 2026). Differences from
 upstream that matter at the console:
 
-- **Settings.** Kept in named settings sets (see [Settings sets](#settings-sets)). "w/ settings set"
-  (the default) loads `Digi-<serial>_<DPP>.bin` from the active set,
+- **Settings.** Kept in named protocols (see [Protocols](#protocols)): the boards' settings and every
+  acquisition control. "w/ protocol" (the default) loads `Digi-<serial>_<DPP>.bin` from the active protocol,
   writes every register that shapes the acquisition and reads every one back. A board whose file is
   missing or refused, or a register that does not read back as the file has it, blocks Start (the
   dialog names it). Removed because they did not do what they said: "default Program", Program
@@ -89,13 +89,14 @@ When programSettings.txt is presented in the same folder as the FSUDAQ_Qt, the p
 - (line 7) the elog logbook name
 - (line 8) elog user name
 - (line 9) elog user password
-- then `key=value` lines, in any order: `settingsPath` (the active settings set: a folder of
-  `Digi-*.bin` files; empty = the data path, as in older versions), `runLengthMin`, `repeatRun`
-  (written for the record only: FSUDAQ always starts with Repeat off),
-  `autoIncrementRunID`, `maxFileSizeMB` (roll-over size, up to 4000), `repeatPauseSec`,
-  `autoDashboard`, `boardOrder`, and the LED trigger's `ledTrigger`, `ledDelaySec`, `ledHoldSec`,
-  `ledRelayURL`, `ledOnCommand`, `ledOffCommand` (see below). FSUDAQ writes the file back when
-  these change.
+- then `settingsPath=`: the active protocol (a folder of `Digi-*.bin` files and `run_protocol.json`;
+  empty = the data path, as in older versions).
+
+The acquisition controls (Save Data, the data path, numbering, run length, file size, board order, LED
+trigger, dashboard) are in the protocol's `run_protocol.json` (see [Protocols](#protocols)), not here.
+Older files had them as `key=value` lines (`runLengthMin`, `maxFileSizeMB`, `ledDelaySec`, ...): they
+are still read, and the first start adds those the active protocol lacks to its `run_protocol.json`;
+FSUDAQ then writes the file without them. Line 1 stays the data path in use (the status page reads it).
 
 If no programSettings.txt is found. The program can still search for all digitizers that connected using optical cable. 
 
@@ -121,16 +122,19 @@ User must setup the data path for data take. Without the data path, user still c
   - `<prefix>_<run>_<serial>_<DPP>_<tick>_<index>.fsu` <- data files, a new index at the roll-over size
   - `<prefix>_<run>_<serial>_<DPP>.bin` <- each board's settings as the run used them, read back from the
     board just before it starts (after the ADC calibration and what FSUDAQ derives at each start)
-  - `<prefix>_<run>_run_protocol.json` <- the run protocol this run was taken with (see Settings sets)
-  - `<prefix>_<run>_programSettings.txt` <- programSettings.txt as it was, the influx token and the elog
-    password masked
+  - `<prefix>_<run>_protocol.json` <- the protocol this run was taken with, as it was in the window
+    (saved or not): every acquisition control, which protocol it came from (`protocol`) and each board's
+    snapshot (`boardSettings`). No secrets (the influx token and elog password are not in it). Runs taken
+    before 3 Nov 2026 have `<prefix>_<run>_run_protocol.json` and `<prefix>_<run>_programSettings.txt`
+    instead.
   - `<prefix>_<run>_run.json` <- the run file: everything about the run that is not data (below)
   - `<prefix>_<run>_summary.json` <- written by the online dashboard when the run is over: what it computed
     (totals, histograms, rate history, problems, whether it saw the whole run); online/README.md "Run summary"
 
-All of these are written for every saved run, whatever is answered at Start; a file that cannot be
-written stops the start. The snapshots and copies are never written again (Save refuses a run snapshot;
-loading one leaves the board's settings file in the set); only the run file is rewritten, as below.
+All of these are written for every saved run, without a question; a file that cannot be written stops
+the start. The snapshots and the protocol copy are read-only once the run is on and never written again
+(Save refuses a run snapshot; loading one leaves the board's settings file in the protocol); only the run
+file is rewritten, as below.
 
 The `.bin` snapshots are the boards' register memory as FSUDAQ loads it; the run file is the same
 read-back in words, with the rest of the run's settings, so a run can be understood later without
@@ -141,58 +145,67 @@ FSUDAQ. It is written when the run starts, again at each LED answer and at the s
 | `run`, `prefix`, `folder` | which run |
 | `start`, `stop` | times (ISO 8601 with the UTC offset), comments, run time in ms, problems found at the stop, bytes saved per board; `stop` is `null` while the run is going (or if FSUDAQ died in it) |
 | `led` | the LED trigger's settings, and each command sent: when (`sent`, and `run_ms` since the boards started), the PLC's `reply`, whether it was `ok`, and whether it could have `switched` the LED (`yes`; `no`: refused or never reached the PLC; `unknown`: e.g. no answer in time) |
-| `run_control` | run length, repeat and pause, file size, board order, elog; `settings_set` (name, path), `opened_with` ("settings set …", "settings from run …", "no settings"), `run_protocol` (= the run's protocol copy) |
+| `run_control` | run length, repeat and pause, file size, board order, elog; `settings_set` (the protocol: name, path), `opened_with` ("protocol …", "protocol from run …", "no settings"), `protocol_file` (the run's protocol copy; older runs: `run_protocol` and `run_protocol_file`) |
 | `fsudaq` | the branch and commit of the source tree FSUDAQ ran from, and when its binary was built |
-| `boards` | per board in rack order: serial, model, DPP, channels, its `.bin` snapshot, `settings_file` (its file in the set), `programmed_from` (the file last loaded into it), and every register as `"<address> [chNN] <name>": "0x<hex> <decimal>"` |
+| `boards` | per board in rack order: serial, model, DPP, channels, its `.bin` snapshot, `settings_file` (its file in the protocol), `programmed_from` (the file last loaded into it), and every register as `"<address> [chNN] <name>": "0x<hex> <decimal>"` |
 
 About 25 kB per 16-channel board. Read it with `less`, or e.g.
 `python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["led"])' <file>`.
 
-## Settings sets
+## Protocols
 
-A settings set is a folder of `Digi-<serial>_<DPP>.bin` files (one per board) and a `run_protocol.json`,
-for one purpose: e.g. `…/PSI_2026_DAQtest_settings/{cosmics,noise_run,test_pulse}`. The active set is
-`settingsPath`; the folders beside it that hold `Digi-*.bin` files are the other sets ("Settings set"
-on the main window; Set Path picks a set folder anywhere).
+A protocol is everything a run is taken with, kept in one folder for one purpose (e.g.
+`…/PSI_2026_DAQtest_settings/{cosmics,noise_run,t0_bringup}`): each board's `Digi-<serial>_<DPP>.bin`
+and `run_protocol.json`, the acquisition controls: **Save Data**, the **data path**, **Auto-increment
+run no.**, run length, repeat pause, file size, board order, the LED trigger (on, delay, hold, relay and
+commands) and **Start dashboard with run**, plus `boardFiles` for a board whose file the protocol keeps
+outside its folder (below). The active protocol is `settingsPath` in programSettings.txt; the folders
+beside it that hold `Digi-*.bin` files are the other protocols ("Protocol" on the main window; Set Path
+picks a folder anywhere). The chooser is locked while the digitizers are open.
 
-Opening the digitizers:
+- **Choosing a protocol** (or starting FSUDAQ) takes its acquisition controls into the window at once.
+  Its boards' settings are loaded when the digitizers are opened. Unsaved changes to the protocol being
+  left are asked about first (below). **Repeat is never restored** (from a protocol or a run): a Start
+  never begins a series unasked.
+- Opening the digitizers:
+  - **w/ protocol: <name>** (default): each board is programmed from its file in the protocol and every
+    register is read back. A board without a file, or one that does not read back, blocks Start. The
+    acquisition controls in the window (taken when the protocol was chosen, edits since included) stay.
+  - **w/ protocol from a run…**: choose a run (newest first); each board is programmed from that run's
+    snapshot and the run's acquisition controls go into the window (not into the protocol). A board
+    without a snapshot is programmed from the protocol instead, with a warning. The run folder is never
+    written.
+  - **w/o settings**: the boards keep what they hold (and are not counted as protocol changes).
 
-- **w/ settings set: <name>** (default): each board is programmed from its file in the set and every
-  register is read back; the set's run protocol is loaded. A board without a file, or one that does
-  not read back, blocks Start.
-- **w/ settings from a run…**: choose a run (newest first); each board is programmed from that run's
-  snapshot, and the run's protocol goes into the window. A board without a snapshot is programmed
-  from the set instead, with a warning. The run folder is never written.
-- **w/o settings**: the boards keep what they hold; not compared with the set at Start.
+**Every saved run keeps what it used**, saved or not: each board's settings as read back just before the
+start (`<prefix>_<run>_<serial>_<DPP>.bin`), the protocol as it was in the window
+(`<prefix>_<run>_protocol.json`) and the run file. Start never asks about the protocol.
 
-**Every run folder keeps what the run used**, whatever is saved in the set: each board's settings as
-read back just before the start (`<prefix>_<run>_<serial>_<DPP>.bin`), the run protocol
-(`<prefix>_<run>_run_protocol.json`), `programSettings.txt` (token and password masked) and the run
-file. They are read-only once the run is on, and never written again. So saving into the set is never
-needed for a run, and FSUDAQ never asks about it.
-
-Saving, in two verbs:
+**Unsaved changes** are the boards' registers that differ from their files in the protocol (as at Start:
+the trace bit and what FSUDAQ derives at each start are no change), a board without a file there, and
+acquisition controls that differ from `run_protocol.json` (Repeat excepted). The main window's
+**Save to protocol** button reads **Save to protocol \*** (orange) while there are any; its tooltip lists
+them (refreshed every 2 s). **Close Digitizers**, closing FSUDAQ and choosing another protocol ask once,
+listing them:
 
 | button | what it does |
 |---|---|
-| **Save to set** (main window) | the open boards (read back) and the run protocol into the active set, in place, unasked. The next runs start from them. Shows **Save to set \*** (orange) when the last Start found settings not in the set; its tooltip says which. |
-| **Save to set** (Digitizer Settings) | this board's file in the active set, in place, unasked |
-| **Save as new set…** | a named copy: the open boards and the run protocol into a new folder beside the set, which becomes the active set; the old set is not touched |
-| **Save copy as…** (Digitizer Settings) | this board's settings into a file you choose; the board keeps saving to the set |
+| **Save to <protocol>** (default) | Save to protocol, then go on |
+| **Save as new protocol...** | asks a name; the boards (read back; with the boards closed, the protocol's files) and the controls into a new folder beside the protocol, which becomes the active one; then go on |
+| **Discard** | go on without saving; after Close Digitizers the window takes the protocol's controls again |
+| **Cancel** | stay as it was (the digitizers or FSUDAQ stay open) |
 
-Whatever was loaded, a board's settings file stays its file in the active set: Save to set and Live
+Saving:
+
+| button | what it does |
+|---|---|
+| **Save to protocol** (main window) | the open boards (read back) and the acquisition controls into the active protocol, in place, unasked |
+| **Save to protocol** (Digitizer Settings) | this board's file in the protocol, in place, unasked |
+| **Save as new protocol…** | a named copy (as in the question above); the old protocol is not touched |
+| **Save copy as…** (Digitizer Settings) | this board's settings into a file you choose, then asks **Use this file in the protocol?** Yes: the board saves to that file from now on (Save to protocol, Live Setting Update) and the protocol keeps it under `boardFiles`, an unsaved change until Save to protocol; the next open programs the board from it. No (default): an exported copy, the board keeps its file. |
+
+Whatever was loaded, a board's settings file stays its file in the protocol: Save to protocol and Live
 Setting Update write there, never into a run's snapshot or another file loaded.
-
-Run protocol (`run_protocol.json`): run length, repeat, pause, file size, run numbering, board order,
-LED trigger. Run length, pause, numbering and the LED on/delay/hold are per run: loaded as defaults,
-never asked about at Start, recorded in each run's copy. File size, board order and the LED relay and
-commands belong to the set. **Repeat is never restored** (from a set, a run or programSettings.txt): a
-Start never begins a series unasked. Changes in the window reach the set only when saved.
-
-At Start (Save Data on), the boards and the set fields of the protocol are compared with the set
-(read-only registers, the trace bit and what FSUDAQ derives at each start are left out). Nothing is
-asked: if they differ, the run starts with what the boards hold, the log lists every register
-(file → board), and Save to set is marked until it is pressed or the boards are reopened.
 
 Run numbers: with **Auto-increment run no.** a number that already has files in the data path (a
 stale `lastRun.sh`, a run folder copied in) is skipped, unasked and logged; nothing is written over.

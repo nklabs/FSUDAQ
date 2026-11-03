@@ -2874,11 +2874,12 @@ def run_fingerprint(folder):
 
 def run_settings_files(folder, name):
     """The run's own records of its settings, by file name in its folder (None: not there): FSUDAQ's run
-    file, its copies of the program settings and run protocol (newer FSUDAQ), the boards' snapshots."""
+    file, its copy of the protocol the run was taken with (FSUDAQ from 3 Nov 2026: <run>_protocol.json; before:
+    <run>_run_protocol.json and <run>_programSettings.txt), the boards' snapshots."""
     def there(f):
         return f if os.path.isfile(os.path.join(folder, f)) else None
-    return dict(run_folder=folder, run_file=there(name + "_run.json"), program_settings=there(name + "_programSettings.txt"),
-                run_protocol=there(name + "_run_protocol.json"),
+    return dict(run_folder=folder, run_file=there(name + "_run.json"), protocol=there(name + "_protocol.json"),
+                program_settings=there(name + "_programSettings.txt"), run_protocol=there(name + "_run_protocol.json"),
                 board_settings=sorted(os.path.basename(p) for p in glob.glob(os.path.join(glob.escape(folder), "*.bin"))))
 
 

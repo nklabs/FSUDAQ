@@ -1560,8 +1560,10 @@ function drawSumTables(s, row){
   const T = s.settings, f = v => v ? esc(v) : 'none';
   document.getElementById('t_sum_set').innerHTML =
     row('run folder', esc(T.run_folder)) + row('run file', f(T.run_file)) +
-    row('program settings', T.program_settings ? esc(T.program_settings) : 'no copy in the run folder') +
-    row('run protocol', T.run_protocol ? esc(T.run_protocol) : 'no copy in the run folder') +
+    // FSUDAQ from 3 Nov 2026 keeps one copy of the protocol; older runs a run protocol and the program settings
+    (T.protocol || !(T.run_protocol || T.program_settings) ? row('protocol', T.protocol ? esc(T.protocol) : 'no copy in the run folder')
+      : row('run protocol', T.run_protocol ? esc(T.run_protocol) : 'no copy in the run folder') +
+        row('program settings', T.program_settings ? esc(T.program_settings) : 'no copy in the run folder')) +
     row('board snapshots', T.board_settings.length ? esc(T.board_settings.join(', ')) : 'none') +
     row('experiment config', f(T.experiment_config) + (s.setup && s.setup.config ? ' (its content kept in the summary)' : '')) +
     Object.keys((s.setup||{}).files || {cabling:0, gains:0, time_offsets:0, map:0}).map(k=>{ const R = ((s.setup||{}).files||{})[k];

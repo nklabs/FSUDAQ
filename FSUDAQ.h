@@ -50,6 +50,11 @@ public:
     }
     StopEverything("FSUDAQ was closed");
     WaitForLed(3000);
+    // unsaved changes to the protocol (boards, acquisition controls): save, save as new, discard, or stay open
+    if( !closingBySignal && !ConfirmProtocolChanges("Close FSUDAQ") ){
+      event->ignore();
+      return;
+    }
     if( scope ) {
       delete scope;
       scope = nullptr;
@@ -88,6 +93,7 @@ private slots:
 
   void OpenDigitizers();
   void CloseDigitizers();
+  bool CloseDigitizersAsked();  // the Close Digitizers button: unsaved protocol changes asked about first; false: stayed open
   void WaitForDigitizersOpen(bool onOff);
 
   void SetupScalar();
@@ -134,46 +140,52 @@ private:
 
   QString programSettingsFilePath;
   QString rawDataPath;
-  QString settingsPath;         // the active settings set: a folder of Digi-<serial>_<DPP>.bin and run_protocol.json; empty in programSettings.txt = the data path
+  QString settingsPath;         // the active protocol: a folder of Digi-<serial>_<DPP>.bin and run_protocol.json; empty in programSettings.txt = the data path
 
-  //@----- settings sets: the folders beside the active one (in its parent, the settings root), each a group of settings
-  //       for a purpose (cosmics, noise_run, ...). The boards are opened with the active set; Save to set (here and in
-  //       Digitizer Settings) and Live Setting Update write it, in place and unasked: every run folder keeps its own copies
-  //       of what the run used. "Save as new set" makes a new one from the boards and the run protocol.
+  //@----- protocols (folders still called settings sets in the code): everything a run is taken with, the boards' settings
+  //       and the acquisition controls (Save Data, data path, numbering, run length, file size, board order, LED trigger,
+  //       dashboard), one folder per purpose (cosmics, noise_run, ...) beside the active one. Chosen while the boards are
+  //       closed: its controls are taken at once, its boards' files at the next open. Every Start with Save Data copies
+  //       what the run uses into the run folder, saved or not; the protocol itself is written only by Save to protocol,
+  //       Save as new protocol (or the question when the boards or FSUDAQ close with unsaved changes) and Live Setting Update.
   RComboBox * cbSettingsSet;
   QPushButton * bnSaveToSet;
   QPushButton * bnSaveNewSet;
-  QString SettingsRoot() const;   // the active set's parent; none when the settings are the data path itself
+  QString SettingsRoot() const;   // the active protocol's parent; none when the settings are the data path itself
   static QStringList SettingsSets(const QString & root);   // the subfolders holding a Digi-*.bin, by name
   void UpdateSettingsSetView();
-  bool SaveAsNewSet(const QString & name, QString & why);  // the open boards (read back) and the run protocol into <root>/<name>, made active
-  void PromptSaveAsNewSet();
-  bool SaveToSet();             // the open boards (read back) and the run protocol into the active set, in place; logs what it wrote
-  void MarkSetUnsaved(const QStringList & edited);   // Save to set shows what the last Start found not in the set (empty: nothing)
-  QString openSettingsDir;      // the set the open boards were opened with (or saved to as a new set)
+  void ChooseProtocol(const QString & dir);   // the protocol chooser and Set Path: unsaved changes asked about, then its controls taken
+  bool SaveAsNewSet(const QString & name, QString & why);  // the open boards (read back) and the protocol into <root>/<name>, made active
+  bool PromptSaveAsNewSet();    // asks the name; false: cancelled or not saved
+  bool SaveToSet();             // the open boards (read back) and the acquisition controls into the active protocol, in place; logs what it wrote
+  QString openSettingsDir;      // the protocol the open boards were opened with (or saved to as a new one)
+  QString ActiveProtocolDir() const { return digi ? openSettingsDir : settingsPath; }
+  QMap<QString, QString> boardFiles;   // serial -> the board's settings file when the protocol keeps it outside its folder
+  QString BoardProtocolFile(const QString & dir, Digitizer * d) const;   // the board's file in protocol dir
+  //@----- unsaved protocol changes: the boards' registers against their files, the controls against run_protocol.json
+  struct ProtocolChanges { QStringList items, lines; };   // items: "Digi-15880", "acquisition controls"; lines: the details
+  ProtocolChanges UnsavedProtocolChanges(bool readBack);  // readBack: the boards read first (idle boards only)
+  void UpdateProtocolMark();    // Save to protocol shows "*" (orange) while something is unsaved; its tooltip says what
+  bool ConfirmProtocolChanges(const QString & action, bool * discarded = nullptr);   // asks if anything is unsaved: save, save as new, discard; false: cancelled
+  QTimer * protocolTimer;       // refreshes the mark
+  void LoadProtocolControls(bool migrate);   // the active protocol's acquisition controls into the window (migrate: fill keys it lacks)
+  bool legacyProgramSettings = false;        // programSettings.txt still held the acquisition controls (before protocols held them)
   QString openedFromRun;        // opened "w/ settings from a run": that run folder's name
   struct SettingsRun { QString folder, name; QDateTime time; int boards; };
   static QList<SettingsRun> RunsWithSnapshots(const QString & dataPath); // run folders holding settings snapshots, newest first
   bool PickSettingsRun(QString & runDir);   // asks which run (newest first); false: cancelled or none
 
-  //@----- run protocol: the run-control fields an experiment reuses, kept with the set in <set>/run_protocol.json.
-  //       Loaded when the boards are opened with the set; written only by Save to set or Save as new set (a GUI change
-  //       is unsaved until then: the Start check logs it and marks Save to set). programSettings.txt keeps the last values.
+  //@----- the protocol's acquisition controls, <protocol>/run_protocol.json; a run's copy is <prefix>_<run>_protocol.json
   static QString SetProtocolFile(const QString & set) { return set + "/run_protocol.json"; }
   QJsonObject ProtocolJson() const;
   static QByteArray ProtocolFileText(const QJsonObject & protocol);
   bool ApplyProtocol(const QJsonObject & p, QStringList & changes, QStringList & problems); // false: refused (a run is going)
-  static QStringList ProtocolDifferences(const QJsonObject & saved, const QJsonObject & now); // "key: set X, now Y"
+  static QStringList ProtocolDifferences(const QJsonObject & saved, const QJsonObject & now); // "key: saved X, now Y"
   bool SaveSetProtocol(const QString & set);   // atomic; logs a failure
   static bool WriteFileAtomic(const QString & path, const QByteArray & bytes);
-  static bool IsPerRunProtocolKey(const QString & key);  // chosen run by run: never compared with the set at Start
-  struct SetCompare { QStringList edited; int nDiff = 0; };
   std::vector<bool> ReadBackBoards();                           // every enabled board into memory, never into a file: true = failed
-  SetCompare CompareWithSet(const std::vector<bool> & readFailed); // memory against the active set (logged), the protocol's set fields too
 
-  //@----- at Start: board settings edited since their file was written, and the run's copies of the program settings
-  static QByteArray MaskedProgramSettings(const QByteArray & text); // the influx token and the elog password masked
-  QStringList boardOrder;       // serials in rack order (programSettings.txt boardOrder=): the Run Monitor and the dashboard show the boards so
+  QStringList boardOrder;       // serials in rack order (the protocol's boardOrder): the Run Monitor and the dashboard show the boards so
   std::vector<unsigned int> RackOrder() const; // the open boards (digi indices) in boardOrder, those not in it after, in port order
   QString prefix;
   unsigned int runID;

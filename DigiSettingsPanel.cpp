@@ -234,12 +234,13 @@ DigiSettingsPanel::DigiSettingsPanel(Digitizer ** digi, unsigned int nDigi, QStr
       });
 
       bnLoadSettings = new QPushButton("Load Settings...", this);
-      bnLoadSettings->setToolTip("Program this board from a settings file you choose (another set, a run's snapshot); its settings file stays its file in the active set.");
+      bnLoadSettings->setToolTip("Program this board from a settings file you choose (another protocol, a run's snapshot); its settings file stays its file in the active protocol.");
       buttonLayout->addWidget(bnLoadSettings, rowID, 2);
       connect(bnLoadSettings, &QPushButton::clicked, this, &DigiSettingsPanel::LoadSetting);
 
       bnSaveSettingsAs = new QPushButton("Save copy as...", this);
-      bnSaveSettingsAs->setToolTip("Write a copy of this board's settings to a file you choose; the board keeps saving to its file in the active set.");
+      bnSaveSettingsAs->setToolTip("Write this board's settings to a file you choose. You are then asked whether the protocol should use that file for this board "
+                                   "(an unsaved protocol change until Save to protocol) or keep it as an exported copy.");
       buttonLayout->addWidget(bnSaveSettingsAs, rowID, 3);
       connect(bnSaveSettingsAs, &QPushButton::clicked, this, [=](){ SaveSetting(0);});
 
@@ -282,8 +283,8 @@ DigiSettingsPanel::DigiSettingsPanel(Digitizer ** digi, unsigned int nDigi, QStr
         }
       });
 
-      bnSaveSettings = new QPushButton("Save to set", this);
-      bnSaveSettings->setToolTip("Write this board's settings into its file in the active settings set (the path above), in place: the next runs start from it. "
+      bnSaveSettings = new QPushButton("Save to protocol", this);
+      bnSaveSettings->setToolTip("Write this board's settings into its file in the active protocol (the path above), in place: the next runs start from it. "
                                  "Nothing is asked: every run folder keeps its own snapshot of what the board held in that run.");
       buttonLayout->addWidget(bnSaveSettings, rowID, 3);
       connect(bnSaveSettings, &QPushButton::clicked, this, &DigiSettingsPanel::SaveSettingToSet);
@@ -4188,12 +4189,14 @@ QString DigiSettingsPanel::DefaultSettingsFile(const QString & boardFile, const 
 }
 
 QString DigiSettingsPanel::BoardSetFile() const {
+  const QString mapped = boardFiles.value(QString::number(digi[ID]->GetSerialNumber()));
+  if( !mapped.isEmpty() ) return QDir::isAbsolutePath(mapped) ? mapped : QDir::cleanPath(settingsDir + "/" + mapped);
   return settingsDir + "/Digi-" + QString::number(digi[ID]->GetSerialNumber()) + "_" + QString::fromStdString(digi[ID]->GetData()->DPPTypeStr) + ".bin";
 }
 
 void DigiSettingsPanel::SaveSettingToSet(){
   DebugPrint("%s", "DigiSettingsPanel");
-  if( settingsDir.isEmpty() ){ SaveSetting(0); return; }   // no settings set (older settings in the data path): ask where
+  if( settingsDir.isEmpty() ){ SaveSetting(0); return; }   // no protocol folder (older settings in the data path): ask where
   SaveSettingFile(BoardSetFile(), 0);
 }
 
@@ -4219,17 +4222,32 @@ bool DigiSettingsPanel::SaveSettingFile(QString filePath, int opt){
   // a run's snapshot records what the board held in that run: never rewritten, in either format
   if( Digitizer::IsRunSnapshotPath(QFileInfo(filePath).absoluteFilePath().toStdString()) ){
     SendLogMsg("<font style=\"color: red;\"><b>" + filePath + "</b> is a run's settings snapshot; nothing saved.</font>");
-    QMessageBox::warning(this, "Settings not saved", filePath + "\nis a run's settings snapshot: it keeps what the board held in that run and is never rewritten.\n\nSave to the settings set instead.");
+    QMessageBox::warning(this, "Settings not saved", filePath + "\nis a run's settings snapshot: it keeps what the board held in that run and is never rewritten.\n\nSave to the protocol instead.");
     return false;
   }
   if( opt == 0 ){
-    // the board's file in the active set is its settings file; any other file is a copy, the board keeps writing the set
+    // the board's file in the active protocol is its settings file; any other file is a copy, unless the protocol is to use it
     const bool toSet = QFileInfo(filePath).absoluteFilePath() == QFileInfo(BoardSetFile()).absoluteFilePath();
     const bool ok = toSet ? digi[ID]->SaveAllSettingsAsBin(BoardSetFile().toStdString()) : digi[ID]->SaveAllSettingsAsTextForRun(filePath.toStdString());
     if( !ok ){
       SendLogMsg("<font style=\"color: red;\">Cannot write <b>" + filePath + "</b>; nothing saved.</font>");
       QMessageBox::warning(this, "Settings not saved", "Cannot write\n" + filePath);
       return false;
+    }
+    const QString digiName = "Digi-" + QString::number(digi[ID]->GetSerialNumber()), protocol = QFileInfo(settingsDir).fileName();
+    if( !toSet && !settingsDir.isEmpty() &&
+        QMessageBox::question(this, "Use this file in the protocol?",
+                              digiName + "'s settings were saved to\n" + filePath + "\noutside its file in protocol " + protocol + " (" + BoardSetFile() + ").\n\n"
+                              "Use this file for " + digiName + " in protocol " + protocol + "? The board then saves to it (Save to protocol, Live Setting Update), and "
+                              "protocol " + protocol + " has an unsaved change until it is saved. No: it stays an exported copy.",
+                              QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes ){
+      const QString file = QFileInfo(filePath).absoluteFilePath();
+      digi[ID]->SetSettingFileTarget(file.toStdString(), true);   // it was just written from the board
+      boardFiles[QString::number(digi[ID]->GetSerialNumber())] = file;
+      emit BoardFileChosen(QString::number(digi[ID]->GetSerialNumber()), file);
+      leSaveFilePath[ID]->setText(file);
+      SendLogMsg(digiName + ": its settings file in protocol " + protocol + " is now <b>" + file + "</b> (Save to protocol records it in run_protocol.json).");
+      return true;
     }
     leSaveFilePath[ID]->setText(QString::fromStdString(digi[ID]->GetSettingFileName()));
     SendLogMsg(toSet ? "Saved setting file <b>" + filePath + "</b>." : "Saved a copy of the settings to <b>" + filePath + "</b>; the board's settings file stays " + QString::fromStdString(digi[ID]->GetSettingFileName()) + ".");
@@ -4271,7 +4289,7 @@ bool DigiSettingsPanel::LoadSettingFile(const QString & fileName){
   std::vector<std::string> problems;
   int nProblem = digi[ID]->LoadAndProgramSettings(fileName.toStdString(), problems);
   QString digiName = "Digi-" + QString::number(digi[ID]->GetSerialNumber());
-  // whatever was loaded (a run snapshot, another set, a copy), the board's settings file stays its file in the active set
+  // whatever was loaded (a run snapshot, another protocol, a copy), the board's settings file stays its file in the active protocol
   const QString target = BoardSetFile();
   digi[ID]->SetSettingFileTarget(target.toStdString());
   if( nProblem < 0 ){

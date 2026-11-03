@@ -16,6 +16,22 @@ inert so far (no "truncating" messages). Recovery recipe after ANY DAQ crash: cl
 program, `rm /dev/shm/CAENV_LCK_*`, then reopen; power-cycle only if a board still does not
 answer the probe.
 
+### 3 Nov: protocols (the boards and every acquisition control), asked about at close
+A settings set is now a **protocol**: its `run_protocol.json` also holds Save Data, the data path and
+Start dashboard with run (`"format": "FSUDAQ run protocol 2"`), and `boardFiles` for a board whose file it
+keeps outside its folder. Choosing a protocol (or starting FSUDAQ) takes its controls at once; opening
+"w/ protocol" programs the boards and leaves the controls. programSettings.txt keeps only this computer's
+settings and `settingsPath` (line 1 stays the data path); an older one's controls are still read and
+added once to a protocol that lacks them. Start compares nothing and asks nothing: a saved run gets the
+boards' snapshots and one `<prefix>_<run>_protocol.json`, the protocol as in the window (replacing
+`_run_protocol.json` and `_programSettings.txt`; the run file's `run_control.protocol_file` points to it).
+Unsaved changes (registers against the protocol's files, controls against run_protocol.json) mark
+**Save to protocol \*** live and are asked about when the digitizers or FSUDAQ close or another protocol is
+chosen: Save to <protocol> / Save as new protocol... / Discard / Cancel. Digitizer Settings' **Save copy
+as...** asks whether the protocol is to use that file for the board. UI: "Settings set" -> "Protocol",
+"w/ protocol", "Save to protocol", "Save as new protocol...". "w/ protocol from a run" reads older runs'
+`_run_protocol.json` too; the dashboard's summary shows either.
+
 ### 3 Nov: saving without questions
 Users keep their settings with the data and do not want to be asked at every Start. Start never asks about
 settings not in the set: it logs them and marks the main window's **Save to set \*** (orange, tooltip lists

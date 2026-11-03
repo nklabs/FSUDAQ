@@ -9,6 +9,7 @@
 #include <QGroupBox>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QMap>
 
 #include "macro.h"
 #include "ClassDigitizer.h"
@@ -25,8 +26,9 @@ public:
   /// where Save and Load start: the board's settings file if it has one (the file it is loaded from, or
   /// its target after a load from a run snapshot), else <settingsDir>/<defaultName>
   static QString DefaultSettingsFile(const QString & boardFile, const QString & settingsDir, const QString & defaultName);
-  void SetSettingsDir(const QString & dir) { settingsDir = dir; }   // the active settings set changed (Save as new set)
-  QString BoardSetFile() const;   // the shown board's file in the active set
+  void SetSettingsDir(const QString & dir) { settingsDir = dir; }   // the active protocol changed (Save as new protocol)
+  void SetBoardFiles(const QMap<QString, QString> & files) { boardFiles = files; }   // the protocol's boards whose file is outside its folder
+  QString BoardSetFile() const;   // the shown board's file in the active protocol
 
   unsigned short GetTabID() const {return ID;}
   
@@ -38,16 +40,17 @@ public slots:
   void UpdateBoardAndChannelsStatus(); // directly read from register
 
   void SaveSetting(int opt);    // Save copy as...: asks where
-  void SaveSettingToSet();      // Save to set: the board's file in the active set, no question
+  void SaveSettingToSet();      // Save to protocol: the board's file in the active protocol, no question
   void LoadSetting();
-  bool SaveSettingFile(QString filePath, int opt); // Save after its dialog: the active set's file, else a copy (the board keeps its file)
-  bool LoadSettingFile(const QString & fileName);  // Load after its dialog: programs the board; its settings file stays in the active set
+  bool SaveSettingFile(QString filePath, int opt); // Save after its dialog: the protocol's file, else a copy, which the protocol may take (asked)
+  bool LoadSettingFile(const QString & fileName);  // Load after its dialog: programs the board; its settings file stays the protocol's
 
   void EnableButtons(bool enable);
 
 signals:
   void SendLogMsg(const QString &msg);
   void UpdateOtherPanels();
+  void BoardFileChosen(const QString & serial, const QString & file);   // the protocol is to keep this board's settings in file (unsaved until saved)
 
 private:
 
@@ -102,7 +105,8 @@ private:
   QCheckBox * chkCh[MaxRegChannel]; // Copy to Ch
   QPushButton * bnCopyChannel;
 
-  QString settingsDir;   // the active settings set's folder
+  QString settingsDir;   // the active protocol's folder
+  QMap<QString, QString> boardFiles;   // serial -> file, for boards the protocol keeps outside its folder
   bool enableSignalSlot;
 
   QTabWidget * tabWidget;
