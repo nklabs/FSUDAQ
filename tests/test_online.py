@@ -125,7 +125,10 @@ class Board:
         board = [0xA0000000 | (4 + len(words)), (8 << 27) | (1 << c), self.counter & 0x7FFFFF, 0] + words
         self.counter += 1
         data = struct.pack(f"<{len(board)}I", *board)
-        if damage:                            # a read that ended short: the header promises more than follows
+        if damage == "zero":                  # written as zeros, its length kept (Digi-62839, 3 Nov 2026): it is lost,
+            data = bytes(len(data))           # the aggregates on either side are whole
+            self.damaged += [(t, ch, ql, qs) for t, ch, tick, fine, ql, qs in events]
+        elif damage:                          # a read that ended short: the header promises more than follows
             data = data[:len(data) // 2]
             self.damaged += [(t, ch, ql, qs) for t, ch, tick, fine, ql, qs in events]
         elif self.opt == 2:
@@ -382,6 +385,12 @@ def scenario_damage_rollover(tmp):
     ev = [(int(9.5 * PS) + k * 1000, 0, (int(9.5 * PS) + k * 1000) // TICK, 0, 100, 50) for k in range(10)]
     b.write(0, ev, damage=True)                                   # half an aggregate, then good data again
     t = drive(online, clock, boards, t, t + 8)
+    # a whole aggregate, then one of zeros, both on disk before the next read (as a run read after it ended): the
+    # whole one is read (it was taken for the start of the damage, 3 Nov 2026), the zeros are stepped over
+    eg = [(int((t + 1.5) * PS) + k * 1000, 2, (int((t + 1.5) * PS) + k * 1000) // TICK, 0, 100, 50) for k in range(10)]
+    ez = [(int((t + 1.6) * PS) + k * 1000, 2, (int((t + 1.6) * PS) + k * 1000) // TICK, 0, 100, 50) for k in range(10)]
+    b.write(1, eg); b.write(1, ez, damage="zero")
+    t = drive(online, clock, boards, t, t + 8)
     other = Board(folder, 1, 58918, 16, [0.0] * 16, opt=0, seed=99, first_index=900)   # same board, extras option 0
     other.write(3, [(int(12 * PS) + k * 4000, 6, (int(12 * PS) + k * 4000) // TICK, 0, 7, 3) for k in range(5)])
     other.f.close()
@@ -393,7 +402,10 @@ def scenario_damage_rollover(tmp):
     bd = {x["serial"]: x for x in st["boards"]}
     good &= check(bd[15880]["skipped_words"] > 0, "damage: the damaged bytes are not reported")
     good &= check(bd[58918]["other_format"] == 1, f"damage: the other-format couple not reported ({bd[58918]['other_format']})")
-    good &= check(any("damaged" in h for h in st["health"]) and any("format" in h for h in st["health"]), "damage: not on the page")
+    loss = [h for h in st["health"] + st["notes"] if h.startswith("Digi-15880") and "unreadable" in h]
+    good &= check(len(loss) == 1 and " % of this board's data" in loss[0] and any("format" in h for h in st["health"]),
+                  f"damage: not on the page, or without its size ({loss})")
+    good &= check(bd[15880]["gaps"] == 2, f"damage: not 2 aggregates missing, the half one and the zeroed one ({bd[15880]['gaps']})")
     good &= check(bd[15880]["files"] > 3, f"damage: no roll-over ({bd[15880]['files']} files)")
     if good:
         ok(f"{bd[15880]['files']} files for Digi-15880; {bd[15880]['skipped_words'] * 4} damaged bytes and 1 other-format "
@@ -637,7 +649,8 @@ def scenario_counters(tmp):
                   f"(expected 1003), skipped {bd[1443]['skipped_words']}")
     good &= check(bd[58918]["skipped_words"] * 4 == len(old) and bd[58918]["gaps"] == 0,
                   f"counters: the old copy: {bd[58918]['skipped_words'] * 4} bytes stepped over, expected {len(old)}; gaps {bd[58918]['gaps']}")
-    good &= check(any("1443" in h and "missing" in h for h in st["health"]), "counters: the lost aggregates are not on the page")
+    good &= check(any("1443" in h and "lost before the disk" in h for h in st["health"]),   # 1,003 lost: an alarm, not a note
+                  "counters: the lost aggregates are not on the page")
     if good:
         ok("wrap read through; 1003 lost aggregates of Digi-1443 reported, its data exact; the old copy stepped over")
 

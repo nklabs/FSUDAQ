@@ -127,6 +127,8 @@ INDEX_WORDS = 32 << 20                        # words of a file indexed per step
                                               # already on disk is read over several steps
 LATE_RECENT_S = 60                            # the page shows late hits of the last minute too
 SLOW_KNOWN_S = 300                            # a channel pair silent this long is taken to have nothing more to write
+LOSS_NOTE_AGGS, LOSS_NOTE_SHARE = 3, 1e-3      # a board's loss this small (aggregates, share of its data) is a note, not an alarm
+                                              # (one zeroed aggregate in 87,757 on Digi-62839, 3 Nov 2026, was a red alarm)
 FINISHED_QUIET_S = 300                        # a folder no file of which was written for this long: a finished run
                                               # (when its run file has no stop entry: an older run, or FSUDAQ died)
 SUMMARY_FORMAT, SUMMARY_VERSION = "FSUDAQ online run summary", 1
@@ -837,8 +839,10 @@ class BoardStream:
     def summary(self, now):
         f = [self.scans[p] for p in list(self.order)]
         stuck = [(s, s.stuck_s(now)) for s in f if s.stuck_since is not None]
+        # aggregates: by the counters (the missing ones included), for the share of the data lost
+        aggs = sum(((s.last_ctr - s.first_ctr) & fsu_fast.CTR_MASK) + 1 for s in f if s.first_ctr >= 0 and s.last_ctr >= 0)
         return dict(files=len(f), bytes=sum(s.size for s in f), indexed=sum(s.pos * 4 for s in f),
-                    skipped_words=sum(s.skipped for s in f), other_format=sum(s.other for s in f), gaps=self.gaps(),
+                    skipped_words=sum(s.skipped for s in f), other_format=sum(s.other for s in f), gaps=self.gaps(), aggs=aggs,
                     behind=self.behind(),
                     stuck=[dict(file=os.path.basename(s.path), bytes=int(s.tail_bytes()), s=float(t)) for s, t in stuck])
 
@@ -1659,6 +1663,30 @@ class Online:
                     counters[name] = counters.get(name, 0) + n
         return occ, counters
 
+    @staticmethod
+    def _data_loss(b):
+        """A board's data lost before the disk (counter gaps) or unreadable on it (damage stepped over), in one line
+        with its size, and whether it is small: at most LOSS_NOTE_AGGS aggregates and LOSS_NOTE_SHARE of the board's
+        data (a note then, not an alarm). None without either. A zeroed aggregate is both a gap and its damage."""
+        if not (b["gaps"] or b["skipped_words"]):
+            return None, False
+        what = " and ".join(x for x in (
+            f"{b['gaps']:,} data block{'s' if b['gaps'] != 1 else ''} (board aggregate{'s' if b['gaps'] != 1 else ''}) lost before the disk"
+            if b["gaps"] else "",
+            f"{b['skipped_words'] * 4:,} bytes of unreadable data skipped" if b["skipped_words"] else "") if x)
+        shares = ([b["gaps"] / b["aggs"]] if b["gaps"] and b.get("aggs") else []) + \
+                 ([b["skipped_words"] * 4 / b["bytes"]] if b["skipped_words"] and b["bytes"] else [])
+        if not shares or (b["gaps"] and not b.get("aggs")):
+            return f"Digi-{b['serial']}: {what}", False      # its size not known yet: an alarm until it is
+        share = max(shares)
+        size = f" (≈ {100 * share:.2g} % of this board's data" + (f", about {share * b['newest_s'] * 1e3:.0f} ms of it)" if b.get("newest_s") else ")")
+        small = b["gaps"] <= LOSS_NOTE_AGGS and share < LOSS_NOTE_SHARE
+        return f"Digi-{b['serial']}: {what}{size}{'; the rest reads normally' if small else ''}", small
+
+    def _notes(self, boards):
+        """Below the warnings, quieter (state()["notes"]): small, isolated data losses (see _data_loss)."""
+        return [t for t, small in map(self._data_loss, boards) if t and small]
+
     def _health(self, now, boards):
         """What the page warns of at the top (state()["health"]), from the board rows of _board_rows()."""
         running = self.mode == "running"
@@ -1681,11 +1709,9 @@ class Online:
                 health.append(f"Digi-{b['serial']}: no data in this run")
             elif b["quiet_alarm"]:
                 health.append(f"Digi-{b['serial']}: nothing written for {b['quiet_s']:.0f} s while the other boards write")
-            if b["gaps"]:
-                health.append(f"Digi-{b['serial']}: {b['gaps']:,} board aggregates missing from the files (counter gaps): "
-                              "data lost before they reached the disk")
-            if b["skipped_words"]:
-                health.append(f"Digi-{b['serial']}: {b['skipped_words'] * 4:,} bytes of damaged data stepped over")
+            loss, small = self._data_loss(b)
+            if loss and not small:
+                health.append(loss)
             if b["other_format"]:
                 health.append(f"Digi-{b['serial']}: {b['other_format']:,} couple aggregates in a format the online "
                               "decoder does not read (extras option 2 with time tag and charges needed); left out")
@@ -1730,7 +1756,7 @@ class Online:
                 early=int(early.sum()),
                 pause_flush_s=None if self.flush_wall is None else now - self.flush_wall,
                 bunches=A.n_bunches, unmapped=A.n_bad,
-                proc_s=self.proc_s, steps=self.steps, health=health,
+                proc_s=self.proc_s, steps=self.steps, health=health, notes=self._notes(boards),
                 warnings=S.warnings, problems=S.problems,
                 boards=boards,
                 # FSUDAQ's run file; t0_s: the board-clock second the rate plots count from (their 0 s), so a
@@ -1993,7 +2019,8 @@ class Online:
             return
         now = self.clock()
         wall = None
-        for text in self._health(now, self._board_rows(now)):
+        boards = self._board_rows(now)
+        for text in self._health(now, boards) + self._notes(boards):   # the summary keeps the small losses too
             wall = wall or iso_time(time.time())
             key = PROBLEM_NUMBERS.sub("#", text)
             p = self.problems.get(key)
@@ -2090,7 +2117,7 @@ class Online:
         name = os.path.basename(os.path.normpath(folder))
         nbc = ch.board_channels
         boards = self._board_rows(now)
-        health = self._health(now, boards)
+        health = self._health(now, boards) + self._notes(boards)
         occ, counters = self._occupancy()
         rf = read_run_file(folder, cache=False) or {}
         fp = run_fingerprint(folder)
@@ -2177,8 +2204,8 @@ class Online:
             if e["what"] == "reference":
                 caveats.append(dict(reason="reference_changed", detail=e["detail"] + f" ({e['at']})"))
         for b in boards:
-            bad = [f"{b['gaps']:,} board aggregates missing (counter gaps: lost before the disk)" if b["gaps"] else "",
-                   f"{b['skipped_words'] * 4:,} bytes of damaged data stepped over" if b["skipped_words"] else "",
+            loss = self._data_loss(b)[0]
+            bad = [loss.split(": ", 1)[1] if loss else "",
                    f"{b['other_format']:,} couple aggregates in a format the online decoder does not read" if b["other_format"] else ""]
             if any(bad):
                 caveats.append(dict(reason="data_problems", detail=f"Digi-{b['serial']}: " + "; ".join(x for x in bad if x)))

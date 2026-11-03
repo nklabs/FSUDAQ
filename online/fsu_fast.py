@@ -194,6 +194,7 @@ CTR_MASK = 0x7FFFFF            # the board aggregate counter: 23 bits, wraps
 FORWARD = 1 << 20              # a counter this far ahead of the last one read is a later aggregate (a gap:
                                # aggregates missing from the file); further, or behind, is not
 NEAR = 64                      # after damage, an aggregate not all written yet is waited for if this near
+ZERO_RUN = 8                   # this many zero words after an aggregate: zero fill, not the rest of a cut-off one
 
 
 @njit(cache=True, nogil=True)
@@ -220,6 +221,16 @@ def _follows(w, pos, size, n, eof, last_ctr):
             return 1                          # the end of what is written, or the next header not all written
         return -1
     x = np.int64(w[q]); s2 = x & 0x0FFFFFFF
+    if x == 0:
+        # zeros after it: an aggregate written as zeros (its length kept; Digi-62839, 3 Nov 2026). This one is whole
+        # (its couple aggregates fill it exactly); the zeros are the damage. Real data has no run of zero words.
+        k = q
+        while k < n and k < q + ZERO_RUN and w[k] == 0:
+            k += 1
+        if k == q + ZERO_RUN or (k == n and eof):
+            return 1
+        if k == n:
+            return -1                         # zeros up to what is written: wait for the rest
     if (x >> 28) != 0xA or s2 < 4 or s2 > MAX_AGG_WORDS:
         return 0
     if ((np.int64(w[q + 1]) >> 27) & 31) != ((np.int64(w[pos + 1]) >> 27) & 31):

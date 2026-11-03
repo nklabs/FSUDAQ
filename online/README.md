@@ -172,8 +172,13 @@ pair's events when that pair's buffer is full, so a quiet channel reaches the di
 aggregate is counted on the DAQ tab exactly once whenever it arrives; the track finder takes time
 slices only up to where every pair still writing is on disk, and a hit that arrives after its
 time was processed is counted as late and shown, never dropped silently. Damaged data is stepped
-over and reported, so are aggregates missing from a file (gaps in the aggregate counter). The page
-greys out with NO CONNECTION when the analysis stops answering.
+over and reported, so are aggregates missing from a file (gaps in the aggregate counter), in one
+line per board with its size (share of the board's data, and about how long). A small, isolated loss
+(at most 3 aggregates and under 0.1 % of the board's data) is a grey note under the warnings, not a
+red one: e.g. one aggregate the readout handed over as zeros (510 words of Digi-62839, 3 Nov 2026,
+0.001 % of its data). The aggregates on either side of zero fill are read (8 zero words after an
+aggregate: zero fill, not the rest of a cut-off one). The page greys out with NO CONNECTION when the
+analysis stops answering.
 
 What the status line means:
 

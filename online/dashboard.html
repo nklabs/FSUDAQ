@@ -95,6 +95,7 @@
   .banner div { border-radius:6px; padding:5px 10px; background:var(--card); border:1px solid var(--line); }
   .banner .bad { border-color:var(--heavy); color:var(--heavy); font-weight:600; }
   .banner .ph { border-color:#c77700; }
+  .banner .note { color:var(--muted); }
   body.stale .tiles, body.stale section, body.stale h1 .st { opacity:.45; filter:grayscale(1); }
   .sizer { display:inline-flex; align-items:center; gap:6px; font:calc(12px * var(--k, 1)) system-ui, sans-serif; color:var(--muted); font-weight:normal; }
   .sizer input { width:110px; cursor:pointer; }
@@ -529,6 +530,7 @@ function banner(){
     if(chOK && Date.now() - chOK > 10000)
       out.push(['bad', `The channel histograms have not updated since ${new Date(chOK).toLocaleTimeString()}: those shown are from then.`]);
     for(const h of S.health) out.push(['bad', esc(h)]);
+    for(const n of (S.notes||[])) out.push(['note', esc(n)]);   // small, isolated data losses: worth knowing, not an alarm
     for(const p of S.problems) out.push(['bad', 'Setup: '+esc(p)]);
     const ev = ((S.run_file||{}).led||{}).events||[];
     const mayBeOn = ev.some(e=>e.what==='on' && e.switched!=='no');   // an "on" that may have reached the PLC (also one not answered yet)
