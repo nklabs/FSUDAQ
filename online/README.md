@@ -24,6 +24,13 @@ per channel, bunches per second), which go on from the next whole second of data
 is not cleared: it counts the whole run and records the Clear. Opened from another machine the page
 is view only and says so next to the button.
 
+**Axes** of every plot but the pulse height on every channel and the side-by-side panels: click a plot, then
+the wheel zooms x and shift+wheel y; drag across it to zoom into that span; over an axis the wheel zooms that
+axis and dragging moves it; double-click: automatic again (as on the PION topic plots; until a plot is clicked
+the wheel scrolls the page). **⚙** in a card's bar gives the ranges as numbers (empty: automatic). A live time
+chart (total rate, a channel's rate, bunches per second) zoomed with the wheel keeps following the newest data.
+The pulse height's x is its Qlong range (its own fields and drag), only its y here. Kept in this browser, per plot.
+
 #### Beam vs map
 
 The floor tool (pion-spectrometer-simulations `tool/`, **Publish to online**) writes what the live data

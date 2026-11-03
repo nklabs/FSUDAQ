@@ -66,7 +66,9 @@
   #tab_bvm .card.tall2 canvas { height:calc(420px * var(--k, 1)); }
   #tab_bvm .card.tall1 #c_bvm_view { height:calc(520px * var(--k, 1)); }
   #tab_bvm .card.tall2 #c_bvm_view { height:calc(760px * var(--k, 1)); }
-  #tab_bvm canvas.zoom1 { cursor:crosshair; }
+  #tab_bvm canvas.zoom1, canvas.zoomable { cursor:crosshair; }
+  canvas.zoomable.active { outline:1px solid var(--sel); outline-offset:-1px; }
+  .axrow { margin:4px 0; }
   #tab_bvm th, #tab_bvm td { padding:1px 5px; }
   .axes { display:inline-flex; gap:4px; align-items:center; flex-wrap:wrap; }
   .ctl .axes input[type=number] { width:calc(46px * var(--k, 1)); }
@@ -300,23 +302,27 @@ function setupCanvas(id){ const c=document.getElementById(id); const r=window.de
   const w=c.clientWidth, h=c.clientHeight; c.width=w*r; c.height=h*r; const g=c.getContext('2d'); g.setTransform(r,0,0,r,0,0); return {c,g,w,h}; }
 function message(id, text){ const {g,w,h}=setupCanvas(id); g.fillStyle=css('--muted'); g.font=cfont(12); g.textAlign='center'; g.fillText(text, w/2, h/2); }
 // spec: {xlog, ylog, x0, x1, xfmt, yfmt, xticks, series:[{kind:'bars'|'step'|'line', edges|x, y, color, colors, width, gap}], marks:[{x, color, label}], ylabel, empty}
-// view: {x0, x1, y0, y1} set by hand (null or missing: automatic); yfit: the automatic y fits the bins in view only
+// view: {x0, x1, y0, y1} set by hand (null or missing: automatic; without spec.view, the plot's axes set on the page, VW);
+// span: the newest that long (a live time chart zoomed at its right end keeps following); yfit: the automatic y fits
+// the data in view only (always once x is zoomed)
 function plot(id, spec){
   const {g,w,h}=setupCanvas(id); const L=Math.round(50*K),B=Math.round(24*K),T=8,R=10;   // room for the labels at this size
-  const V = spec.view || {};
+  const V = spec.view || VW[id] || {};
   let x0 = V.x0 ?? spec.x0, x1 = V.x1 ?? spec.x1;
+  if(V.span > 0 && V.x0 == null && V.x1 == null) x0 = Math.max(spec.x0, x1 - V.span);
   if(!(x1 > x0) || (spec.xlog && !(x0 > 0))){ x0 = spec.x0; x1 = spec.x1; }
-  const inView = (s, i) => !spec.yfit || !s.edges || (s.edges[i+1] > x0 && s.edges[i] < x1);
+  const yfit = spec.yfit || x0 !== spec.x0 || x1 !== spec.x1;
+  const inView = (s, i) => !yfit || (s.edges ? s.edges[i+1] > x0 && s.edges[i] < x1 : !s.x || (s.x[i] >= x0 && s.x[i] <= x1));
   const usable = v => v!=null && isFinite(v) && (spec.ylog ? v>0 : true);
   let own = spec.series.flatMap(s=>s.y.filter((v,i)=>inView(s,i))).filter(usable);
-  if(spec.yfit && (!own.length || (!spec.ylog && !own.some(v=>v>0)))) own = spec.series.flatMap(s=>s.y).filter(usable);   // nothing in view: keep the plot (and its zoom)
+  if(yfit && (!own.length || (!spec.ylog && !own.some(v=>v>0)))) own = spec.series.flatMap(s=>s.y).filter(usable);   // nothing in view: keep the plot (and its zoom)
   if(!own.length || (!spec.ylog && !own.some(v=>v>0))){ message(id, spec.empty || 'no entries yet'); PLOTS[id]=null; return null; }
   // spec.yall: the values of several plots that share one y scale
   const ys = spec.yall ? spec.yall.filter(v=>isFinite(v) && (spec.ylog ? v>0 : true)) : own;
   let y0, y1;
   if(spec.ylog){ y1 = Math.pow(10, Math.ceil(Math.log10(Math.max(...ys))+1e-9)); y0 = Math.pow(10, Math.floor(Math.log10(Math.min(...ys)))); if(y1<=y0) y1=y0*10; }
   else { y0 = Math.min(0, ...ys); y1 = Math.max(...ys)*1.08; }
-  if(!spec.ylog){ const a = V.y0 ?? y0, b = V.y1 ?? y1; if(b > a){ y0 = a; y1 = b; } }
+  { const a = V.y0 ?? y0, b = V.y1 ?? y1; if(b > a && (!spec.ylog || a > 0)){ y0 = a; y1 = b; } }
   const tx = spec.xlog ? (v=>Math.log10(v)) : (v=>v), ty = spec.ylog ? (v=>Math.log10(v)) : (v=>v);
   const X = v => L + (tx(v)-tx(x0))/(tx(x1)-tx(x0)) * (w-L-R);
   const Y = v => h-B - (ty(spec.ylog ? Math.max(v, y0) : v)-ty(y0))/(ty(y1)-ty(y0)) * (h-B-T);
@@ -345,10 +351,14 @@ function plot(id, spec){
     g.strokeStyle=m.color||css('--muted'); g.setLineDash([4,3]); g.lineWidth=1; g.beginPath(); g.moveTo(X(m.x),T); g.lineTo(X(m.x),h-B); g.stroke(); g.setLineDash([]);
     if(m.label){ g.fillStyle=m.color||css('--muted'); g.textAlign='left'; g.fillText(m.label, X(m.x)+3, T+22); } }
   if(spec.ylabel){ g.fillStyle=css('--muted'); g.textAlign='left'; g.fillText(spec.ylabel, L+4, T+10); }
-  return (PLOTS[id] = {X, Y, L, B, T, R, w, h, x0, x1, y0, y1, inv:invX(x0, x1, spec.xlog, L, w-R),
-                       invY: spec.ylog ? null : py => y0 + (h-B-py)/(h-B-T)*(y1-y0)});
+  return (PLOTS[id] = {X, Y, L, B, T, R, w, h, x0, x1, y0, y1, xlog:!!spec.xlog, ylog:!!spec.ylog, dx0:spec.x0, dx1:spec.x1, inv:invX(x0, x1, spec.xlog, L, w-R),
+                       invY: py => { const f = (h-B-py)/(h-B-T);
+                         return spec.ylog ? Math.pow(10, Math.log10(y0) + f*(Math.log10(y1)-Math.log10(y0))) : y0 + f*(y1-y0); }});
 }
 const PLOTS = {};
+// a group's label under a plot without x ticks, in the middle of the group's part in view; short once only part of it is
+function spanLabel(A, g, a, b, text, short){ const lo=Math.max(a, A.x0), hi=Math.min(b, A.x1); if(!(hi > lo)) return;
+  g.fillText(lo > a || hi < b ? short : text, (A.X(lo)+A.X(hi))/2, A.h-7); }
 function invX(x0, x1, xlog, pa, pb){ return px => { const f=Math.min(1, Math.max(0, (px-pa)/(pb-pa)));
   return xlog ? Math.pow(10, Math.log10(x0) + f*(Math.log10(x1)-Math.log10(x0))) : x0 + f*(x1-x0); }; }
 // 2-D histogram: spec {x0, x1, xlog, xedges, ny (y bins over 0..1), counts[ix][iy], color, xfmt}; shade = log of the count
@@ -397,6 +407,10 @@ document.getElementById('sizeval').onchange = e=>{
   setTextSize(Math.min(2, Math.max(0.7, v / 100)), true); draw(); };
 const store = { get(k,d){ try { const v=localStorage.getItem(k); return v===null?d:JSON.parse(v); } catch(e){ return d; } },
                 set(k,v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} } };
+// axes set by hand on the plots outside Beam vs map, kept in this browser: {plot id: {x0, x1, y0, y1, span}}
+const VWK = 'fsudaq-axes';
+let VW = store.get(VWK, {});
+if(!VW || typeof VW !== 'object') VW = {};
 
 // ---------------------------------------------------------------- state
 let S = null, CH = null, SPEC_ALL = null, GRID = null;
@@ -592,9 +606,11 @@ function drawDaq(){
                             ylabel: mode==='rate'?'Hz':'hits'});
   if(A){ const g=document.getElementById('c_chan').getContext('2d'); g.fillStyle=css('--muted'); g.font=cfont(10); g.textAlign='center';
     let start=0; for(let i=1;i<=slots.length;i++){ if(i===slots.length || slots[i].board!==slots[start].board){
-        g.fillText(`Digi-${slots[start].board} ch0–${slots[i-1].ch}`, (A.X(start)+A.X(i))/2, A.h-7); start=i; } } }
+        const a=Math.max(start, A.x0), b=Math.min(i, A.x1);   // the board's part in view (the axis may be zoomed)
+        if(b-a >= 1) g.fillText(`Digi-${slots[start].board} ch${slots[Math.ceil(a)].ch}–${slots[Math.floor(b)-1].ch}`, (A.X(a)+A.X(b))/2, A.h-7); start=i; } } }
   document.getElementById('c_chan').onclick = ev=>{ if(!A) return; const r=ev.target.getBoundingClientRect(); const x=ev.clientX-r.left;
-    const i=Math.floor((x-A.L)/((A.w-A.L-A.R)/slots.length)); if(i>=0 && i<slots.length && (ev.ctrlKey || ev.metaKey)){ toggleCmp(slots[i].slot); return; }
+    if(x < A.L || x > A.w-A.R) return;
+    const i=Math.floor(A.inv(x)); if(i>=0 && i<slots.length && (ev.ctrlKey || ev.metaKey)){ toggleCmp(slots[i].slot); return; }
     if(i>=0 && i<slots.length){ selSlot=slots[i].slot; store.set('fsudaq-sel-slot', selSlot); fillSelects(); fetchChannel(); } };
   legend('leg_chan', S.boards.map((b,i)=>({name:'Digi-'+b.serial, color:BOARD_COLOR[i%BOARD_COLOR.length]})).concat([{name:'selected channel', color:css('--sel')}])
     .concat(D.rf!=null ? [{name:'RF reference (not a particle)', color:css('--muted')}] : []));
@@ -844,7 +860,7 @@ function drawTrk(){
   S.occupancy.forEach((o,p)=>{ starts.push(ys.length); o.slice(1).forEach(v=>{ ys.push(v); cs.push(PLANE_COLOR[p]); }); if(p<2) for(let k=0;k<gap;k++){ ys.push(0); cs.push(null); } });
   const A = plot('c_occ', {x0:0, x1:ys.length, ylog:true, xticks:false, series:[{kind:'bars', edges:[...Array(ys.length+1).keys()], y:ys, colors:cs, gap:0.5}], empty:'no hits yet', ylabel:'hits'});
   if(A){ const g=document.getElementById('c_occ').getContext('2d'); g.fillStyle=css('--muted'); g.font=cfont(10); g.textAlign='center';
-    S.occupancy.forEach((o,p)=>{ const n=o.length-1; g.fillText(`T${p}  ch 1–${n}`, A.X(starts[p]+n/2), A.h-7); }); }
+    S.occupancy.forEach((o,p)=>{ const n=o.length-1; spanLabel(A, g, starts[p], starts[p]+n, `T${p}  ch 1–${n}`, `T${p}`); }); }
   legend('leg_occ', [0,1,2].map(p=>({name:'T'+p, color:PLANE_COLOR[p]})));
   const cedges=[...Array(7).keys()].map(v=>v+0.5);
   plot('c_cl', {x0:0.5, x1:6.5, ylog:true, xfmt:v=>v>=6?'6+':String(Math.round(v)), series:[0,1,2].map(p=>({kind:'step', edges:cedges, y:S.hist_cl[p], color:PLANE_COLOR[p]})), ylabel:'clusters'});
@@ -1245,6 +1261,84 @@ for(const c of cards){
 }
 document.getElementById('layout_reset').onclick = ()=>{ try { localStorage.removeItem(LAYOUT_KEY); } catch(e){} applyLayout({}); draw(); };
 applyLayout(store.get(LAYOUT_KEY, {}));
+// zoom on the other plots, as on the topic plots and Beam vs map: inside a plot the wheel zooms x, shift+wheel y, dragging
+// across zooms into that span; over an axis the wheel zooms it and dragging moves it; double-click: automatic again; ⚙ in
+// the card's bar: the ranges as numbers. The wheel zooms a plot only once it was clicked, until the pointer leaves it (the
+// page scrolls otherwise). Not the pulse height on every channel or the side-by-side panels; the pulse height's x is its
+// Qlong range (zoomed by its own drag), only its y here.
+const VW_PLOTS = ['c_chan','c_total','c_q','c_iat','c_dt','c_crate','c_spec','c_status','c_p','c_res','c_r','c_occ','c_cl','c_ncand','c_nh','c_rft_t',
+  'c_sum_chan','c_sum_rate','c_sum_status','c_sum_p','c_sum_res','c_sum_r','c_sum_occ','c_sum_cl','c_sum_ncand','c_sum_nh'];
+const VW_FOLLOW = new Set(['c_total','c_crate','c_status']);   // live time charts: the wheel changes how much of the newest they show
+const VW_YONLY = new Set(['c_q']);
+const VW_HELP = 'click the plot, then: wheel zooms x · shift+wheel zooms y · drag across zooms into that span · over an axis, ' +
+  'the wheel zooms it and dragging moves it · double-click: automatic again';
+function vwSet(id, r){
+  const v = {}; for(const k of ['x0','x1','y0','y1','span']) if(r[k] != null && isFinite(r[k])) v[k] = r[k];
+  if(Object.keys(v).length) VW[id] = v; else delete VW[id];
+  store.set(VWK, VW); vwFields(id); draw(); }
+function vwFields(id){
+  const el = document.querySelector(`.axes[data-vw="${id}"]`); if(!el) return; const r = VW[id] || {};
+  for(const k of ['x0','x1','y0','y1']){ const i = el.querySelector('.'+k); if(!i || document.activeElement === i) continue;
+    i.value = r[k]==null ? '' : +(+r[k]).toPrecision(5);
+    if(k === 'x0') i.placeholder = r.span ? 'last ' + sinum(r.span) : 'auto'; } }
+const zoomTo = (a0, a1, at, k, log) => { if(!log) return [at - (at-a0)*k, at + (a1-at)*k];
+  const l0 = Math.log10(a0), l1 = Math.log10(a1), la = Math.log10(at); return [Math.pow(10, la - (la-l0)*k), Math.pow(10, la + (l1-la)*k)]; };
+const shiftBy = (a0, a1, f, log) => log ? [a0 * Math.pow(a1/a0, f), a1 * Math.pow(a1/a0, f)] : [a0 + f*(a1-a0), a1 + f*(a1-a0)];
+function vwX(id, A, a, b){ const U = Object.assign({}, VW[id]); delete U.span;
+  if(a <= A.dx0 && b >= A.dx1){ delete U.x0; delete U.x1; } else { U.x0 = a; U.x1 = b; }   // all of it: automatic again
+  vwSet(id, U); }
+let vwActive = null, vwDrag = null, vwNoClick = false, vwRaf = 0;
+for(const id of VW_PLOTS){
+  const c = document.getElementById(id); if(!c) continue; const yOnly = VW_YONLY.has(id);
+  c.classList.add('zoomable');
+  const zone = e => { const A = PLOTS[id]; if(!A) return null; const r = c.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+    return x < A.L ? 'y' : y > A.h - A.B ? 'x' : 'plot'; };
+  c.addEventListener('mouseleave', ()=>{ if(vwActive === id){ vwActive = null; c.classList.remove('active'); } });
+  c.addEventListener('wheel', e=>{ const z = zone(e); if(!z || vwActive !== id) return;
+    const A = PLOTS[id], axis = z === 'y' || (z === 'plot' && e.shiftKey) ? 'y' : 'x';
+    if(axis === 'x' && yOnly) return;
+    e.preventDefault(); const r = c.getBoundingClientRect(), k = wheelK(e);
+    if(axis === 'y'){ const [a, b] = zoomTo(A.y0, A.y1, A.invY(e.clientY - r.top), k, A.ylog); return vwSet(id, Object.assign({}, VW[id], {y0:a, y1:b})); }
+    if(VW_FOLLOW.has(id) && (VW[id] || {}).x0 == null){   // still following the newest; all of it: automatic again
+      const span = (A.x1 - A.x0)*k; return vwSet(id, Object.assign({}, VW[id], {span: span < A.dx1 - A.dx0 ? span : null})); }
+    const [a, b] = zoomTo(A.x0, A.x1, A.inv(e.clientX - r.left), k, A.xlog); vwX(id, A, a, b); }, {passive:false});
+  c.addEventListener('mousedown', e=>{ const z = zone(e); if(!z || e.button !== 0) return;
+    if(vwActive !== id){ if(vwActive) document.getElementById(vwActive).classList.remove('active'); vwActive = id; c.classList.add('active'); }
+    if(yOnly && z !== 'y') return;          // the pulse height: its own drag zooms the Qlong range
+    e.preventDefault(); const A = PLOTS[id], r = c.getBoundingClientRect();
+    vwDrag = {id, A, r, z, px:e.clientX, py:e.clientY, x:Math.min(Math.max(e.clientX, r.left+A.L), r.left+A.w-A.R)}; });
+  c.addEventListener('dblclick', ()=>{ const U = yOnly ? Object.assign({}, VW[id], {y0:null, y1:null}) : {}; vwSet(id, U); });
+  c.title = VW_HELP;
+  // ⚙ in the card's bar: the ranges as numbers, under the plot
+  const card = c.closest('.card'), bar = card && card.querySelector('.bar'); if(!bar) continue;
+  const row = document.createElement('div'); row.className = 'ctl axrow'; row.hidden = true;
+  const inp = k => `<input type="number" step="any" class="${k}" placeholder="auto">`;
+  row.innerHTML = `<span class="axes" data-vw="${id}">${yOnly ? '' : `x ${inp('x0')}–${inp('x1')} `}y ${inp('y0')}–${inp('y1')} <button class="axauto">auto</button></span>`;
+  c.after(row);
+  row.addEventListener('change', e=>{ const k = ['x0','x1','y0','y1'].find(n=>e.target.classList.contains(n)); if(!k) return;
+    const U = Object.assign({}, VW[id]), v = parseFloat(e.target.value); U[k] = isFinite(v) ? v : null; if(k[0] === 'x') delete U.span; vwSet(id, U); });
+  row.querySelector('.axauto').onclick = ()=>vwSet(id, yOnly ? Object.assign({}, VW[id], {y0:null, y1:null}) : {});
+  const b = document.createElement('button'); b.textContent = '⚙'; b.title = 'axes: the ranges as numbers (empty: automatic). On the plot: ' + VW_HELP;
+  b.onclick = ()=>{ row.hidden = !row.hidden; vwFields(id); }; bar.insertBefore(b, bar.querySelector('button'));
+  if(VW[id]) row.hidden = false;           // set by hand earlier: show it, so the plot is not mistaken for automatic
+  vwFields(id);
+}
+window.addEventListener('mousedown', ()=>{ vwNoClick = false; }, true);
+window.addEventListener('mousemove', ev=>{ if(!vwDrag) return; const {id, A, r, z} = vwDrag;
+  if(z === 'plot'){ const x = Math.min(Math.max(ev.clientX, r.left+A.L), r.left+A.w-A.R);
+    Object.assign(zsel.style, {left:Math.min(x, vwDrag.x)+'px', width:Math.abs(x-vwDrag.x)+'px', top:(r.top+A.T)+'px', height:(A.h-A.B-A.T)+'px'}); zsel.hidden = false; return; }
+  const U = Object.assign({}, VW[id]);     // over an axis: move it with the pointer
+  if(z === 'x'){ [U.x0, U.x1] = shiftBy(A.x0, A.x1, -(ev.clientX - vwDrag.px)/(A.w-A.L-A.R), A.xlog); delete U.span; }
+  else [U.y0, U.y1] = shiftBy(A.y0, A.y1, (ev.clientY - vwDrag.py)/(A.h-A.B-A.T), A.ylog);
+  VW[id] = U; vwDrag.moved = true;
+  if(!vwRaf) vwRaf = requestAnimationFrame(()=>{ vwRaf = 0; draw(); }); });
+window.addEventListener('mouseup', ev=>{ if(!vwDrag) return; const {id, A, r, z, moved, x:x0} = vwDrag; vwDrag = null;
+  if(z !== 'plot'){ if(moved){ vwNoClick = true; vwSet(id, VW[id] || {}); } return; }
+  zsel.hidden = true;
+  const x = Math.min(Math.max(ev.clientX, r.left+A.L), r.left+A.w-A.R), a = Math.min(x, x0), b = Math.max(x, x0);
+  if(b - a > 4){ vwNoClick = true; vwX(id, A, A.inv(a - r.left), A.inv(b - r.left)); } });
+// a drag that zoomed or moved an axis is no click (it would pick a channel on the hits-per-channel plots)
+window.addEventListener('click', e=>{ if(vwNoClick){ vwNoClick = false; e.stopPropagation(); } }, true);
 window.addEventListener('resize', draw);
 // recorded runs: list them, load one for a look, go back to live
 const runsPanel = document.getElementById('runs_panel');
@@ -1401,11 +1495,12 @@ function drawSumChan(s){
       y:ch.map(c=>mode==='rate' ? (c.mean_rate_hz ?? 0) : c.hits), colors:ch.map(c=>BOARD_COLOR[bi(c.board)%BOARD_COLOR.length])}],
     empty:'no hits', ylabel: mode==='rate' ? 'Hz' : 'hits'});
   if(A){ const g=document.getElementById('c_sum_chan').getContext('2d'); g.fillStyle=css('--muted'); g.font=cfont(10); g.textAlign='center';
-    let st=0; for(let i=1;i<=ch.length;i++){ if(i===ch.length || ch[i].board!==ch[st].board){ g.fillText(`Digi-${ch[st].board} ch0–${ch[i-1].ch}`, (A.X(st)+A.X(i))/2, A.h-7); st=i; } } }
+    let st=0; for(let i=1;i<=ch.length;i++){ if(i===ch.length || ch[i].board!==ch[st].board){ spanLabel(A, g, st, i, `Digi-${ch[st].board} ch0–${ch[i-1].ch}`, `Digi-${ch[st].board}`); st=i; } } }
   const base = (mode==='rate' ? 'Mean rate: ' + esc(s.scope.mean_rate) + '. ' : 'Hits over ' + esc(s.scope.per_channel_hits) + '. ') + 'Click a bar for its numbers.';
   note.innerHTML = base;
   document.getElementById('c_sum_chan').onclick = ev=>{ if(!A) return; const r=ev.target.getBoundingClientRect();
-    const i=Math.floor((ev.clientX-r.left-A.L)/((A.w-A.L-A.R)/ch.length)); if(!(i>=0 && i<ch.length)) return; const c=ch[i];
+    const x=ev.clientX-r.left; if(x < A.L || x > A.w-A.R) return;
+    const i=Math.floor(A.inv(x)); if(!(i>=0 && i<ch.length)) return; const c=ch[i];
     note.innerHTML = `<b>${esc(slotName(c))}</b>: ${num(c.hits)} hits · mean ${c.mean_rate_hz==null ? '–' : c.mean_rate_hz.toFixed(colDec([c.mean_rate_hz]))+' Hz'}` +
       ` · late ${num(c.late)} · before the start ${num(c.early)}. ` + base; };
 }
@@ -1490,7 +1585,7 @@ function drawSumHists(s){
   O.forEach((o,p)=>{ starts.push(ys.length); o.slice(1).forEach(v=>{ ys.push(v); cs.push(PLANE_COLOR[p]); }); if(p<2) for(let k=0;k<gap;k++){ ys.push(0); cs.push(null); } });
   const A = plot('c_sum_occ', {x0:0, x1:ys.length, ylog:true, xticks:false, series:[{kind:'bars', edges:[...Array(ys.length+1).keys()], y:ys, colors:cs, gap:0.5}], empty:'no hits', ylabel:'hits'});
   if(A){ const g=document.getElementById('c_sum_occ').getContext('2d'); g.fillStyle=css('--muted'); g.font=cfont(10); g.textAlign='center';
-    O.forEach((o,p)=>{ const n=o.length-1; g.fillText(`T${p}  ch 1–${n}`, A.X(starts[p]+n/2), A.h-7); }); }
+    O.forEach((o,p)=>{ const n=o.length-1; spanLabel(A, g, starts[p], starts[p]+n, `T${p}  ch 1–${n}`, `T${p}`); }); }
   legend('leg_sum_occ', [0,1,2].map(p=>({name:'T'+p, color:PLANE_COLOR[p]})));
   const cedges=[...Array(7).keys()].map(v=>v+0.5);
   plot('c_sum_cl', {x0:0.5, x1:6.5, ylog:true, xfmt:v=>v>=6?'6+':String(Math.round(v)), series:[0,1,2].map(p=>({kind:'step', edges:cedges, y:Hs.cluster_size.planes[p], color:PLANE_COLOR[p]})), ylabel:'clusters', empty:'no clusters'});
