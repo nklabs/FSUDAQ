@@ -1565,6 +1565,8 @@ function drawSumTables(s, row){
       : row('run protocol', T.run_protocol ? esc(T.run_protocol) : 'no copy in the run folder') +
         row('program settings', T.program_settings ? esc(T.program_settings) : 'no copy in the run folder')) +
     row('board snapshots', T.board_settings.length ? esc(T.board_settings.join(', ')) : 'none') +
+    row('analysis files', T.analysis ? esc(T.analysis) + '/ (the experiment config, cabling, offsets, map, finder files and the floor tool\'s expected.json as read live; manifest.json lists them)'
+                                     : 'no copy in the run folder (kept from 3 Nov 2026 for runs read while taken)') +
     row('experiment config', f(T.experiment_config) + (s.setup && s.setup.config ? ' (its content kept in the summary)' : '')) +
     Object.keys((s.setup||{}).files || {cabling:0, gains:0, time_offsets:0, map:0}).map(k=>{ const R = ((s.setup||{}).files||{})[k];
       return row(k.replace('_',' '), (R ? esc(R.path) + (R.sha256 ? ` · sha256 ${esc(R.sha256.slice(0,12))}…` : ' · ' + warn('not readable')) : 'none') +

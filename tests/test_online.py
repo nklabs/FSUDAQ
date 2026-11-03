@@ -422,7 +422,8 @@ def scenario_run_switch(tmp):
     for b in boards:
         b.f.close()
     for f in os.listdir(folder):
-        os.remove(os.path.join(folder, f))                        # FSUDAQ removes the old files
+        if os.path.isfile(os.path.join(folder, f)):               # FSUDAQ removes the old files (only files:
+            os.remove(os.path.join(folder, f))                    # the dashboard's <run>_analysis/ stays)
     boards = boards_for(folder, seed=10)
     t = drive(online, clock, boards, t, t + 8)
     finish(online, clock, boards)
@@ -1829,6 +1830,51 @@ def expected_doc(map_sha, setting="high", field=0.2, finder=True, p0=200.0):
             "warnings": ["transport maps built with a different field"], "setup": {}}
 
 
+def scenario_analysis_snapshot(tmp):
+    print("== a run being taken keeps the analysis files it is read with, once; a run recorded over gets its own")
+    folder = os.path.join(tmp, "snap_001"); os.makedirs(folder)
+    cfg, exp = os.path.join(tmp, "snap_experiment.json"), os.path.join(tmp, "snap_expected.json")
+    with open(cfg, "w") as f:
+        json.dump({"window_ns": 25.0}, f)
+    with open(exp, "w") as f:
+        f.write('{"format": "floor-tool-expected/1", "n": 1}')
+    write_run_file(folder, stop=False)
+    clock = Clock(); boards = boards_for(folder, seed=5)
+    online = make_online(folder, SERIALS, EIGHT, clock, extra=["--config", cfg, "--beam-expected", exp])
+    t = drive(online, clock, boards, 0, 4)
+    snap = os.path.join(folder, "snap_001_analysis")
+    man = os.path.join(snap, "manifest.json")
+    good = check(os.path.isfile(man), "snapshot: no manifest")
+    if not good:
+        return
+    m = json.load(open(man))
+    want = {"experiment.json", "expected.json", "momentum_map.csv", "finder/channels.csv"}
+    good &= check(want <= set(m["files"]) and m["run_start"] == "2026-10-31T12:00:00.000+01:00",
+                  f"snapshot: files {sorted(m['files'])}, run start {m['run_start']}")
+    good &= check(open(os.path.join(snap, "expected.json")).read() == open(exp).read()
+                  and m["files"]["expected.json"]["sha256"] == od.file_sha256(exp), "snapshot: expected.json not the one read")
+    good &= check(all(not (os.stat(os.path.join(snap, k)).st_mode & 0o222) for k in m["files"]), "snapshot: a copy is writable")
+    with open(exp, "w") as f:                    # the floor tool publishes again; the run is read again (same start)
+        f.write('{"format": "floor-tool-expected/1", "n": 2}')
+    online.run_started(folder)
+    t = drive(online, clock, boards, t, t + 3)
+    good &= check('"n": 1' in open(os.path.join(snap, "expected.json")).read(), "snapshot: replaced on a re-read of the same run")
+    run = json.load(open(os.path.join(folder, "snap_001_run.json")))   # recorded again under the same number
+    run["start"]["time"] = "2026-10-31T13:00:00.000+01:00"
+    with open(os.path.join(folder, "snap_001_run.json"), "w") as f:
+        json.dump(run, f)
+    online.run_started(folder)
+    t = drive(online, clock, boards, t, t + 3)
+    good &= check('"n": 2' in open(os.path.join(snap, "expected.json")).read()
+                  and json.load(open(man))["run_start"] == "2026-10-31T13:00:00.000+01:00", "snapshot: a run recorded over kept the old one")
+    write_run_file(folder, stop=True)
+    finish(online, clock, boards)
+    s = json.load(open(od.summary_path(folder)))
+    good &= check(s["settings"].get("analysis") == "snap_001_analysis", f"snapshot: not in the summary ({s['settings'].get('analysis')})")
+    if good:
+        ok(f"{len(m['files'])} files kept read-only with their manifest; kept on a re-read, renewed for a run recorded over; in the summary")
+
+
 def scenario_beam_vs_map(tmp):
     print("== Beam vs map: the floor tool's published expectation against the live finder")
     import hashlib
@@ -1953,7 +1999,7 @@ def main():
                    scenario_window, scenario_run_file, scenario_view_only, scenario_rollover_backlog, scenario_quiet_live_start,
                    scenario_summary_at_stop, scenario_summary_incomplete, scenario_backfill, scenario_summary_route,
                    scenario_backfill_reread, scenario_summary_setup_and_restarts, scenario_summary_next_run_and_open,
-                   scenario_summary_review2, scenario_beam_vs_map):
+                   scenario_summary_review2, scenario_beam_vs_map, scenario_analysis_snapshot):
             sc(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

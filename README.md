@@ -130,6 +130,10 @@ User must setup the data path for data take. Without the data path, user still c
   - `<prefix>_<run>_run.json` <- the run file: everything about the run that is not data (below)
   - `<prefix>_<run>_summary.json` <- written by the online dashboard when the run is over: what it computed
     (totals, histograms, rate history, problems, whether it saw the whole run); online/README.md "Run summary"
+  - `<prefix>_<run>_analysis/` <- written by the online dashboard when it begins reading the run while it is
+    taken: read-only copies of what its analysis reads (experiment.json, cabling, time offsets, gains, the
+    momentum map and the finder's files, the floor tool's published `expected.json`) and `manifest.json`
+    (each file's source, sha256, size; when it was taken). online/README.md "Analysis files"
 
 All of these are written for every saved run, without a question; a file that cannot be written stops
 the start. The snapshots and the protocol copy are read-only once the run is on and never written again

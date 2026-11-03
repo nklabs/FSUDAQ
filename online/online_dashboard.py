@@ -1269,8 +1269,19 @@ class Online:
                         say(f"run summary of {self.folder} not made: {ex!r}")
             if self.carry and folder is not None and self.carry["folder"] == os.path.abspath(folder):
                 carry, self.carry = self.carry, None
+            started_here = self.run_open == os.path.abspath(folder) if folder is not None else False
             self.restart = self.by_run = False
             self.reset(folder, from_start or finished)
+            # a run being taken keeps the analysis files it is read with (not a run read after it ended, a look or
+            # a replay: today's files need not be the ones of then); never in the way of reading it
+            if folder is not None and not finished and not a.replay and folder != self.inspect:
+                try:
+                    line = snapshot_analysis(folder, self.setup, a.beam_expected, "at the run start" if started_here else
+                                             "when the dashboard began reading the run (after its start)")
+                    if line:
+                        say(f"{time.strftime('%H:%M:%S')} {line}")
+                except Exception as ex:     # noqa: BLE001
+                    say(f"analysis files of {folder} not kept: {ex!r}")
             if carry:                           # back on a run read live before: its problems so far, and when it was not watched
                 self.problems, self.problems_over = carry["problems"], carry["over"]
                 self.watch_gaps = list(carry["gaps"])
@@ -2875,6 +2886,57 @@ def run_fingerprint(folder):
     return dict(files=n, bytes=size)
 
 
+SNAPSHOT_FORMAT = "FSUDAQ online analysis snapshot 1"
+
+
+def snapshot_analysis(folder, setup, expected_path, when):
+    """Copy what the online analysis reads for this run into <run>_analysis/ in the run folder, so the run keeps
+    them however they change later: experiment.json, the cabling, gains, time offsets, the momentum map and the
+    finder's own files (as loaded for this run), and the floor tool's published expectation (Beam vs map).
+    Read-only files (the folder stays writable, so a run recorded again can drop it), with manifest.json: each
+    file's source, sha256 and size, when it was taken, and the run's start from its run file. A snapshot there
+    already is kept, unless that start differs (FSUDAQ's "Overwrite" moves only the run's files aside: a run
+    recorded again under the same number). Returns a line for the log, or None when one was kept."""
+    name = os.path.basename(os.path.normpath(folder))
+    dest = os.path.join(folder, name + "_analysis")
+    run_start = (read_run_file(folder, cache=False) or {}).get("start")   # its start time (the run file's start.time)
+    old = os.path.join(dest, "manifest.json")
+    if os.path.isfile(old):
+        try:
+            with open(old, encoding="utf-8") as f:
+                kept = json.load(f).get("run_start")
+        except (OSError, ValueError):
+            kept = None
+        if not (kept and run_start and kept != run_start):
+            return None
+    sources = [("experiment.json", setup.config_path)]
+    for k, v in setup.record.items():             # cabling, gains, time_offsets, map, finder/<its files>
+        if v:
+            sources.append((k if k.startswith("finder/") else os.path.basename(v["path"]), v["path"]))
+    sources.append(("expected.json", expected_path))
+    tmp = os.path.join(folder, "." + name + "_analysis.tmp")
+    shutil.rmtree(tmp, ignore_errors=True)
+    files, missing = {}, []
+    for dst, src in sources:
+        if not src or not os.path.isfile(src):
+            missing.append(dict(file=dst, source=src))
+            continue
+        out = os.path.join(tmp, dst)
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        shutil.copyfile(src, out)
+        os.chmod(out, 0o444)
+        files[dst] = dict(source=os.path.abspath(src), sha256=file_sha256(out), bytes=os.path.getsize(out))
+    with open(os.path.join(tmp, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(dict(format=SNAPSHOT_FORMAT, taken_at=iso_time(time.time()), taken=when, run_start=run_start,
+                       files=files, missing=missing), f, indent=1)
+    os.chmod(os.path.join(tmp, "manifest.json"), 0o444)
+    if os.path.isdir(dest):
+        shutil.rmtree(dest)                        # the snapshot of the run recorded over
+    os.replace(tmp, dest)
+    return (f"analysis files of {name} kept in {os.path.basename(dest)}/ ({len(files)} files"
+            + (f"; not found: {', '.join(m['file'] for m in missing)}" if missing else "") + ")")
+
+
 def run_settings_files(folder, name):
     """The run's own records of its settings, by file name in its folder (None: not there): FSUDAQ's run
     file, its copy of the protocol the run was taken with (FSUDAQ from 3 Nov 2026: <run>_protocol.json; before:
@@ -2882,6 +2944,7 @@ def run_settings_files(folder, name):
     def there(f):
         return f if os.path.isfile(os.path.join(folder, f)) else None
     return dict(run_folder=folder, run_file=there(name + "_run.json"), protocol=there(name + "_protocol.json"),
+                analysis=(name + "_analysis") if there(os.path.join(name + "_analysis", "manifest.json")) else None,
                 program_settings=there(name + "_programSettings.txt"), run_protocol=there(name + "_run_protocol.json"),
                 board_settings=sorted(os.path.basename(p) for p in glob.glob(os.path.join(glob.escape(folder), "*.bin"))))
 

@@ -79,6 +79,18 @@ cable offsets removed, as in the finder, so zero is the RF reference's own phase
 (higher: the top bin), 100 time bins (198 ps). Counts since the reading began or the last Clear.
 `GET /rftof` (read-only, for anyone) returns them; the tab asks for it every 3 s while it is open.
 
+### Analysis files
+
+A run read while it is taken keeps what its analysis reads, in `<run>/<run>_analysis/`: read-only copies of
+`experiment.json`, the cabling, time offsets, gains (when given), the momentum map and the finder's own files
+(`finder/channels.csv`, `pion_light.csv`, `handoff_meta.json`), as loaded for the run, and the floor tool's
+published `expected.json` (Beam vs map) as it was then; `manifest.json` gives each file's source, sha256 and
+size, when they were taken (`at the run start`, or later when the dashboard was started during the run) and
+the run's start from its run file. About 0.5 MB a run. Taken once: a later reading of the run keeps it, unless
+the run file's start differs (a run recorded again under the same number: FSUDAQ's "Overwrite" moves only the
+run's files aside, so the old snapshot is replaced). Not for a run read after it ended, a look or a replay
+(today's files need not be the ones of then). A copy that fails is logged; the reading goes on.
+
 ### Run summary
 
 **Only the dashboard on port 8050 (FSUDAQ's) writes summaries and backfills** by default: an
@@ -108,7 +120,7 @@ now, and `stale` if the data files changed since; `summary: null` if there is no
 | `finder`, `histograms`, `occupancy` | the finder's counts by result, accepted tracks, setup and window; every histogram of the Tracker tab with its edges and unit |
 | `history` | hits per board and the finder's bunches by result over the whole run, in 10 s steps (merged to at most 720 points); `covered_s` is the data time of each point, so count / `covered_s` is its rate |
 | `problems_at_end`, `problems_during_reading` | what the page warned of at the end, and during the reading (first and last time, steps, episodes; at most 50 kinds) |
-| `settings` | file names of the run file, FSUDAQ's per-run copies of the program settings and run protocol (when there), the boards' `.bin`; the setup files, window and waits used. No registers are copied |
+| `settings` | file names of the run file, FSUDAQ's per-run copy of the protocol (older runs: of the program settings and run protocol), the boards' `.bin`, `analysis` (the folder of the analysis files kept, below); the setup files, window and waits used. No registers are copied |
 | `previous_live` | when a later reading of the run (also of more files than it had: then `files_changed: true`) (backfill, re-read, replay, a restarted dashboard) replaced a summary: the most recent live summary's own knowledge, carried on: `source`, `written_at`, `reading`, `complete`, `incomplete`, `caveats`, `end`, `setup`, `problems_during_reading`, `problems_note`, `aggregate_events` |
 | `backfill_tried` | a backfill re-read these files and was kept out (it covered no more): `fingerprint`, `at`, its `incomplete` reasons; not tried again until the files change |
 | `fingerprint`, `units` | the data files' number and size it describes; units (times in s of data time, rates in Hz) |
