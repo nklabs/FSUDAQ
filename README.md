@@ -181,12 +181,28 @@ picks a folder anywhere). The chooser is locked while the digitizers are open.
     written.
   - **w/o settings**: the boards keep what they hold (and are not counted as protocol changes).
 
+**The boards it expects**: `run_protocol.json` lists them, `"boards": [15880, 15879, ...]` (serials, rack
+order) and `"disabledBoards": [...]` (those left out of the runs), both easy to edit by hand. Which ports
+FSUDAQ opens stays in `knownDigitizers.txt`. Opened w/ a protocol (or from a run, with the run's list):
+
+- a listed board **not found** is logged (orange) and shown once in a notice that nothing waits for;
+  runs go on without it, and the protocol keeps it listed (to drop it, edit `boards`);
+- an open board **not listed** is programmed as usual, logged, and an unsaved change ("boards:
+  +Digi-30508 (open, not listed)") until Save to protocol adds it;
+- `disabledBoards` are disabled after programming (Digitizer Settings shows them unticked, "(D)");
+  enabling or disabling a board there is an unsaved change ("disabledBoards: -Digi-1443 (enabled now)").
+
+A protocol written before it listed its boards gets the boards opened at the next open, once, logged
+(no question, nothing marked). Opened w/o settings, nothing is compared or applied.
+
 **Every saved run keeps what it used**, saved or not: each board's settings as read back just before the
 start (`<prefix>_<run>_<serial>_<DPP>.bin`), the protocol as it was in the window
-(`<prefix>_<run>_protocol.json`) and the run file. Start never asks about the protocol.
+(`<prefix>_<run>_protocol.json`, with `boards` and `disabledBoards` as they were at the start, and
+`boardsMissing` for listed boards not found) and the run file. Start never asks about the protocol.
 
 **Unsaved changes** are the boards' registers that differ from their files in the protocol (as at Start:
-the trace bit and what FSUDAQ derives at each start are no change), a board without a file there, and
+the trace bit and what FSUDAQ derives at each start are no change), a board without a file there, an
+open board the protocol does not list, a board enabled or disabled against `disabledBoards`, and
 acquisition controls that differ from `run_protocol.json` (Repeat excepted). The main window's
 **Save to protocol** button reads **Save to protocol \*** (orange) while there are any; its tooltip lists
 them (refreshed every 2 s). **Close Digitizers**, closing FSUDAQ and choosing another protocol ask once,

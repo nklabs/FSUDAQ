@@ -16,6 +16,16 @@ inert so far (no "truncating" messages). Recovery recipe after ANY DAQ crash: cl
 program, `rm /dev/shm/CAENV_LCK_*`, then reopen; power-cycle only if a board still does not
 answer the probe.
 
+### 3 Nov: a protocol lists its boards
+`run_protocol.json` gains `"boards"` (serials, rack order) and `"disabledBoards"`. Opened w/ a protocol (or
+from a run, with the run's list): a listed board not found is logged and shown once in a non-modal notice
+("Boards not found"; runs go on, the protocol keeps it listed); an open board not listed is logged and an
+unsaved change ("boards: +Digi-X (open, not listed)") until Save to protocol adds it; `disabledBoards` are
+disabled after programming, and toggling one in Digitizer Settings (now showing that state) is an unsaved
+change. A protocol without `boards` gets the boards opened, once, logged. A run's `_protocol.json`
+records `boards`, `disabledBoards` and `boardsMissing` as at its start. `knownDigitizers.txt` (which ports
+are opened) is unchanged. W/o settings nothing is compared. Test: ProtocolBoards.
+
 ### 3 Nov: protocols (the boards and every acquisition control), asked about at close
 A settings set is now a **protocol**: its `run_protocol.json` also holds Save Data, the data path and
 Start dashboard with run (`"format": "FSUDAQ run protocol 2"`), and `boardFiles` for a board whose file it

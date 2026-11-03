@@ -1556,6 +1556,83 @@ public:
     if( nFail == nFail0 ) OK("never asked at Start; the run folder has the edit; Close asks about boards and controls (Cancel, Discard, Save, Save as new); FSUDAQ's close too; a board file outside the protocol asked, saved, used at the next open; older settings migrated once");
   }
 
+  void ProtocolBoards(){
+    printf("== the boards a protocol expects: filled in once; a listed one not found noticed (Start works); one not listed unsaved; disabledBoards applied\n");
+    int nFail0 = nFail;
+    NewWorkDir(); AddBoards(20, 1); NewFSUDAQ();
+    const QString proto = settingsPath + "/run_protocol.json";
+    const QList<int> all = {15880, 15879, 58918, 62839, 1443, 30508};   // port order (no boardOrder)
+    auto Marked = [&](){ w->UpdateProtocolMark(); return w->bnSaveToSet->text() == "Save to protocol *"; };
+    auto Tip = [&](){ return w->bnSaveToSet->toolTip(); };
+    auto Serials_ = [](const QJsonValue & v){ QList<int> l; for( auto x : v.toArray() ) l << x.toInt(); return l; };
+    auto Edit = [&](std::function<void(QJsonObject &)> fn){   // run_protocol.json edited by hand, then read again with the boards closed
+      w->CloseDigitizers();
+      QJsonObject o = ReadJson(proto); fn(o);
+      QFile f(proto); f.open(QIODevice::WriteOnly); f.write(QJsonDocument(o).toJson()); f.close();
+      w->LoadProtocolControls(false);
+    };
+    auto Notice = [](){ for( QWidget * x : QApplication::topLevelWidgets() ) if( x->isVisible() && x->windowTitle() == "Boards not found" ) return qobject_cast<QMessageBox *>(x); return (QMessageBox *) nullptr; };
+
+    //---- a protocol from before it listed its boards: the boards opened are added, once, nothing marked, nothing asked
+    Open();
+    w->chkSaveData->setChecked(true);
+    w->SaveToSet();
+    Edit([](QJsonObject & o){ o.remove("boards"); o.remove("disabledBoards"); });
+    dialogs.clear();
+    Open();
+    QJsonObject saved = ReadJson(proto);
+    CHECK(Serials_(saved["boards"]) == all && saved["disabledBoards"].isArray() && saved["disabledBoards"].toArray().isEmpty() && !Marked() && dialogs.isEmpty() && !Notice(),
+          "migration: boards %s, marked %d, dialogs %s", qPrintable(QJsonDocument(saved["boards"].toArray()).toJson(QJsonDocument::Compact)), Marked(), qPrintable(dialogs.join(" | ")));
+
+    //---- a listed board not found (99999), one left disabled (1443): logged, one notice that waits for nothing, not marked;
+    // the run starts without 1443 and its copy records the boards as they were
+    Edit([&](QJsonObject & o){ QJsonArray b = o["boards"].toArray(); b << 99999; o["boards"] = b; o["disabledBoards"] = QJsonArray{1443}; });
+    dialogs.clear();
+    Open();
+    QMessageBox * n = Notice();
+    int d1443 = -1;
+    for( unsigned int i = 0; i < w->nDigi; i++ ) if( w->digi[i]->GetSerialNumber() == 1443 ) d1443 = i;
+    CHECK(n && !n->isModal() && n->text().contains("Digi-99999") && dialogs.isEmpty(), "missing board: notice %d, dialogs %s", n != nullptr, qPrintable(dialogs.join(" | ")));
+    CHECK(d1443 >= 0 && w->digi[d1443]->IsBoardDisabled(), "disabledBoards: Digi-1443 not disabled at the open");
+    CHECK(!Marked(), "missing board or disabledBoards marked as unsaved: %s", qPrintable(Tip()));
+    if( n ) n->close();
+    w->AutoRun();
+    CHECK(w->inDataRun, "the run did not start with a listed board missing (%s)", qPrintable(dialogs.join(" | ")));
+    const QString runDir = w->RunFolder(), name = QFileInfo(runDir).fileName();
+    Pump(100); w->StopPressed();
+    QJsonObject copy = ReadJson(runDir + "/" + name + "_protocol.json");
+    CHECK(Serials_(copy["boards"]) == all && Serials_(copy["disabledBoards"]) == QList<int>{1443} && Serials_(copy["boardsMissing"]) == QList<int>{99999}
+          && !copy["boardSettings"].toObject().contains("1443"), "run copy: %s", qPrintable(QJsonDocument(copy).toJson(QJsonDocument::Compact)));
+
+    //---- Digi-1443 enabled in Digitizer Settings: unsaved until it is disabled again
+    w->digi[d1443]->EnableBoard();
+    CHECK(Marked() && Tip().contains("disabledBoards: -Digi-1443 (enabled now)"), "enabling Digi-1443 not marked: %s", qPrintable(Tip()));
+    w->digi[d1443]->DisableBoard();
+    CHECK(!Marked(), "disabled again, still marked: %s", qPrintable(Tip()));
+
+    //---- an open board the protocol does not list (30508): logged and unsaved; Save to protocol adds it, the missing one stays listed
+    Edit([&](QJsonObject & o){ QList<int> b = all; b.removeAll(30508); QJsonArray a; for( int s : b ) a << s; a << 99999; o["boards"] = a; o["disabledBoards"] = QJsonArray(); });
+    dialogs.clear();
+    Open();
+    if( (n = Notice()) ) n->close();
+    CHECK(Marked() && Tip().contains("boards: +Digi-30508 (open, not listed)"), "extra board not marked: %s", qPrintable(Tip()));
+    CHECK(w->SaveToSet() && !Marked(), "Save to protocol with an extra board: %s", qPrintable(Tip()));
+    saved = ReadJson(proto);
+    QList<int> want = all; want << 99999;
+    CHECK(Serials_(saved["boards"]) == want, "saved boards %s", qPrintable(QJsonDocument(saved["boards"].toArray()).toJson(QJsonDocument::Compact)));
+
+    //---- opened without settings: nothing compared, nothing applied
+    w->CloseDigitizers();
+    Edit([](QJsonObject & o){ o["disabledBoards"] = QJsonArray{1443}; });
+    w->cbOpenMethod->setCurrentIndex(w->cbOpenMethod->findData(0));
+    w->OpenDigitizers();
+    bool anyDisabled = false;
+    for( unsigned int i = 0; i < w->nDigi; i++ ) anyDisabled |= w->digi[i]->IsBoardDisabled();
+    CHECK(!anyDisabled && !Notice(), "w/o settings: disabled %d, notice %d", anyDisabled, Notice() != nullptr);
+    w->CloseDigitizers();
+    if( nFail == nFail0 ) OK("boards added to an older protocol once; a missing listed board logged with one notice, the run goes on, its copy lists it; disabledBoards applied, a toggle is unsaved; an extra board unsaved, Save adds it; w/o settings nothing compared");
+  }
+
   void SettingsFromRun(){
     printf("== open with the settings of a run: the run chosen (newest first), snapshots never written, a board without one from the set\n");
     int nFail0 = nFail;
@@ -1835,6 +1912,7 @@ int main(int argc, char ** argv){
   t.SaveAsNewSet();
   t.PanelKeepsTheSet();
   t.ProtocolChanges();
+  t.ProtocolBoards();
   t.SettingsFromRun();
   t.RunCopies();
 

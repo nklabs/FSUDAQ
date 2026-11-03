@@ -71,7 +71,7 @@ DigiSettingsPanel::DigiSettingsPanel(Digitizer ** digi, unsigned int nDigi, QStr
     QScrollArea * scrollArea = new QScrollArea(this); 
     scrollArea->setWidgetResizable(true);
     scrollArea->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    tabWidget->addTab(scrollArea, "Digi-" + QString::number(digi[iDigi]->GetSerialNumber()));
+    tabWidget->addTab(scrollArea, "Digi-" + QString::number(digi[iDigi]->GetSerialNumber()) + (digi[iDigi]->IsBoardDisabled() ? "(D)" : ""));
 
     QWidget * tab = new QWidget(tabWidget);
     scrollArea->setWidget(tab);
@@ -1390,8 +1390,9 @@ void DigiSettingsPanel::SetUpChannelMask(unsigned int digiID){
   chLayout->addWidget(blank, 1, nChGrp );
 
   cbDigiEnable[digiID] = new QCheckBox("Enable Digitizer",this);
-  cbDigiEnable[digiID]->setChecked(true);
-  
+  cbDigiEnable[digiID]->setChecked(!digi[digiID]->IsBoardDisabled());   // a protocol may leave it disabled (disabledBoards)
+  if( digi[digiID]->IsBoardDisabled() ) cbDigiEnable[digiID]->setStyleSheet("color: red");
+
   chLayout->addWidget(cbDigiEnable[digiID], 1, nChGrp + 2 );
 
   connect(cbDigiEnable[digiID], &QCheckBox::stateChanged, this, [=](int state){

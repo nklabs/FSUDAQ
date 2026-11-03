@@ -162,6 +162,14 @@ private:
   QString ActiveProtocolDir() const { return digi ? openSettingsDir : settingsPath; }
   QMap<QString, QString> boardFiles;   // serial -> the board's settings file when the protocol keeps it outside its folder
   QString BoardProtocolFile(const QString & dir, Digitizer * d) const;   // the board's file in protocol dir
+  //@----- the boards the protocol expects (run_protocol.json "boards", "disabledBoards"); unknown: no "boards" in it
+  bool protocolBoardsKnown = false;
+  QList<int> protocolBoards;     // serials, in the order saved
+  QList<int> protocolDisabled;   // of those, the ones left disabled
+  QList<int> OpenSerials(bool disabledOnly = false) const;   // the open boards in rack order (disabledOnly: the disabled ones)
+  bool BoardsComparable() const { return digi && openedWithSettings; }   // opened w/o settings: the protocol's boards are not compared
+  void ApplyProtocolBoards();    // after an open: missing and extra boards logged (missing: one notice), disabledBoards applied, migration
+  void RememberProtocolBoards(const QJsonObject & p);   // after a save: its boards are the ones expected
   //@----- unsaved protocol changes: the boards' registers against their files, the controls against run_protocol.json
   struct ProtocolChanges { QStringList items, lines; };   // items: "Digi-15880", "acquisition controls"; lines: the details
   ProtocolChanges UnsavedProtocolChanges(bool readBack);  // readBack: the boards read first (idle boards only)

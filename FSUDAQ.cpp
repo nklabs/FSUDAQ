@@ -679,6 +679,7 @@ bool FSUDAQ::SaveAsNewSet(const QString & name, QString & why){
 
   // the boards' files are now the new protocol's; they hold what the boards hold, so Live Setting Update carries on
   if( digi ) boardFiles.clear();
+  RememberProtocolBoards(protocol);
   for( unsigned int i = 0; digi && i < nDigi; i++ ){
     const QString base = "Digi-" + QString::number(digi[i]->GetSerialNumber()) + "_" + QString::fromStdString(digi[i]->GetData()->DPPTypeStr) + ".bin";
     digi[i]->SetSettingFileTarget((target + "/" + base).toStdString(), true);
@@ -847,6 +848,7 @@ bool FSUDAQ::CloseDigitizersAsked(){
 
 void FSUDAQ::LoadProtocolControls(bool migrate){
   boardFiles.clear();
+  protocolBoardsKnown = false; protocolBoards.clear(); protocolDisabled.clear();   // until its run_protocol.json says
   const QString dir = settingsPath, path = SetProtocolFile(dir), name = QFileInfo(dir).fileName();
   if( dir.isEmpty() || !QFileInfo(dir).isDir() ) return;
   QFile f(path);
@@ -1118,7 +1120,93 @@ QJsonObject FSUDAQ::ProtocolJson() const {
     for( auto it = boardFiles.begin(); it != boardFiles.end(); ++it ) files[it.key()] = it.value();
     p["boardFiles"] = files;
   }
+  // the boards it expects. Open with a protocol: those open (rack order), then those it lists that were not found (a board
+  // that is off stays expected), and the disabled ones as they are now; otherwise as the protocol lists them
+  QJsonArray boards, disabled;
+  if( BoardsComparable() ){
+    const QList<int> open = OpenSerials();
+    for( int s : open ) boards << s;
+    for( int s : protocolBoards ) if( !open.contains(s) ) boards << s;
+    for( int s : OpenSerials(true) ) disabled << s;
+    for( int s : protocolDisabled ) if( !open.contains(s) ) disabled << s;
+  }else if( protocolBoardsKnown ){
+    for( int s : protocolBoards ) boards << s;
+    for( int s : protocolDisabled ) disabled << s;
+  }
+  if( BoardsComparable() || protocolBoardsKnown ){ p["boards"] = boards; p["disabledBoards"] = disabled; }
   return p;
+}
+
+QList<int> FSUDAQ::OpenSerials(bool disabledOnly) const {
+  QList<int> list;
+  if( digi == nullptr ) return list;
+  for( unsigned int i : RackOrder() ) if( !disabledOnly || digi[i]->IsBoardDisabled() ) list << (int) digi[i]->GetSerialNumber();
+  return list;
+}
+
+// "boards" / "disabledBoards": a list of serials (numbers); false if it is something else
+static bool SerialList(const QJsonValue & v, QList<int> & out){
+  out.clear();
+  if( !v.isArray() ) return false;
+  for( const QJsonValue & x : v.toArray() ){
+    if( !x.isDouble() || x.toDouble() <= 0 || x.toDouble() != (int) x.toDouble() ) return false;
+    if( !out.contains(x.toInt()) ) out << x.toInt();
+  }
+  return true;
+}
+
+static QString BoardNames(const QList<int> & serials){
+  QStringList names;
+  for( int s : serials ) names << "Digi-" + QString::number(s);
+  return names.join(", ");
+}
+
+void FSUDAQ::ApplyProtocolBoards(){
+  if( !BoardsComparable() ) return;
+  const QString dir = openSettingsDir, path = SetProtocolFile(dir), name = QFileInfo(dir).fileName();
+  const QList<int> open = OpenSerials();
+  if( !protocolBoardsKnown ){
+    // a protocol written before it listed its boards: the boards opened now are added, once (as the controls were
+    // added from programSettings.txt); a protocol without run_protocol.json gets them with Save to protocol
+    QFile f(path);
+    QJsonDocument doc;
+    if( !f.exists() || !f.open(QIODevice::ReadOnly) || !(doc = QJsonDocument::fromJson(f.readAll())).isObject() || doc.object().contains("boards") ) return;
+    f.close();
+    QJsonObject saved = doc.object();
+    QJsonArray boards;
+    for( int s : open ) boards << s;
+    saved["boards"] = boards;
+    saved["disabledBoards"] = QJsonArray();
+    if( WriteFileAtomic(path, ProtocolFileText(saved)) ){
+      protocolBoardsKnown = true; protocolBoards = open; protocolDisabled.clear();
+      LogMsg("Protocol <b>" + name + "</b>: boards " + BoardNames(open) + " added to run_protocol.json (the boards opened now; earlier protocols did not list them).");
+    }else{
+      LogMsg("<font style=\"color: red;\">Cannot add the boards to " + path + ": they stay unsaved (Save to protocol).</font>");
+    }
+    return;
+  }
+  // the ones it leaves disabled: not in a run until Digitizer Settings > Enable Digitizer (an unsaved change then)
+  QList<int> disabled;
+  for( unsigned int i = 0; i < nDigi; i++ ){
+    if( !protocolDisabled.contains((int) digi[i]->GetSerialNumber()) ) continue;
+    digi[i]->DisableBoard();
+    disabled << (int) digi[i]->GetSerialNumber();
+  }
+  if( !disabled.isEmpty() ) LogMsg("Protocol <b>" + name + "</b> leaves " + BoardNames(disabled) + " disabled: not in the runs (Digitizer Settings > Enable Digitizer takes " + QString(disabled.size() == 1 ? "it" : "them") + " in).");
+  QList<int> missing, extra;
+  for( int s : protocolBoards ) if( !open.contains(s) ) missing << s;
+  for( int s : open ) if( !protocolBoards.contains(s) ) extra << s;
+  if( !extra.isEmpty() )
+    LogMsg("<font style=\"color: orange;\">Protocol " + name + " does not list " + BoardNames(extra) + ": opened and programmed all the same; Save to protocol adds " + QString(extra.size() == 1 ? "it" : "them") + ".</font>");
+  if( missing.isEmpty() ) return;
+  const QString text = "Protocol " + name + " lists " + BoardNames(missing) + ", not found when the digitizers were opened. Runs go on without " +
+                       QString(missing.size() == 1 ? "it" : "them") + "; the protocol keeps " + QString(missing.size() == 1 ? "it" : "them") + " listed.";
+  LogMsg("<font style=\"color: orange;\">" + text + " (A board switched off or not cabled? Its port is in knownDigitizers.txt; \"full scan\" looks again.)</font>");
+  // once, and not in the way: nothing waits for it
+  QMessageBox * box = new QMessageBox(QMessageBox::Information, "Boards not found", text, QMessageBox::Ok, this);
+  box->setAttribute(Qt::WA_DeleteOnClose);
+  box->setWindowModality(Qt::NonModal);
+  box->show();
 }
 
 QByteArray FSUDAQ::ProtocolFileText(const QJsonObject & protocol){
@@ -1132,6 +1220,7 @@ static QString JsonText(const QJsonValue & v){
   if( v.isDouble() ) return QString::number(v.toDouble());
   if( v.isString() ) return "\"" + v.toString() + "\"";
   if( v.isObject() ) return QString::fromUtf8(QJsonDocument(v.toObject()).toJson(QJsonDocument::Compact));
+  if( v.isArray() ) return QString::fromUtf8(QJsonDocument(v.toArray()).toJson(QJsonDocument::Compact));
   return v.isUndefined() ? "(absent)" : "(not a value)";
 }
 
@@ -1143,7 +1232,7 @@ bool FSUDAQ::ApplyProtocol(const QJsonObject & p, QStringList & changes, QString
   const QJsonObject before = ProtocolJson();
   for( auto it = before.begin(); it != before.end(); ++it ){
     const QString key = it.key();
-    if( key == "boardFiles" ) continue;   // below
+    if( key == "boardFiles" || key == "boards" || key == "disabledBoards" ) continue;   // below
     if( !p.contains(key) ){ problems << key + " absent: kept " + JsonText(it.value()); continue; }
     const QJsonValue v = p[key];
     bool typeOk = it.value().isBool() ? v.isBool() : it.value().isDouble() ? v.isDouble() : v.isString();
@@ -1182,6 +1271,21 @@ bool FSUDAQ::ApplyProtocol(const QJsonObject & p, QStringList & changes, QString
     changes << "boardFiles: " + JsonText(before.value("boardFiles")) + " -> " + JsonText(p.value("boardFiles"));
     boardFiles = files;
   }
+  // the boards it expects (applied to open boards by ApplyProtocolBoards); without "boards" (older), those known stay
+  if( p.contains("boards") ){
+    QList<int> boards, disabled;
+    if( !SerialList(p["boards"], boards) ){
+      problems << "boards is " + JsonText(p["boards"]) + ", not a list of serials: kept " + (protocolBoardsKnown ? BoardNames(protocolBoards) : QString("none"));
+    }else{
+      if( p.contains("disabledBoards") && !SerialList(p["disabledBoards"], disabled) ){
+        problems << "disabledBoards is " + JsonText(p["disabledBoards"]) + ", not a list of serials: none disabled";
+        disabled.clear();
+      }
+      if( !protocolBoardsKnown || boards != protocolBoards || disabled != protocolDisabled )
+        changes << "boards: " + BoardNames(boards) + (disabled.isEmpty() ? QString() : "; disabled: " + BoardNames(disabled));
+      protocolBoardsKnown = true; protocolBoards = boards; protocolDisabled = disabled;
+    }
+  }
   sbRepeatPauseSec->setEnabled(chkRepeatRun->isChecked() && chkRepeatRun->isEnabled());
   EnableLedControls(chkLed->isEnabled());
   UpdateDataPathEnabled();
@@ -1193,6 +1297,16 @@ QStringList FSUDAQ::ProtocolDifferences(const QJsonObject & saved, const QJsonOb
   QStringList list;
   for( auto it = now.begin(); it != now.end(); ++it ){
     if( it.key() == "repeatRun" || saved.value(it.key()) == it.value() ) continue;
+    QList<int> was, is;
+    if( (it.key() == "boards" || it.key() == "disabledBoards") && SerialList(saved.value(it.key()), was) && SerialList(it.value(), is) ){
+      // which boards, not their order (that is boardOrder): +Digi-X / -Digi-X
+      QStringList d;
+      const bool dis = it.key() == "disabledBoards";
+      for( int s : is ) if( !was.contains(s) ) d << "+Digi-" + QString::number(s) + (dis ? " (disabled now)" : " (open, not listed)");
+      for( int s : was ) if( !is.contains(s) ) d << "-Digi-" + QString::number(s) + (dis ? " (enabled now)" : "");
+      if( !d.isEmpty() ) list << it.key() + ": " + d.join(", ");
+      continue;
+    }
     list << it.key() + ": " + (saved.contains(it.key()) ? "saved " + JsonText(saved.value(it.key())) : QString("not in the protocol yet")) + ", now " + JsonText(it.value());
   }
   if( saved.contains("boardFiles") && !now.contains("boardFiles") ) list << "boardFiles: saved " + JsonText(saved.value("boardFiles")) + ", now none (every board's file in the folder)";
@@ -1229,11 +1343,21 @@ bool FSUDAQ::WriteFileAtomic(const QString & path, const QByteArray & bytes){
 }
 
 bool FSUDAQ::SaveSetProtocol(const QString & set){
-  if( set.isEmpty() || !QFileInfo(set).isDir() || !WriteFileAtomic(SetProtocolFile(set), ProtocolFileText(ProtocolJson())) ){
+  const QJsonObject p = ProtocolJson();
+  if( set.isEmpty() || !QFileInfo(set).isDir() || !WriteFileAtomic(SetProtocolFile(set), ProtocolFileText(p)) ){
     LogMsg("<font style=\"color: red;\">Cannot write the acquisition controls into " + SetProtocolFile(set) + ".</font>");
     return false;
   }
+  RememberProtocolBoards(p);
   return true;
+}
+
+void FSUDAQ::RememberProtocolBoards(const QJsonObject & p){
+  // what was just saved is what the protocol expects now
+  QList<int> boards, disabled;
+  if( !SerialList(p.value("boards"), boards) ) return;
+  SerialList(p.value("disabledBoards"), disabled);
+  protocolBoardsKnown = true; protocolBoards = boards; protocolDisabled = disabled;
 }
 
 void FSUDAQ::LoadLastRunFile(){
@@ -1620,6 +1744,7 @@ void FSUDAQ::OpenDigitizers(){
       for( auto & q : problems ) LogMsg("<font style=\"color: orange;\">&nbsp;&nbsp;" + q.toHtmlEscaped() + "</font>");
     }
   }
+  ApplyProtocolBoards();   // the boards the protocol (or the run) lists: missing, extra, disabled; not w/o settings
   if( !openedWithSettings ) LogMsg("<font style=\"color: orange;\">Opened without settings files: the boards keep their registers (apart from what the CAEN library sets when it opens them).</font>");
   if( !settingsProblems.isEmpty() ){
     QStringList notProgrammed = BoardsNotProgrammed();
@@ -2577,6 +2702,14 @@ void FSUDAQ::StartACQ(){
       snapshots[QString::number(digi[i]->GetSerialNumber())] = prefix + "_" + runIDStr + "_" + QString::number(digi[i]->GetSerialNumber()) + "_" + QString::fromStdString(digi[i]->GetData()->DPPTypeStr) + ".bin";
     }
     copy["boardSettings"] = snapshots;
+    // the boards as they were at the Start: open (rack order), disabled, and listed by the protocol but not found
+    QJsonArray open, disabled, missing;
+    for( int s : OpenSerials() ) open << s;
+    for( int s : OpenSerials(true) ) disabled << s;
+    if( BoardsComparable() ) for( int s : protocolBoards ) if( !open.contains(s) ) missing << s;
+    copy["boards"] = open;
+    copy["disabledBoards"] = disabled;
+    if( !missing.isEmpty() ) copy["boardsMissing"] = missing;
     copy["protocol"] = QJsonObject{{"name", QFileInfo(openSettingsDir).fileName()}, {"path", openSettingsDir},
                                    {"opened_with", !openedWithSettings ? "no settings" : openedFromRun.isEmpty() ? "protocol " + QFileInfo(openSettingsDir).fileName() : "protocol from run " + openedFromRun}};
     const QString path = runDir + "/" + prefix + "_" + runIDStr + "_protocol.json";
