@@ -508,7 +508,10 @@ class Setup:
         self.config_path = a.config
         self.config_content, self.config_sanitized = read_config_content(a.config)
         self.files = {k: cfg[k] for k in ("cabling", "gains", "time_offsets", "map")}
-        self.key = json.dumps([cfg, {k: os.path.getmtime(v) for k, v in self.files.items() if v}], sort_keys=True)
+        # the content of every file read too (the record: the default finder/ map and the finder's own files, which
+        # the floor tool's "Make this the live finder's map" replaces), so a run after such a change loads them
+        self.key = json.dumps([cfg, {k: os.path.getmtime(v) for k, v in self.files.items() if v},
+                               {k: v and v["sha256"] for k, v in self.record.items()}], sort_keys=True)
         warnings = []                         # placeholders and problems, shown at the top of the page
         self.setting = cfg["setting"] or "high"
         if cfg["setting"] is None:
