@@ -449,7 +449,8 @@ class Monitor:
                 gb = du.free / 1e9
                 d = self.limits.get("daq", {})
                 lvl = "problem" if gb < d.get("disk_warn_gb", 200) else "ok"
-                it = item(G, "Disk", lvl, f"{gb:,.0f} GB free of {du.total / 1e9:,.0f} GB ({data_path})",
+                # in TB, the scale of the data disk (the bar gives the sense of how full); the limits stay in GB
+                it = item(G, "Disk", lvl, f"{du.free / 1e12:,.1f} TB free of {du.total / 1e12:,.1f} TB ({data_path})",
                           dict(warn_below_gb=d.get("disk_warn_gb"), bad_below_gb=d.get("disk_bad_gb")))
                 # the page draws a bar: used share, and where the warn and bad levels start
                 it["bar"] = dict(used=1 - du.free / du.total, marks=[1 - d.get("disk_warn_gb", 200) * 1e9 / du.total,

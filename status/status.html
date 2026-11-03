@@ -168,11 +168,22 @@
   body.console.lamps-img #overview span { position:relative; z-index:1; }   /* the label plates over the faded edge */
   body.console.lamps-img #overview .big.bad, body.console.lamps-img #overview .big.critical { animation-name:blinkimg; }   /* no inset shadow on the square image */
   @keyframes blinkimg { 50% { filter:brightness(.45) saturate(.7); } }
+  /* the cards' dots (each line's, each card title's) as the same lamps, housing and all, the housing the size of
+     the dot it replaces: the image is 3.4 bezel radii across (render_lamps.py FRAME), so 170% of the dot; masked
+     to the housing, so the panel plate around the lamp does not show on the card */
+  body.console.lamps-img .dot.lamp { position:relative; background:none; box-shadow:none; animation:none; }
+  body.console.lamps-img .dot.lamp::before { content:""; position:absolute; left:50%; top:50%; width:170%; height:170%; transform:translate(-50%, -50%);
+      background:var(--lampimg) center / 100% 100% no-repeat;
+      -webkit-mask-image:radial-gradient(circle closest-side, #000 56%, transparent 60%); mask-image:radial-gradient(circle closest-side, #000 56%, transparent 60%); }
+  body.console.lamps-img .dot.lamp.bad::before, body.console.lamps-img .dot.lamp.critical::before { animation:blinkimg 2s ease-in-out infinite; }
+  body.console.lamps-img .dot.lamp.critical { box-shadow:0 0 0 3px rgba(255,59,47,.45); }   /* act now: the ring, as on the big lamps */
   body.console #overview span { background:#0b0d10; color:var(--r-ink); border:1px solid #000; border-radius:3px; letter-spacing:.12em;
                               box-shadow:inset 0 1px 2px rgba(0,0,0,.9), 0 1px 0 rgba(255,255,255,.08); }
   /* screens: recessed in the metal */
+  /* a card stands off the page: a face a little lighter than the page, a lit top edge, a brighter bezel ring */
   body.console .card { border-radius:12px; padding:12px 16px 8px; background:linear-gradient(180deg, var(--r-screen-hi), var(--r-screen));
-                     box-shadow:inset 0 0 30px rgba(0,0,0,.6), inset 0 0 0 1px rgba(255,255,255,.04), 0 0 0 4px var(--r-frame), 0 0 0 5px rgba(255,255,255,.05), 0 8px 18px rgba(0,0,0,.55); }
+                     box-shadow:inset 0 0 30px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.07), inset 0 0 0 1px rgba(255,255,255,.05),
+                                0 0 0 4px var(--r-frame), 0 0 0 5px rgba(255,255,255,.11), 0 8px 18px rgba(0,0,0,.6); }
   body.console .card h2 { color:var(--acc); letter-spacing:.16em; text-shadow:0 0 8px color-mix(in srgb, var(--acc) 45%, transparent); }
   body.console .name { color:var(--r-ink); }
   body.console .text { color:var(--r-ink2); }
@@ -188,7 +199,7 @@
   body.console .bar { background:var(--r-rule); } body.console .bar b { background:var(--r-screen); }
   body.console footer { color:var(--r-ink3); }
   body.console .grid { column-gap:22px; padding:0 6px; } body.console .card { margin-bottom:20px; } body.console .panel { margin:0 6px 20px; }
-  body.console { --acc:#ffb000; --r-bg:#0b0d10; --r-bg-hi:#1c2229; --r-metal-hi:#3a4048; --r-metal:#2a2f35; --r-metal-lo:#1d2126; --r-frame:#0e1013; --r-key-hi:#3b4148; --r-key:#262b31; --r-key-ink:#e8ecf0; --r-screen-hi:#10161a; --r-screen:#0a0e11; --r-ink:#e9eef2; --r-ink2:#aeb9c2; --r-ink3:#6f7b85; --r-rule:#1c252b; }
+  body.console { --acc:#ffb000; --r-bg:#0b0d10; --r-bg-hi:#1c2229; --r-metal-hi:#3a4048; --r-metal:#2a2f35; --r-metal-lo:#1d2126; --r-frame:#0e1013; --r-key-hi:#3b4148; --r-key:#262b31; --r-key-ink:#e8ecf0; --r-screen-hi:#161d23; --r-screen:#0f1418; --r-ink:#e9eef2; --r-ink2:#aeb9c2; --r-ink3:#6f7b85; --r-rule:#1c252b; }
   /* ------------------------------------------------ the minimal skin: just the facts */
   body.minimal { --bg:#fff; --card:#fff; --fg:#111; --muted:#555; --soft:#999; --line:#eee; background:#fff; }
   @media (prefers-color-scheme: dark) { body.minimal { --bg:#000; --card:#000; --fg:#eee; --muted:#aaa; --soft:#666; --line:#1a1a1a; background:#000; } }
@@ -259,6 +270,13 @@ function cardFor(g){
   c.innerHTML = '<h2><span class="dot"></span><span class="title"></span><span class="m"></span></h2><div class="rows"></div>';   // cards stay in the lamps' order
   return (cards[g] = c);
 }
+// a dot as a raytraced lamp (Console skin, once the lamps have loaded): ' lamp" style="..."', closing the class
+// attribute it is put at the end of; else nothing. The variant follows the name, so a line keeps its lamp.
+function lampDot(level, name){
+  if(!(document.body.classList.contains('console') && LAMPS_READY)) return '';
+  let h = 0; for(const ch of String(name)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return ` lamp" style="--lampimg:url(img/lamp_${LAMP_OF[level] || 'off'}_${h % 3}.png)`;
+}
 // change over 10 s, 1 min, 10 min in fixed columns, so they line up from line to line
 const trendHTML = t => Array.isArray(t) && t.length ? `<small class="trend">${t.map(([k, v])=>`<i>${esc(k)}</i><b>${esc(v)}</b>`).join('')}</small>` : '';
 function rowHTML(g, it){
@@ -267,7 +285,7 @@ function rowHTML(g, it){
   if(it.bar){ const u = Math.max(0, Math.min(1, it.bar.used));
     bar = `<div class="bar" title="${(100*u).toFixed(1)} % used"><i class="${it.level}" style="width:${(100*u).toFixed(2)}%"></i>` +
           (it.bar.marks||[]).filter(m=>m>0 && m<1).map(m=>`<b style="left:${(100*m).toFixed(2)}%"></b>`).join('') + '</div>'; }
-  return `<div class="row${open.has(key) ? ' open' : ''}" draggable="true" data-key="${esc(key)}" data-name="${esc(it.name)}"><span class="dot ${it.level}" title="${it.level}"></span><span class="name">${esc(it.name)}</span>` +
+  return `<div class="row${open.has(key) ? ' open' : ''}" draggable="true" data-key="${esc(key)}" data-name="${esc(it.name)}"><span class="dot ${it.level}${lampDot(it.level, it.name)}" title="${it.level}"></span><span class="name">${esc(it.name)}</span>` +
          `<span class="text"><span class="main" title="${esc(it.text)}">${esc(it.text)}</span></span><span class="age">${it.age_s!=null && it.age_s>5 ? ago(it.age_s)+' old' : ''}</span>` + trendHTML(it.trend) + bar +
          (open.has(key) ? `<div class="details">${esc(detailText(it.details)) || '(nothing more)'}</div>` : '') + '</div>';
 }
@@ -302,7 +320,7 @@ function render(S){
   names.forEach((g, i)=>{
     const card = cardFor(g), its = groups[g];
     const worst = its.reduce((w,x)=>RANK[x.level]>RANK[w]?x.level:w, its[0].level);
-    card.querySelector('h2 .dot').className = 'dot ' + worst;
+    card.querySelector('h2 .dot').outerHTML = `<span class="dot ${worst}${lampDot(worst, g)}"></span>`;
     card.querySelector('h2 .title').textContent = g;
     card.querySelector('h2 .m').innerHTML = g==='Cherenkov' && modes.cherenkov ? `<span class="mode">mode: ${esc(modes.cherenkov.value)}</span>` : '';
     const saved = (store.get(ROWKEY, {})[g] || []);   // the lines in the order dragged to, new ones after
