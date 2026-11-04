@@ -256,9 +256,9 @@
 
 <section id="tab_rft" hidden>
   <div class="toolbar">
-    <span title="One tracker plane, or the three side by side (on one turn of the period, so their times compare)">Plane <select id="rft_plane"><option value="0">T0</option><option value="1">T1</option><option value="2">T2</option><option value="all">T0 · T1 · T2 split</option></select></span>
-    <label title="With the planes split: each plane's histogram as a share of its own hits, so their shapes compare"><input type="checkbox" id="rft_norm"> each plane to its own total</label>
-    <label title="Shift each tracker channel so its beam peak meets that of its plane's busiest channel, from this reading's own hits (the boards' channels disagree by up to ~9 ns)"><input type="checkbox" id="rft_align" checked> align channels on the beam</label>
+    <span title="One tracker plane or the gas Cherenkov (its two PMTs together), or all four stacked (on one turn of the period, so their times compare)">Plane <select id="rft_plane"><option value="0">T0</option><option value="1">T1</option><option value="2">T2</option><option value="3">Cherenkov</option><option value="all">T0 · T1 · T2 · Cherenkov split</option></select></span>
+    <label title="Split: each plane's (and the Cherenkov's) histogram as a share of its own hits, so their shapes compare"><input type="checkbox" id="rft_norm"> each plane to its own total</label>
+    <label title="Shift each tracker channel so its beam peak meets that of its plane's busiest channel, from this reading's own hits (the boards' channels disagree by up to ~9 ns); the two Cherenkov PMTs are not shifted"><input type="checkbox" id="rft_align" checked> align channels on the beam</label>
     <label title="Turn the period so the most-populated time bin is in the middle; the axis then counts from it"><input type="checkbox" id="rft_center" checked> centre on the peak</label>
     <span title="The same period drawn once, or twice side by side, so what lies across its ends is seen whole">Show <select id="rft_np"><option value="1">1 period</option><option value="2">2 periods</option></select></span>
     <label title="Log scale for the time-of-flight histogram (all charges): the floor and the tails"><input type="checkbox" id="rft_log"> log scale</label>
@@ -268,8 +268,8 @@
     <div class="card w2 tall1"><h2>Time of flight modulo the RF against Qlong</h2><canvas id="c_rft_q"></canvas>
       <div class="note">Each tracker hit's time after the RF reference, modulo the accelerator period, its phase taken between the RF triggers on either side of it. Shade: log of the count. Zero is the RF reference's own phase (or the peak), not the production time.</div></div>
     <div class="card w2"><h2>Time of flight modulo the RF, all charges</h2><canvas id="c_rft_t"></canvas><div class="legend" id="leg_rft_t"></div></div>
-    <div class="card w2"><h2>Channel alignment on the beam: each board's shift, by plane</h2><table id="t_rft_align"></table>
-      <div class="note" id="note_rft_align">Each tracker channel's beam peak (the mode of its time profile, smoothed over 0.5 ns) is moved onto that of its plane's busiest channel, in 99-ps steps and modulo the RF period, from this reading's own hits. Shift = what was subtracted; shifts near +9.9 and −9.9 ns are close to each other (the period wraps).</div></div>
+    <div class="card w2"><h2>Channel alignment on the beam: each board's shift, by plane (and the Cherenkov's PMTs)</h2><table id="t_rft_align"></table>
+      <div class="note" id="note_rft_align">Each tracker channel's beam peak (the mode of its time profile, smoothed over 0.5 ns) is moved onto that of its plane's busiest channel, in 99-ps steps and modulo the RF period, from this reading's own hits. Shift = what was subtracted; shifts near +9.9 and −9.9 ns are close to each other (the period wraps). The gas Cherenkov's two PMTs are summed as recorded, not shifted (much of their rate is dark counts, with no beam peak to align on); their Qlong has its own axis (0–512 ADC: far less charge than the tracker's; overflows in the top bin).</div></div>
   </div>
 </section>
 
@@ -1000,30 +1000,34 @@ function plotHeatStack(id, panels, spec){
   const {g,w,h}=setupCanvas(id), xb=Math.round(24*K), hb=(h-xb)/panels.length;
   panels.forEach((pn,i)=>{ const last = i===panels.length-1;
     heatBand(g, w, i*hb, last ? hb+xb : hb, Object.assign({}, spec, {counts: pn.counts || spec.blank, color:pn.color, ylabel:`${pn.label} · Qlong (ADC)`,
-      empty:`${pn.label}: no hits with an RF phase yet`, marks:(spec.marks||[]).map(m=>i===0 ? m : {x:m.x, color:m.color})}), last); });
+      empty:`${pn.label}: no hits with an RF phase yet`, marks:(spec.marks||[]).map(m=>i===0 ? m : {x:m.x, color:m.color})}, pn.y1 != null ? {y1:pn.y1} : {}), last); });
   PLOTS[id]=null;
 }
+// the RF timing tab's groups: the tracker planes 0-2 and the gas Cherenkov (3, its two PMTs summed)
+const RFT_NAME = p => p===3 ? 'Cherenkov' : 'T'+p, RFT_COLOR = p => p===3 ? '#9467bd' : PLANE_COLOR[p];
 function drawRft(){
   const note = document.getElementById('rft_note'), none = t=>{ message('c_rft_q', t); message('c_rft_t', t); };
   if(!RFT){ note.textContent = 'reading…'; return; }
   if(RFT.error){ note.innerHTML = warn(esc(RFT.error)); none('–'); return; }
   if(!RFT.rf){ note.innerHTML = warn(esc(RFT.note)); none('no RF reference'); return; }
   const sel = document.getElementById('rft_plane').value, split = sel === 'all', per = RFT.period_ns;
-  const Ps = (split ? [0,1,2] : [+sel]).map(p=>({p, P:RFT.planes.find(x=>x.plane===p)})), have = Ps.filter(x=>x.P);
+  const Ps = (split ? [0,1,2,3] : [+sel]).map(p=>({p, P:RFT.planes.find(x=>x.plane===p)})), have = Ps.filter(x=>x.P);
   const norm = split && document.getElementById('rft_norm').checked;
   document.getElementById('rft_norm').disabled = !split;
   note.textContent = `RF: Digi-${RFT.rf.serial} ch${RFT.rf.ch} · period ${per.toFixed(3)} ns · ${sinum(RFT.rf_hits)} RF triggers · `
-    + Ps.map(({p,P})=>P ? `T${p}: ${sinum(P.n)} hits with an RF phase` : `T${p}: none yet`).join(' · ')
+    + Ps.map(({p,P})=>P ? `${RFT_NAME(p)}: ${sinum(P.n)} hits with an RF phase` : `${RFT_NAME(p)}: none yet`).join(' · ')
     + (RFT.no_phase ? ` · ${sinum(RFT.no_phase)} without (no RF trigger near them)` : '');
   // the split heat maps need room: taller than the card's own height while split
   const qc = document.getElementById('c_rft_q'), tall2 = qc.closest('.card').classList.contains('tall2');
-  qc.style.height = split ? `calc(${tall2 ? 900 : 620}px * var(--k, 1))` : '';
-  if(!have.length){ none(split ? 'no tracker hits with an RF phase yet' : `no T${sel} hits with an RF phase yet`); legend('leg_rft_t', []); return; }
+  qc.style.height = split ? `calc(${tall2 ? 1150 : 800}px * var(--k, 1))` : '';
+  if(!have.length){ none(split ? 'no tracker or Cherenkov hits with an RF phase yet' : `no ${RFT_NAME(+sel)} hits with an RF phase yet`); legend('leg_rft_t', []); return; }
   // one turn of the period for every plane shown: the peak of their sum to the middle, the axis counted from it
   const n = have[0].P.counts.length, colSum = col=>col.reduce((a,b)=>a+b,0);
   let sh = 0, x0 = 0;
   if(document.getElementById('rft_center').checked){
-    const tot = new Array(n).fill(0); for(const {P} of have) P.counts.forEach((col,i)=>{ tot[i] += colSum(col); });
+    // on the tracker's peak when it is shown (the Cherenkov, much of it dark counts, does not move the view), else the Cherenkov's
+    const tot = new Array(n).fill(0), by = have.some(x=>x.p<3) ? have.filter(x=>x.p<3) : have;
+    for(const {P} of by) P.counts.forEach((col,i)=>{ tot[i] += colSum(col); });
     const k = tot.indexOf(Math.max(...tot)); sh = (k - Math.floor(n/2) + n) % n; x0 = -(Math.floor(n/2) + 0.5) * per / n;
   }
   const np_ = +document.getElementById('rft_np').value === 1 ? 1 : 2;   // the period drawn once or twice side by side
@@ -1032,16 +1036,17 @@ function drawRft(){
   const edges = Array.from({length:n*np_ + 1}, (_,i)=>x0 + i*per/n);
   const nxt = np_ === 2 ? 16 : 10;   // ticks every 2.5 ns over two periods, 1-2 ns over one
   const axes = {x0, x1, y0:0, y1:RFT.qmax, xfmt:v=>sinum(v)+' ns', nxt, marks};
-  if(split) plotHeatStack('c_rft_q', Ps.map(({p,P})=>({label:'T'+p, counts:P ? turn(P.counts) : null, color:PLANE_COLOR[p]})),
+  // each its own Qlong axis (the Cherenkov's 0-512 ADC; an older analysis gives one for all)
+  if(split) plotHeatStack('c_rft_q', Ps.map(({p,P})=>({label:RFT_NAME(p), counts:P ? turn(P.counts) : null, color:RFT_COLOR(p), y1:P && P.qmax})),
                           Object.assign({blank:turn(have[0].P.counts).map(col=>col.map(()=>0))}, axes));
-  else plotHeat('c_rft_q', Object.assign({counts:turn(have[0].P.counts), color:PLANE_COLOR[have[0].p], ylabel:'Qlong (ADC)'}, axes));
+  else plotHeat('c_rft_q', Object.assign({counts:turn(have[0].P.counts), color:RFT_COLOR(have[0].p), ylabel:'Qlong (ADC)'}, axes, {y1:have[0].P.qmax || RFT.qmax}));
   const series = have.map(({p,P})=>{ const y = turn(P.counts).map(colSum), tot = P.n || 1;
-    return {kind:'step', edges, y: norm ? y.map(v=>v/tot) : y, color:PLANE_COLOR[p]}; });
+    return {kind:'step', edges, y: norm ? y.map(v=>v/tot) : y, color:RFT_COLOR(p)}; });
   const VT = VW.c_rft_t || {};   // y only: an x set by hand earlier (kept in the browser) would not follow the heat map
   plot('c_rft_t', {x0, x1, view:{y0:VT.y0, y1:VT.y1}, series, ylabel: norm ? 'share of the plane\'s hits / bin' : 'hits / bin', xfmt:v=>sinum(v)+' ns', nxt, marks,
                    ylog:document.getElementById('rft_log').checked});
-  legend('leg_rft_t', split ? have.map(({p})=>({name:'T'+p, color:PLANE_COLOR[p]})) : []);
-  drawRftAlign(split ? [0,1,2] : [+sel]);
+  legend('leg_rft_t', split ? have.map(({p})=>({name:RFT_NAME(p), color:RFT_COLOR(p)})) : []);
+  drawRftAlign(split ? [0,1,2,3] : [+sel]);
 }
 // the shifts the alignment applied: per plane and board, the median and range of its channels'
 function drawRftAlign(planes){
@@ -1051,6 +1056,11 @@ function drawRftAlign(planes){
   const rows = [];
   for(const p of planes){
     const C = A.channels.filter(c=>c.plane===p); if(!C.length) continue;
+    if(p===3){   // the Cherenkov: its two PMTs, one row each, summed as recorded
+      rows.push(`<tr><th colspan="4">Cherenkov · its PMTs summed as recorded, not shifted</th></tr>`);
+      for(const c of C) rows.push(`<tr><td>${sw(BOARD_COLOR[boardIndex(c.board)%BOARD_COLOR.length])}Digi-${c.board} ch${c.ch}</td><td>${sinum(c.n)} hits</td><td></td><td></td></tr>`);
+      continue;
+    }
     const ref = A.ref['T'+p];
     rows.push(`<tr><th colspan="4">T${p}${ref ? ` · reference Digi-${ref.board} ch${ref.ch} (${esc(ref.role)})` : ' · no channel with enough hits yet'}</th></tr>`);
     // by board and half: the upper eight channels of some boards are ~8 ns off their lower eight
@@ -1062,7 +1072,7 @@ function drawRftAlign(planes){
         + `<td>${med==null ? '–' : `median ${f(med)} ns`}</td><td>${S_.length ? `${f(S_[0])} … ${f(S_[S_.length-1])} ns` : ''}${low ? ` · ${low} with &lt;${A.min_hits} hits, not shifted` : ''}</td></tr>`);
     }
   }
-  t.innerHTML = rows.join('') || '<tr><td>no tracker channel has hits with an RF phase yet</td></tr>';
+  t.innerHTML = rows.join('') || '<tr><td>no tracker or Cherenkov channel has hits with an RF phase yet</td></tr>';
 }
 
 // ---------------------------------------------------------------- beam vs map: the floor tool's published expectation (GET /expected)

@@ -249,6 +249,13 @@ RFTOF_HZ = 50.633194e6
 RFTOF_NT = 100                                  # TOF bins over one RF period on the page (198 ps)
 RFTOF_FINE = 2                                  # kept per channel this much finer (99 ps): the steps a channel is shifted by
 RFTOF_NQ, RFTOF_QMAX = 128, 8192                # Qlong bins (64 ADC each; above: the top bin)
+# the gas Cherenkov's PMTs (0.5 Vpp, leading edge) give far less charge: most under ~100 ADC (4 Nov 2026, some
+# 65535 = overflow, in the top bin), so they have their own Qlong axis: 128 bins of 4 ADC
+RFTOF_QMAX_C = 512
+# the groups of the tab, by index: the three tracker planes and the gas Cherenkov (its PMTs summed)
+RFTOF_GROUPS = ("T0", "T1", "T2", "Cherenkov")
+RFTOF_CHER = 3
+COUNTER_CHER = ff.COUNTERS.index("cherenkov")
 # aligned on the beam: the boards' channels disagree by up to ~9 ns, stable within a session (the upper eight
 # channels of 15879, 58918 and 62839 ~8 ns early; 3 Nov 2026), so each tracker channel is shifted until its beam
 # peak meets that of its plane's busiest channel, from this reading's own hits once it has RFTOF_ALIGN_MIN of them
@@ -624,7 +631,7 @@ def slice_task(task: dict) -> dict:
         owned = int(np.count_nonzero(fin & (tc >= t0) & (tc < t1)))   # the finder's hits whose own time (offset removed) is in the slice
         rft = rft_none = None
         if chans.rf_slot is not None:
-            rft, rft_none = rftof_hist(tc, slot, e, chans.plane[bd, ch], chans.rf_slot, t0, t1)   # (cells, counts)
+            rft, rft_none = rftof_hist(tc, slot, e, rftof_group(chans)[bd, ch], chans.rf_slot, t0, t1)   # (cells, counts)
     else:
         res = ff.Result(chans.n_slots, tables.map_n)
         daq = dh.DaqResult(chans.n_slots, np.uint32)
@@ -634,14 +641,23 @@ def slice_task(task: dict) -> dict:
                 dt=time.perf_counter() - t_start)
 
 
-def rftof_hist(tc, slot, e, plane, rf_slot, t0, t1):
-    """TOF modulo the RF of the tracker hits the slice owns ([t0, t1), offsets removed), against Qlong, per channel:
-    the cells (slot, fine TOF bin, Qlong bin) hit, as flat indices, with their counts; and the number of those hits
-    without an RF phase (fewer than two RF triggers in the slice). A hit's phase is taken between the RF triggers on
-    either side of it, with the local period from their spacing; before the first or after the last RF trigger of
-    the slice, from the nearest pair."""
+def rftof_group(chans):
+    """Per (board, channel): its group on the RF timing tab (RFTOF_GROUPS: tracker plane 0-2, RFTOF_CHER for the
+    gas Cherenkov's PMTs), -1 for the rest."""
+    g = np.where(chans.plane >= 0, chans.plane, -1)
+    g[chans.counter == COUNTER_CHER] = RFTOF_CHER
+    return g
+
+
+def rftof_hist(tc, slot, e, group, rf_slot, t0, t1):
+    """TOF modulo the RF of the tracker and Cherenkov hits the slice owns ([t0, t1), offsets removed), against Qlong,
+    per channel: the cells (slot, fine TOF bin, Qlong bin) hit, as flat indices, with their counts; and the number of
+    those hits without an RF phase (fewer than two RF triggers in the slice). group: per hit, as rftof_group (the
+    Cherenkov's Qlong on its own axis, RFTOF_QMAX_C). A hit's phase is taken between the RF triggers on either side of
+    it, with the local period from their spacing; before the first or after the last RF trigger of the slice, from
+    the nearest pair."""
     none = (np.zeros(0, np.int64), np.zeros(0, np.int64))
-    trk = (plane >= 0) & (tc >= t0) & (tc < t1)
+    trk = (group >= 0) & (tc >= t0) & (tc < t1)
     n = int(np.count_nonzero(trk))
     T = 1e12 / RFTOF_HZ
     t_rf = np.sort(tc[slot == rf_slot])
@@ -656,7 +672,8 @@ def rftof_hist(tc, slot, e, plane, rf_slot, t0, t1):
     ph = ((th - t_rf[i]) / period[i]) % 1.0
     ntf = RFTOF_NT * RFTOF_FINE
     ti = np.minimum((ph * ntf).astype(np.int64), ntf - 1)
-    qi = np.minimum(np.asarray(e[trk], np.int64) * RFTOF_NQ // RFTOF_QMAX, RFTOF_NQ - 1)
+    qmax = np.where(group[trk] == RFTOF_CHER, RFTOF_QMAX_C, RFTOF_QMAX)
+    qi = np.minimum(np.asarray(e[trk], np.int64) * RFTOF_NQ // qmax, RFTOF_NQ - 1)
     cells, counts = np.unique((np.asarray(slot[trk], np.int64) * ntf + ti) * RFTOF_NQ + qi, return_counts=True)
     return (cells, counts.astype(np.int64)), 0
 
@@ -1638,10 +1655,11 @@ class Online:
         return 200, dict(published_at=doc.get("published_at"), top_view=tv)
 
     def rftof_view(self, align=False):
-        """GET /rftof: the RF timing tab's TOF modulo the RF against Qlong, per tracker plane with hits, since the
-        reading began (or Clear). Apart from /state: it is large and only the tab asks for it.
-        align: each tracker channel with RFTOF_ALIGN_MIN hits shifted (in 99-ps steps, modulo the period) so its
-        beam peak meets that of its plane's busiest channel; the shifts are returned with the planes."""
+        """GET /rftof: the RF timing tab's TOF modulo the RF against Qlong, per group with hits (tracker plane, or the
+        gas Cherenkov: RFTOF_GROUPS), since the reading began (or Clear). Apart from /state: it is large and only the
+        tab asks for it. align: each tracker channel with RFTOF_ALIGN_MIN hits shifted (in 99-ps steps, modulo the
+        period) so its beam peak meets that of its plane's busiest channel; the shifts are returned with the planes.
+        The Cherenkov's PMTs are summed as recorded (time offsets removed), never shifted."""
         with self.lock:
             ch = self.setup.chans
             if ch.rf_slot is None:
@@ -1650,20 +1668,20 @@ class Online:
             labels = {sl: self.labels[sl] for sl in self.slots}
         b, c = divmod(ch.rf_slot, ch.board_channels)
         per = 1e9 / RFTOF_HZ; ntf = H.shape[1]
-        plane_of = ch.plane.reshape(-1)
+        plane_of = rftof_group(ch).reshape(-1)                  # the group (tracker plane or Cherenkov) of each slot
         prof = H.sum(axis=2); n = prof.sum(axis=1)               # per channel: its time profile, its hits
         shift = np.zeros(len(n), np.int64); refs = {}
         if align:
             k = max(1, int(round(RFTOF_SMOOTH_NS / (per / ntf)))) // 2
             sm = sum(np.roll(prof, j, axis=1) for j in range(-k, k + 1))
             peak = sm.argmax(axis=1)
-            for p in range(3):
+            for p in range(3):          # the tracker planes; the Cherenkov's PMTs as recorded (much of it dark counts: no beam peak to align on)
                 sl = np.flatnonzero((plane_of == p) & (n >= RFTOF_ALIGN_MIN))
                 if sl.size:
                     r = int(sl[np.argmax(n[sl])]); refs[p] = r
                     shift[sl] = (peak[sl] - peak[r] + ntf // 2) % ntf - ntf // 2
         planes = []
-        for p in range(3):
+        for p in range(len(RFTOF_GROUPS)):
             sl = np.flatnonzero((plane_of == p) & (n > 0))
             if not sl.size:
                 continue
@@ -1671,14 +1689,15 @@ class Online:
             for s in sl:
                 A += np.roll(H[s], -int(shift[s]), axis=0) if shift[s] else H[s]
             A = A.reshape(RFTOF_NT, RFTOF_FINE, RFTOF_NQ).sum(axis=1)
-            planes.append(dict(plane=p, n=int(A.sum()), counts=A.tolist()))
+            planes.append(dict(plane=p, name=RFTOF_GROUPS[p], n=int(A.sum()), counts=A.tolist(),
+                               qmax=RFTOF_QMAX_C if p == RFTOF_CHER else RFTOF_QMAX))
         out = dict(rf=dict(serial=self.serials[b], ch=int(c)), period_ns=per, nt=RFTOF_NT, nq=RFTOF_NQ,
                    qmax=RFTOF_QMAX, rf_hits=rf_hits, no_phase=none, planes=planes)
         if align:
             out["align"] = dict(min_hits=RFTOF_ALIGN_MIN, step_ns=per / ntf,
-                                ref={f"T{p}": dict(slot=r, **labels[r]) for p, r in refs.items()},
+                                ref={RFTOF_GROUPS[p]: dict(slot=r, **labels[r]) for p, r in refs.items()},
                                 channels=[dict(slot=int(s), **labels[s], plane=int(plane_of[s]), n=int(n[s]),
-                                               shift_ns=round(float(shift[s]) * per / ntf, 3) if n[s] >= RFTOF_ALIGN_MIN else None)
+                                               shift_ns=round(float(shift[s]) * per / ntf, 3) if n[s] >= RFTOF_ALIGN_MIN and plane_of[s] < RFTOF_CHER else None)
                                           for s in sorted(labels) if plane_of[s] >= 0])
         return out
 
