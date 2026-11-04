@@ -436,7 +436,7 @@ if(!VW || typeof VW !== 'object') VW = {};
 let S = null, CH = null, SPEC_ALL = null, GRID = null;
 let SUM = null;   // the /summary answer of a recorded run shown in this browser instead of live (null: live)
 // the Qlong range and binning the spectrum, the PSD map and the grid show: [lo, hi), kept in this browser
-const NB = {lin:[256, 1024, 4096, 16384], log:[100, 300, 1000]}, NB_DEF = {lin:4096, log:300};
+const NB = {lin:[256, 1024, 4096, 16384, 65536], log:[100, 300, 1000]}, NB_DEF = {lin:4096, log:300};
 let VIEW = Object.assign({lo:0, hi:65536, log:false, nb:4096}, store.get('fsudaq-qview', {}));
 function viewQuery(nb){ return `lo=${VIEW.lo}&hi=${VIEW.hi}&nb=${nb||VIEW.nb}&log=${VIEW.log?1:0}`; }
 function setView(v){ Object.assign(VIEW, v);
@@ -446,7 +446,7 @@ function setView(v){ Object.assign(VIEW, v);
   store.set('fsudaq-qview', VIEW); viewControls(); fetchChannel(); }
 function viewControls(){
   document.getElementById('q_x').value = VIEW.log ? 'log' : 'lin';
-  document.getElementById('q_nb').innerHTML = NB[VIEW.log?'log':'lin'].map(n=>`<option value="${n}">${n}</option>`).join('');
+  document.getElementById('q_nb').innerHTML = NB[VIEW.log?'log':'lin'].map(n=>`<option value="${n}">${n===65536 ? "65536 (1 ADC each)" : n}</option>`).join('');
   document.getElementById('q_nb').value = VIEW.nb;
   document.getElementById('q_lo').value = VIEW.lo; document.getElementById('q_hi').value = VIEW.hi;
 }
