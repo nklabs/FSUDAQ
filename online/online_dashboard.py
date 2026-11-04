@@ -974,6 +974,7 @@ class Online:
         self.daq = dh.DaqResult(S.chans.n_slots)
         self.secs = {}                          # second of data time -> hits per slot
         self.clear_s = None                     # the first second the page's rates show after a Clear
+        self.clear_t = None                     # the newest data time (ps) at the page's Clear: the mean rates count from it
         self.slices = []                        # (t0, t1, bunches, statuses, tracks) of every folded slice
         self.proc_s = 0.0; self.steps = 0
         self.lost = 0                           # tasks that failed twice, this run
@@ -1910,15 +1911,23 @@ class Online:
         rf = self.setup.chans.rf_slot           # the RF reference: not in the total or the board rates, a line of its own
         t0s = self.t_first // PS if self.t_first is not None else (secs[0] if secs else 0)
         known = [v for sl, v in rate.items() if v is not None and sl != rf]
+        # each channel's mean rate: its hits since Clear (or the start of the reading; a mid-run start's earlier hits
+        # left out, as in the summary) over the data time from then to the newest on disk. Kept after the run.
+        tops = [int(b.newest.max()) for b in self.boards.values() if b.newest.max() >= 0]
+        t_lo = None if self.t_first is None else max(self.t_first, self.clear_t if self.clear_t is not None else self.t_first)
+        mean_span = (max(tops) - t_lo) / PS if tops and t_lo is not None else None
+        if mean_span is not None and mean_span < 1:      # under a second: no mean yet
+            mean_span = None
 
         def board_hits(s, bi):
             row = self.secs[s]
             return int(row[bi * nbc:(bi + 1) * nbc].sum() - (row[rf] if rf is not None and rf // nbc == bi else 0))
         return dict(
-            slots=[dict(slot=sl, **self.labels[sl], count=int(D.counts[sl]), rate=rate.get(sl), late=int(D.late[sl]),
+            slots=[dict(slot=sl, **self.labels[sl], count=int(D.counts[sl]), rate=rate.get(sl),
+                        mean_rate=None if mean_span is None else (int(D.counts[sl]) - int(D.early[sl])) / mean_span, late=int(D.late[sl]),
                         early=int(D.early[sl]), written=bool(self.boards[self.serials[sl // nbc]].newest[(sl % nbc) // 2] >= 0))
                    for sl in self.slots],
-            ref=self.ref_slot, rf=rf, total_rate=sum(known) if rate else None,
+            ref=self.ref_slot, rf=rf, total_rate=sum(known) if rate else None, mean_span_s=mean_span,
             rate_unknown=len([v for sl, v in rate.items() if v is None and sl != rf]),
             rate_second=None if not rate else secs[-1] - t0s,
             lag_s=None if newest is None or done is None else max(0.0, (newest - done) / PS),
@@ -2031,6 +2040,7 @@ class Online:
             # the rate charts and bunches per second too, from the next whole second (a second already being
             # counted would read low); the run summary keeps its own whole-run counts
             self.clear_s = max(self.secs) + 1 if self.secs else None
+            self.clear_t = max((int(b.newest.max()) for b in self.boards.values() if b.newest.max() >= 0), default=None)
             self.slices = []
             self.epoch += 1
 

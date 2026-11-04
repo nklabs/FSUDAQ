@@ -827,7 +827,13 @@ function drawCompare(){
     const panel = document.getElementById('cmp_c_'+sl).parentElement;
     panel.querySelector('i').style.background = color;
     panel.querySelector('b').textContent = slotName(s); panel.querySelector('b').title = slotName(s);
-    panel.querySelector('span').textContent = d ? (w==='q' ? `${sinum(d.q.counts.reduce((a,b)=>a+b,0))} in range · ${sinum(d.count)} hits` : `${sinum(d.count)} hits`) : '';
+    // the channel's rate now (the newest complete second, while data are written) and its mean since Clear (kept after the run)
+    const hz = v => v==null ? '–' : (v < 10 ? v.toFixed(2) : v < 100 ? v.toFixed(1) : sinum(v)) + ' Hz';
+    const rates = ` · now ${hz(s.rate)} · avg ${hz(s.mean_rate)}`;
+    const sp = panel.querySelector('span');
+    sp.textContent = d ? (w==='q' ? `${sinum(d.q.counts.reduce((a,b)=>a+b,0))} in range · ${sinum(d.count)} hits` : `${sinum(d.count)} hits`) + rates : '';
+    sp.title = 'now: hits in the newest complete second of data (while the run is written). avg: hits since Clear (or the start '
+      + 'of the reading) over the data time since then' + (S.daq.mean_span_s!=null ? ` (${durText(S.daq.mean_span_s)})` : '') + '; it stays after the run, until Clear or the next run.';
     if(!d) message('cmp_c_'+sl, 'loading…');
     else if(spec===null) message('cmp_c_'+sl, 'pick a timing reference channel above');
     else plot('cmp_c_'+sl, spec);
