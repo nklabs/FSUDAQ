@@ -114,6 +114,17 @@ from it. Without LED flashes (or before they are read), each T1 board half is pl
 200 pairs in it); board halves with fewer stay untimed and are listed. The LED timing survives Clear (it describes
 the run's boards).
 
+### Terminal view
+
+`python3 tui.py` shows the dashboard in a terminal, htop-style (standard library only, no venv needed;
+`--url http://host:8050` for another one, `--once` prints one snapshot). It reads the same `/state`, `/compare`,
+`/rftof`, `/rftag` and `/expected_view` as the page and never calls a control route: Clear, the window, the
+reference and the run selection stay on the page. Tabs: **1** every channel on one page, by detector in position
+order (`t`: the sortable table); **2** Map, each plane's rate per mm of x to scale (`finder/channels.csv` for the
+run's setting) under the floor tool's top view; **3** RF timing, as the page's tab; **4** Boards (the RF reference
+is in its board's hits, not its rates, as on the page); **5** Tracker; **6** one channel (Enter on the grid).
+`h` lists the keys.
+
 ### Analysis files
 
 A run read while it is taken keeps what its analysis reads, in `<run>/<run>_analysis/`: read-only copies of
