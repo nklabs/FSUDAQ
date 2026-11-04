@@ -32,13 +32,18 @@
 <body>
 <h1>Limits and names</h1>
 <p class="lead">What the <a href="/" target="_blank">status page</a> judges by. Each PLC input can be named, scaled
-(value = raw × scale + offset) and given rules; a rule raises its level when the value is at or above, above or below a number,
+(value = raw × scale + offset) and given rules; a rule raises its level when the value is at or above, above or below a number, more than a number
+above the room temperature (the mean of the inputs ticked under "Room temperature"),
 or changes by at least an amount within a time. A rule can apply in one mode only. Saving writes <code>status/limits.json</code> on odin and
 appends the whole set, with the time, to <code>status/limits_log.jsonl</code>: what was in force when stays on record.
 Levels: <b>notice</b> = to read, not a safety matter (blue); safety only: <b>warn</b> = little warning (yellow), <b>bad</b> = big warning (red, flashing), <b>critical</b> = massive warning (red, flashing, with a ring).</p>
 
 <h2>Modes</h2>
 <div class="card"><div class="fields" id="modes"></div></div>
+
+<h2>Room temperature</h2>
+<div class="card"><div class="fields" id="room"></div>
+  <div class="live" style="margin-top:6px">Ticked: the mean of their readings is the room temperature that "more than room +" rules compare with.</div></div>
 
 <h2>Inputs</h2>
 <div id="channels"></div>
@@ -55,7 +60,7 @@ Levels: <b>notice</b> = to read, not a safety matter (blue); safety only: <b>war
 <script>
 let L = null, INPUTS = {}, SOURCES = [], LEVELS = [], dirty = false;
 let VERSION = null;   // the limits this page loaded: a save is refused if someone saved since (it would undo theirs)
-const KINDS = {at_or_above:'at or above', above:'above', below:'below', change:'changes by at least'};
+const KINDS = {at_or_above:'at or above', above:'above', below:'below', above_room:'more than room +', change:'changes by at least'};
 const DAQ = {disk_warn_gb:'disk: warn below (GB)', disk_bad_gb:'disk: bad below (GB)', plc_stale_s:'PLC status stale after (s)', analysis_lag_warn_s:'analysis behind: warn after (s of data)'};
 const esc = t => String(t ?? '').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const msg = (t, cls='') => { const m=document.getElementById('msg'); m.textContent=t; m.className=cls; };
@@ -69,6 +74,8 @@ function preview(c){
   if(!c.source) return 'not assigned';
   if(raw==null) return 'raw: no PLC value now';
   if(c.source.startsWith('plc.tc') && raw>=3276) return `raw ${raw} = not connected`;
+  const v = raw*(+c.scale||0)+(+c.offset||0);
+  if(c.connected==='auto' && c.range && !(v>=c.range[0] && v<=c.range[1])) return `raw ${(+raw).toPrecision(5)} → ${v.toFixed(+c.digits||2)}: outside the expected range, not connected`;
   return `raw ${(+raw).toPrecision(5)} → ${(raw*(+c.scale||0)+(+c.offset||0)).toFixed(+c.digits||2)} ${c.unit||''}`;
 }
 function drawModes(){
@@ -91,8 +98,8 @@ function drawChannels(){
     <div class="fields">
       <label>name<input class="wide" data-f="name" value="${esc(c.name)}"></label>
       <label>group (card on the status page)<input class="mid" data-f="group" value="${esc(c.group)}"></label>
-      <label title="unticked: shown as not connected (blue: its alarms are off) whatever it reads; an open thermocouple reads believable but meaningless values">connected
-        <input type="checkbox" data-f="connected"${c.connected===false?'':' checked'} style="width:18px;height:18px"></label>
+      <label title="yes: judged by its rules; no: shown as not connected (blue: its alarms are off) whatever it reads, as an open thermocouple reads believable but meaningless values; auto: connected while it reads within its expected range, not connected outside it">connected
+        <select data-f="connected">${(cur => opt('yes', cur) + opt('no', cur) + opt('auto', cur, 'auto (by expected range)'))(c.connected===false ? 'no' : c.connected==='auto' ? 'auto' : 'yes')}</select></label>
       <label>PLC input<select data-f="source">${opt('', c.source||'', '(not assigned)')}${SOURCES.map(s=>opt(s, c.source, s.replace('plc.',''))).join('')}</select></label>
       <label>scale<input type="number" step="any" data-f="scale" value="${esc(c.scale)}"></label>
       <label>offset<input type="number" step="any" data-f="offset" value="${esc(c.offset)}"></label>
@@ -124,11 +131,18 @@ function drawUnused(){
     `<label style="flex-direction:row;gap:4px;align-items:center;font-size:13px;color:inherit"><input type="checkbox" data-unused="${esc(s)}"${L.unused.includes(s)?' checked':''}>${esc(s.replace('plc.',''))}</label>`).join('')
     || '<span>every input is named</span>';
 }
-function draw(){ drawModes(); drawChannels(); drawUnused(); drawDaq(); }
+function drawRoom(){
+  L.room = L.room || [];
+  document.getElementById('room').innerHTML = L.channels.filter(c=>c.source).map(c=>
+    `<label style="flex-direction:row;gap:4px;align-items:center;font-size:13px;color:inherit"><input type="checkbox" data-room="${esc(c.id)}"${L.room.includes(c.id)?' checked':''}>${esc(c.name)}</label>`).join('')
+    || '<span>no inputs</span>';
+}
+function draw(){ drawModes(); drawRoom(); drawChannels(); drawUnused(); drawDaq(); }
 
 document.body.addEventListener('input', ev=>{
   const t = ev.target;
   if(t.dataset.mode){ L.modes[t.dataset.mode].value = t.value; touch(); return; }
+  if(t.dataset.room){ L.room = (L.room||[]).filter(r=>r!==t.dataset.room).concat(t.checked ? [t.dataset.room] : []); touch(); return; }
   if(t.dataset.unused){ L.unused = L.unused.filter(u=>u!==t.dataset.unused).concat(t.checked ? [t.dataset.unused] : []); touch(); return; }
   if(t.dataset.daq){ L.daq[t.dataset.daq] = t.value==='' ? null : +t.value; touch(); return; }
   const card = t.closest('[data-ch]'); if(!card) return;
@@ -138,7 +152,7 @@ document.body.addEventListener('input', ev=>{
     if(a==='' && b==='') delete c.range; else c.range = [+a, +b];
     touch(); return;
   }
-  if(t.dataset.f==='connected'){ c.connected = t.checked; touch(); return; }
+  if(t.dataset.f==='connected'){ c.connected = t.value==='auto' ? 'auto' : t.value==='yes'; card.querySelector('[data-live]').textContent = preview(c); touch(); return; }
   if(t.dataset.f){
     const f = t.dataset.f;
     c[f] = ['scale','offset','digits'].includes(f) ? (t.value==='' ? 0 : +t.value) : (f==='source' && !t.value ? null : t.value);
@@ -156,7 +170,7 @@ document.body.addEventListener('input', ev=>{
 document.body.addEventListener('click', ev=>{
   const t = ev.target, card = t.closest('[data-ch]');
   if(t.id==='add'){ L.channels.push({id:'input_'+Date.now(), name:'new input', group:'Inputs', source:null, scale:1, offset:0, unit:'', digits:2, rules:[]}); drawChannels(); touch(); }
-  else if(t.dataset.delch!=null){ if(confirm(`Remove "${L.channels[+t.dataset.delch].name}"?`)){ L.channels.splice(+t.dataset.delch,1); drawChannels(); touch(); } }
+  else if(t.dataset.delch!=null){ if(confirm(`Remove "${L.channels[+t.dataset.delch].name}"?`)){ L.room = (L.room||[]).filter(r=>r!==L.channels[+t.dataset.delch].id); L.channels.splice(+t.dataset.delch,1); drawRoom(); drawChannels(); touch(); } }
   else if(t.dataset.addrule!=null){ L.channels[+t.dataset.addrule].rules = (L.channels[+t.dataset.addrule].rules||[]).concat([{above:0, level:'warn'}]); drawChannels(); touch(); }
   else if(t.dataset.delrule!=null && card){ L.channels[+card.dataset.ch].rules.splice(+t.dataset.delrule,1); drawChannels(); touch(); }
 });

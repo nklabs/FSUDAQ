@@ -33,7 +33,7 @@ within their card by dragging; the order is kept in the browser ("reset lines" r
 | Cherenkov | pressure (ai0), stack and floor gas sensors (ai1, ai2), Cherenkov temperatures (tc6, tc7), each with its change over 10 s / 1 min / 10 min | PLC inputs, `limits.json` |
 | DAQ | FSUDAQ running, the last run (running, stopped, problems, no stop), board clocks, the boards (one line; a line per board not writing), a failed LED command, disk (with a bar), data rate | `/proc`, the newest run folder's `<run>_run.json`, the online dashboard, the data path |
 | Online analysis | the dashboard's status, health, lag; placeholders in `online/experiment.json` | `GET localhost:8050/state` |
-| Trackers | the six tracker thermocouples as one line (tc0/1 tracker 0, tc2/3 tracker 1, tc4/5 tracker 2; each in the details), the T0, T1 + T2 and ESPEON currents (Trumeters, ai5-ai7), LED relay live | PLC inputs, pion-ros |
+| Trackers | the six tracker thermocouples as one line (tc0/1 tracker 0, tc2/3 tracker 1, tc4/5 tracker 2; each in the details; those reading within 0-100 °C counted as connected), the T0, T1 + T2 and ESPEON currents (Trumeters, ai5-ai7), LED relay live | PLC inputs, pion-ros |
 | PLC | heartbeat counting, status age, outputs | pion-ros `GET :8770/status` |
 | PLC inputs (not named) | the raw value of every input not named yet | PLC |
 | ROS | pion-ros answering, plc_status, rosbag2_recorder | pion-ros |
@@ -44,8 +44,17 @@ Each PLC input (`ai0`-`ai7`, `tc0`-`tc7`) can be named, put on a card, scaled (v
 offset, with a unit) and given rules. A rule raises the input's level to notice (to read, not a
 safety matter: blue) or, for safety, warn (little warning), bad (big warning) or critical (massive
 warning) when the value is at or above, above or below a
-number, or changes by at least an amount within a time; a rule can apply in one mode only. The
-modes (Cherenkov: normal / full of isobutane) are set there too.
+number, more than a number above the room temperature, or changes by at least an amount within a time; a rule
+can apply in one mode only. The modes (Cherenkov: normal / full of isobutane) are set there too.
+
+Room temperature is the mean of the inputs listed under `room` (ticked under "Room temperature" on the page;
+by default tc6 and tc7, the Cherenkov thermocouples, which read the hall), counting only those that read: not
+open, within their expected range, not marked not connected. With none reading, a "more than room +" rule says
+it is not checked and raises nothing.
+
+An input's `connected` is yes (judged by its rules), no (shown as not connected, blue, whatever it reads: an open
+thermocouple reads believable but meaningless values) or auto: connected while it reads within its expected range,
+not connected outside it.
 
 The defaults (the PLC as labelled on 31 Oct 2026):
 
@@ -53,8 +62,11 @@ The defaults (the PLC as labelled on 31 Oct 2026):
   100 critical; expected range 0-100.
 - Cherenkov pressure (WIKA WUC-10, ai0, psig): above 2 warn, always; in "full of isobutane", also below 0.3,
   or a change of 0.05 or more within an hour; expected range -14.7 to 100.
-- Thermocouples (°C): expected range -50 to 1300, above 80 bad (an open input reads 3276.7); the six on the
-  trackers are marked not connected for now. Trumeters (ai5-ai7): expected range 0-5. ai3 and ai4 unused.
+- Thermocouples (°C): above 80 bad; an open input reads 3276.7 or a noisy staircase of about 110-520. The
+  Cherenkov's (tc6, tc7): connected, expected range -50 to 1300; they are the room temperature. The six on the
+  trackers (tc0-tc5): auto, expected range 0-100 (an open input reads above it), more than 10 above the room warns
+  (4 Nov 2026). A real tracker reading above 100 °C would show as not connected: it passes the 10-above-room
+  warning and the 80 °C alarm on the way. Trumeters (ai5-ai7): expected range 0-5. ai3 and ai4 unused.
 
 A safety input with no value (the PLC status missing or stale, the heartbeat stuck, NaN from the PLC, an
 open thermocouple, or not assigned to an input) is a warning, not grey: its alarms cannot go off. The

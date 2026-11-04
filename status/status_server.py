@@ -71,12 +71,15 @@ DEFAULT_LIMITS = {
           # Trumeters 1 and 2 read half of what the meters show (31 Oct 2026): scale 2
           "scale": 2.0 if i < 7 else 1.0, "offset": 0.0, "unit": "", "digits": 3, "range": [0, 10 if i < 7 else 5], "rules": []} for i in (5, 6, 7)]
       # two thermocouples per detector: tc0/1 tracker 0, tc2/3 tracker 1, tc4/5 tracker 2, tc6/7 the Cherenkov.
-      # An open input on this card reads a noisy staircase (about 120-520) or 3276.7, which looks like a real temperature:
-      # "connected" says which are plugged in; the others show as not connected whatever they read.
+      # An open input on this card reads a noisy staircase (about 110-520) or 3276.7, which looks like a real temperature.
+      # The trackers' are "auto": connected while they read within their expected range (0-100 C), not connected outside
+      # it; more than 10 C above the room (tc6/tc7, which read the hall) warns, above 80 C is bad (4 Nov 2026).
       + [{"id": f"tc{i}", "name": (f"Tracker {i // 2} temperature {'AB'[i % 2]}" if i < 6 else f"Cherenkov temperature {'AB'[i % 2]}") + f" (tc{i})",
           "group": "Tracker temperatures" if i < 6 else "Cherenkov", "source": f"plc.tc{i}",
-          "scale": 1.0, "offset": 0.0, "unit": "°C", "digits": 1, "range": [-50, 1300], "rules": [{"above": 80, "level": "bad"}],
-          "connected": i >= 6} for i in range(8)],   # tc0-tc5 read open inputs (31 Oct 2026): tick them on /limits when plugged in
+          "scale": 1.0, "offset": 0.0, "unit": "°C", "digits": 1, "range": [0, 100] if i < 6 else [-50, 1300],
+          "rules": ([{"above_room": 10, "level": "warn"}] if i < 6 else []) + [{"above": 80, "level": "bad"}],
+          "connected": "auto" if i < 6 else True} for i in range(8)],
+    "room": ["tc6", "tc7"],      # the room temperature: the mean of these channels' readings (above_room rules)
     "unused": ["plc.ai3", "plc.ai4"],
     "daq": {"disk_warn_gb": 200, "disk_bad_gb": 50, "plc_stale_s": 10, "analysis_lag_warn_s": 30},
 }
@@ -123,8 +126,10 @@ def validate_limits(L: dict) -> list:
             bad.append(f"{where}: scale 0 makes every reading 0 (its alarms could never go off)")
         if "digits" in c and not (isinstance(c["digits"], int) and not isinstance(c["digits"], bool) and 0 <= c["digits"] <= 6):
             bad.append(f"{where}: decimals must be a whole number 0 to 6")
-        if not isinstance(c.get("connected", True), bool):
-            bad.append(f"{where}: connected must be true or false")
+        if not (isinstance(c.get("connected", True), bool) or c.get("connected") == "auto"):
+            bad.append(f"{where}: connected must be true, false or \"auto\"")
+        if c.get("connected") == "auto" and c.get("range") is None:
+            bad.append(f"{where}: connected \"auto\" needs an expected range (outside it: not connected)")
         rg = c.get("range")
         if rg is not None and not (isinstance(rg, list) and len(rg) == 2 and all(_num(x) for x in rg) and rg[0] < rg[1]):
             bad.append(f"{where}: range must be [min, max] with min < max")
@@ -133,9 +138,9 @@ def validate_limits(L: dict) -> list:
         for j, r in enumerate(c.get("rules", [])):
             if not isinstance(r, dict):
                 bad.append(f"{where}, rule {j + 1}: not an object"); continue
-            kinds = [k for k in ("at_or_above", "above", "below", "change") if k in r]
+            kinds = [k for k in ("at_or_above", "above", "below", "above_room", "change") if k in r]
             if len(kinds) != 1 or not _num(r[kinds[0]]):
-                bad.append(f"{where}, rule {j + 1}: needs one of at_or_above / above / below / change, with a number")
+                bad.append(f"{where}, rule {j + 1}: needs one of at_or_above / above / below / above_room / change, with a number")
             if r.get("level") not in RULE_LEVELS:
                 bad.append(f"{where}, rule {j + 1}: level must be one of {', '.join(RULE_LEVELS)}")
             if "change" in r and not (_num(r.get("within_s")) and r["within_s"] > 0):
@@ -147,6 +152,12 @@ def validate_limits(L: dict) -> list:
             for mk, mv in (r.get("when") or {}).items():
                 if mk not in modes or mv not in modes[mk].get("choices", []):
                     bad.append(f"{where}, rule {j + 1}: when {mk} = {mv!r} is not a mode")
+    room = L.get("room", [])
+    if not (isinstance(room, list) and all(isinstance(r, str) and r in ids for r in room)):
+        bad.append(f"room: must list inputs by id (it is {room!r})")
+    elif not room and any(isinstance(r, dict) and "above_room" in r for c in L.get("channels", []) if isinstance(c, dict)
+                          and isinstance(c.get("rules", []), list) for r in c.get("rules", [])):
+        bad.append("a rule above the room needs the room temperature's inputs (room)")
     for u in L.get("unused", []):
         if u not in [f"plc.{s}" for s in PLC_INPUTS]:
             bad.append(f"unused: {u!r} is not a PLC input")
@@ -211,6 +222,7 @@ def save_limits(path: str, L: dict, who: str, clock=time.time):
 def rule_text(r: dict) -> str:
     when = "".join(f" (when {k}: {v})" for k, v in (r.get("when") or {}).items())
     if "at_or_above" in r: return f">= {r['at_or_above']}{when}"
+    if "above_room" in r: return f"> room + {r['above_room']}{when}"
     if "above" in r: return f"> {r['above']}{when}"
     if "below" in r: return f"< {r['below']}{when}"
     return f"change >= {r['change']} within {r['within_s'] / 60:g} min{when}"
@@ -259,8 +271,9 @@ def has_safety(channel: dict, modes: dict) -> bool:
     return any(r.get("level") in SAFETY and applies(r, modes) for r in channel.get("rules", []))
 
 
-def evaluate(channel: dict, value, history, modes: dict, now: float, mode_since: dict = None):
-    """(level, reasons) of one channel's value against its rules; history: [(t, value)], oldest first.
+def evaluate(channel: dict, value, history, modes: dict, now: float, mode_since: dict = None, room=None):
+    """(level, reasons) of one channel's value against its rules; history: [(t, value)], oldest first; room: the room
+    temperature (None: unknown, an above_room rule is then said not checked).
     No value on a channel with a safety rule in force is a warning: its alarm cannot go off."""
     if value is None:
         if has_safety(channel, modes):
@@ -279,6 +292,11 @@ def evaluate(channel: dict, value, history, modes: dict, now: float, mode_since:
         if "at_or_above" in r: hit = value >= r["at_or_above"]
         elif "above" in r: hit = value > r["above"]
         elif "below" in r: hit = value < r["below"]
+        elif "above_room" in r:
+            if room is None:
+                why.append(f"{rule_text(r)}: not checked, no room temperature")
+            else:
+                hit = value > room + r["above_room"]
         elif "change" in r:
             since = max([(mode_since or {}).get(k, 0) for k in (r.get("when") or {})] + [0]) or None
             d, span = change_over(history, now, r["within_s"], since)
@@ -287,7 +305,7 @@ def evaluate(channel: dict, value, history, modes: dict, now: float, mode_since:
                 why.append(f"{rule_text(r)}: only {span / 60:.0f} min of history so far"
                            + (f" (change {d:+.3g})" if d is not None else ""))
         if hit:
-            why.append(f"{rule_text(r)} [{r['level']}]")
+            why.append(rule_text(r) + (f" (room {room:.1f})" if "above_room" in r else "") + f" [{r['level']}]")
             if RANK[r["level"]] > RANK[level]:
                 level = r["level"]
     return level, why
@@ -564,12 +582,30 @@ class Monitor:
                         "rosbag2_recorder " + ("up" if up("rosbag2_recorder") else "NOT running: nothing is recorded")))
         return out
 
+    def room_temperature(self, plc):
+        """The mean of the room inputs' readings (limits "room"); None when none reads (open, outside its expected range,
+        not connected, no value)."""
+        vals = []
+        for c in self.limits.get("channels", []):
+            src = c.get("source") or ""
+            if c.get("id") not in self.limits.get("room", []) or not src or c.get("connected") is False:
+                continue
+            raw = (plc or {}).get(src.removeprefix("plc."))
+            if not _num(raw) or (src.startswith("plc.tc") and raw >= TC_OPEN):
+                continue
+            v = raw * c.get("scale", 1) + c.get("offset", 0)
+            rg = c.get("range")
+            if not rg or rg[0] <= v <= rg[1]:
+                vals.append(v)
+        return sum(vals) / len(vals) if vals else None
+
     def channel_items(self, now):
         out = []
         L = self.limits
         modes = L.get("modes", {})
         plc = (self.plc or {}).get("plc") if self.plc_err is None else None
         stale = self.plc_stale(now)
+        room = None if plc is None or stale else self.room_temperature(plc)
         used = set()
         for c in L.get("channels", []):
             src = (c.get("source") or "").removeprefix("plc.")
@@ -587,8 +623,17 @@ class Monitor:
             if c.get("connected") is False:   # marked not plugged in: what it reads means nothing
                 out.append(item(c.get("group") or "Inputs", c["name"], "notice",
                                 "not connected" + (f"; reads {raw:.4g}" if raw is not None else ""),
-                                dict(source=c.get("source"), raw=raw, connected=False, hint="tick \"connected\" on the limits page once it is plugged in")))
+                                dict(source=c.get("source"), raw=raw, connected=False, hint="set \"connected\" on the limits page once it is plugged in")))
                 continue
+            if c.get("connected") == "auto" and raw is not None:   # connected while it reads within its expected range
+                rg, v = c["range"], raw * c.get("scale", 1) + c.get("offset", 0)
+                is_open = src.startswith("tc") and raw >= TC_OPEN
+                if is_open or not (rg[0] <= v <= rg[1]):
+                    out.append(item(c.get("group") or "Inputs", c["name"], "notice",
+                                    "not connected" + ("" if is_open else f"; reads {v:.4g}, outside {rg[0]:g} to {rg[1]:g}"),
+                                    dict(source=c.get("source"), raw=raw, connected="auto",
+                                         hint=f"connected while it reads {rg[0]:g} to {rg[1]:g} (its expected range, limits page)")))
+                    continue
             value = None
             if raw is not None and not (src.startswith("tc") and raw >= TC_OPEN):
                 value = raw * c.get("scale", 1) + c.get("offset", 0)
@@ -598,7 +643,7 @@ class Monitor:
                 while h and now - h[0][0] > keep:
                     h.popleft()
             h = list(self.hist[c["id"]])
-            level, why = evaluate(c, value, h, modes, now, self.mode_since)
+            level, why = evaluate(c, value, h, modes, now, self.mode_since, room)
             # enough decimals that a reading is never shown as a threshold it has not reached (4.96 as "5.0")
             thr = [r[k] for r in c.get("rules", []) for k in ("at_or_above", "above", "below") if k in r]
             dg = lambda v: next((k for k in range(int(c.get('digits', 2)), int(c.get('digits', 2)) + 4)
@@ -627,6 +672,7 @@ class Monitor:
                            rules=[rule_text(r) + f" [{r['level']}]" for r in c.get("rules", [])],
                            history=f"{len(h)} values over {span / 60:.0f} min" + (f", {fmt(rng[0])} to {fmt(rng[1])}" if rng else ""),
                            change={k: v for k, v in ch.items()},
+                           **({"room": None if room is None else round(room, 2)} if any("above_room" in r for r in c.get("rules", [])) else {}),
                            modes={k: m.get("value") for k, m in modes.items()}))
             if ch:   # the page shows it under the value: change over 10 s, 1 min, 10 min (moving averages)
                 d = int(c.get("digits", 2))

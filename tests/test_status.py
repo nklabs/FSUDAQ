@@ -140,23 +140,42 @@ def scenario_rules(tmp):
     src.plc["tc6"] = 20.6; src.plc["tc2"] = 305.4; src.plc["tc0"] = 20.0; clock.t += 2; m.step()
     good &= check(find(m, "Cherenkov", NAME["tc6"])["level"] == "ok" and find(m, "Cherenkov", NAME["tc6"])["text"] == "20.6 °C",
                   f"Cherenkov thermocouple: {find(m, 'Cherenkov', NAME['tc6'])}")
-    # the six tracker thermocouples: one line on the Trackers card; marked not connected = blue whatever they read
+    # the six tracker thermocouples: one line on the Trackers card; "auto": connected while they read 0-100 C, an open
+    # input (3276.7, or its staircase above 100) not connected = blue
     it = find(m, "Trackers", "Tracker temperatures")
-    good &= check(it["level"] == "notice" and it["text"] == "6 not connected" and find(m, "Tracker temperatures", NAME["tc0"]) is None,
+    good &= check(it["level"] == "notice" and it["text"] == "20 °C (1 reading) · 5 not connected" and find(m, "Tracker temperatures", NAME["tc0"]) is None,
                   f"collapsed tracker temperatures: {it}")
-    good &= check(it["details"][NAME["tc2"]].startswith("not connected; reads 305.4") and it["details"][NAME["tc0"]].startswith("not connected"),
-                  f"tracker temperature details: {it['details']}")
-    L2 = copy.deepcopy(m.limits)    # two plugged in: their span on the line; one above 80 C: red, named first
-    for c in L2["channels"]:
-        if c["id"] in ("tc0", "tc1"):
-            c["connected"] = True
-    m.limits = L2
-    src.plc["tc1"] = 23.5; clock.t += 2; m.step()
+    good &= check(it["details"][NAME["tc2"]] == "not connected; reads 305.4, outside 0 to 100" and it["details"][NAME["tc0"]] == "20.0 °C"
+                  and it["details"][NAME["tc4"]] == "not connected", f"tracker temperature details: {it['details']}")
+    src.plc["tc1"] = 23.5; clock.t += 2; m.step()    # two reading: their span on the line
     it = find(m, "Trackers", "Tracker temperatures")
     good &= check(it["level"] == "notice" and it["text"] == "20 to 23.5 °C (2 reading) · 4 not connected", f"two connected (four still blue): {it}")
+    # more than 10 C above the room (tc6 at 20.6; tc7 open, so not in the mean): yellow, named first
+    src.plc["tc1"] = 30.5; clock.t += 2; m.step()
+    it = find(m, "Trackers", "Tracker temperatures")
+    good &= check(it["level"] == "notice", f"30.5 C, room 20.6: {it}")
+    src.plc["tc1"] = 30.7; clock.t += 2; m.step()
+    it = find(m, "Trackers", "Tracker temperatures")
+    good &= check(it["level"] == "warn" and it["text"].startswith(NAME["tc1"] + ": 30.7 °C") and "> room + 10 (room 20.6) [warn]" in it["text"],
+                  f"30.7 C, room 20.6: {it}")
+    src.plc["tc7"] = 22.6; clock.t += 2; m.step()     # both room thermocouples reading: their mean, 21.6
+    it = find(m, "Trackers", "Tracker temperatures")
+    good &= check(it["level"] == "notice", f"30.7 C, room 21.6: {it}")
+    src.plc["tc6"] = src.plc["tc7"] = 3276.7; clock.t += 2; m.step()    # no room temperature: said, raises nothing
+    it = find(m, "Trackers", "Tracker temperatures")
+    good &= check(it["level"] == "notice" and "not checked, no room temperature" in it["details"][NAME["tc1"]], f"no room temperature: {it}")
+    src.plc["tc6"] = 20.6; src.plc["tc7"] = 3276.7
     src.plc["tc1"] = 85.0; clock.t += 2; m.step()
     it = find(m, "Trackers", "Tracker temperatures")
     good &= check(it["level"] == "bad" and it["text"].startswith(NAME["tc1"] + ": 85.0 °C"), f"a tracker at 85 C: {it}")
+    src.plc["tc1"] = 113.7; clock.t += 2; m.step()   # above the expected range: read as the open input's staircase
+    it = find(m, "Trackers", "Tracker temperatures")
+    good &= check(it["level"] == "notice" and it["text"] == "20 °C (1 reading) · 5 not connected", f"a tracker reading 113.7: {it}")
+    L2 = copy.deepcopy(m.limits)    # marked not connected: blue whatever it reads, as before "auto"
+    next(c for c in L2["channels"] if c["id"] == "tc0")["connected"] = False
+    m.limits = L2; clock.t += 2; m.step()
+    it = find(m, "Trackers", "Tracker temperatures")
+    good &= check(it["text"] == "6 not connected" and it["details"][NAME["tc0"]] == "not connected; reads 20", f"tc0 marked not connected: {it}")
     src.plc["tc1"] = 3276.7
     src.plc["tc6"] = 80.0; clock.t += 2; m.step()
     good &= check(find(m, "Cherenkov", NAME["tc6"])["level"] == "ok", f"80.0 C: {find(m, 'Cherenkov', NAME['tc6'])}")
@@ -367,7 +386,11 @@ def scenario_limits_api(tmp):
                        ("plc_stale_s blank", lambda X: X["daq"].update(plc_stale_s=None)),
                        ("no name", lambda X: X["channels"][1].update(name="")),
                        ("a rule as text", lambda X: X["channels"][1]["rules"].append("above 3")),
-                       ("when as text", lambda X: X["channels"][1]["rules"].append({"above": 3, "level": "warn", "when": "full"}))):
+                       ("when as text", lambda X: X["channels"][1]["rules"].append({"above": 3, "level": "warn", "when": "full"})),
+                       ("connected maybe", lambda X: X["channels"][1].update(connected="maybe")),
+                       ("auto without a range", lambda X: (X["channels"][1].update(connected="auto"), X["channels"][1].pop("range"))),
+                       ("room an unknown input", lambda X: X.update(room=["tc9"])),
+                       ("above the room, no room", lambda X: X.update(room=[]))):
         X = copy.deepcopy(L); edit(X)
         code, d = post(X)
         good &= check(code == 400, f"{what}: {code} {d}")
