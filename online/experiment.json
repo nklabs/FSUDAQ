@@ -1,5 +1,5 @@
 {
-  "_comment": "The rack at PSI (Oct 2026): boards in FSUDAQ's boardOrder, tracker channels in sequence over them, Cherenkov on Digi-1443 ch6-7. Read by online_dashboard.py at every new run; see experiment.example.json.",
+  "_comment": "The rack at PSI (Oct 2026): boards in FSUDAQ's boardOrder, Cherenkov on Digi-1443 ch6 and Digi-15880 ch15, RF on Digi-62839 ch15. Tracker channels in patch-panel (BNC) order, which for the 8-channel boards is 1399, 30505, 30508, 1443 (T2 17-46), not their link order; since 3 Nov 2026 15880 ch8-15 are swapped with the last channel of each other board (BNC008-015 with BNC031/047/062/079/087/103/095/111). cabling.csv is written by write_cabling.py's rules. Read by online_dashboard.py at every new run; see experiment.example.json.",
   "cabling": "cabling.csv",
   "window_ns": 25.0,
   "time_offsets": "time_offsets_pulser.csv",
