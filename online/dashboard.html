@@ -1020,7 +1020,8 @@ function drawRft(){
   else plotHeat('c_rft_q', Object.assign({counts:turn(have[0].P.counts), color:PLANE_COLOR[have[0].p], ylabel:'Qlong (ADC)'}, axes));
   const series = have.map(({p,P})=>{ const y = turn(P.counts).map(colSum), tot = P.n || 1;
     return {kind:'step', edges, y: norm ? y.map(v=>v/tot) : y, color:PLANE_COLOR[p]}; });
-  plot('c_rft_t', {x0, x1, series, ylabel: norm ? 'share of the plane\'s hits / bin' : 'hits / bin', xfmt:v=>sinum(v)+' ns', nxt, marks,
+  const VT = VW.c_rft_t || {};   // y only: an x set by hand earlier (kept in the browser) would not follow the heat map
+  plot('c_rft_t', {x0, x1, view:{y0:VT.y0, y1:VT.y1}, series, ylabel: norm ? 'share of the plane\'s hits / bin' : 'hits / bin', xfmt:v=>sinum(v)+' ns', nxt, marks,
                    ylog:document.getElementById('rft_log').checked});
   legend('leg_rft_t', split ? have.map(({p})=>({name:'T'+p, color:PLANE_COLOR[p]})) : []);
   drawRftAlign(split ? [0,1,2] : [+sel]);
@@ -1361,7 +1362,8 @@ applyLayout(store.get(LAYOUT_KEY, {}));
 const VW_PLOTS = ['c_chan','c_total','c_q','c_iat','c_dt','c_crate','c_spec','c_status','c_p','c_res','c_r','c_occ','c_cl','c_ncand','c_nh','c_rft_t',
   'c_sum_chan','c_sum_rate','c_sum_status','c_sum_p','c_sum_res','c_sum_r','c_sum_occ','c_sum_cl','c_sum_ncand','c_sum_nh'];
 const VW_FOLLOW = new Set(['c_total','c_crate','c_status']);   // live time charts: the wheel changes how much of the newest they show
-const VW_YONLY = new Set(['c_q']);
+// the RF time-of-flight marginal: its x is the heat map's (one or two periods, centred as it is), only its y here
+const VW_YONLY = new Set(['c_q', 'c_rft_t']);
 const VW_HELP = 'click the plot, then: wheel zooms x · shift+wheel zooms y · drag across zooms into that span · over an axis, ' +
   'the wheel zooms it and dragging moves it · double-click: automatic again';
 function vwSet(id, r){
