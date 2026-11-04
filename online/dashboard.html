@@ -35,6 +35,13 @@
   .tiles { display:flex; gap:22px; flex-wrap:wrap; margin-bottom:10px; }
   .tile small { display:block; color:var(--muted); }
   .tile { min-width:calc(120px * var(--k, 1)); } .tile .big { display:inline-block; min-width:6ch; }   /* a number that grows does not push the tiles beside it */
+  /* Clear accumulated: at the right end of the top row, the same place on every tab (room kept for the scrollbar,
+     so a tab short enough to have none does not move it) */
+  html { scrollbar-gutter:stable; }
+  .tile.cleartile { margin-left:auto; text-align:right; max-width:calc(340px * var(--k, 1)); }
+  #btn_clear { font:600 calc(15px * var(--k, 1)) system-ui, sans-serif; padding:calc(7px * var(--k, 1)) calc(20px * var(--k, 1)); border:1px solid var(--muted);
+               border-radius:6px; background:var(--card); color:var(--fg); cursor:pointer; }
+  #btn_clear:hover { border-color:var(--fg); } #btn_clear:disabled { opacity:.45; cursor:default; }
   .warn { color:var(--heavy); font-weight:600; }
   .big.good { color:var(--good); }
   .warnbox { border:1px solid var(--heavy); border-radius:6px; padding:6px 10px; margin:0 0 10px; background:var(--card); }
@@ -142,6 +149,8 @@
   <div class="tile"><span class="big" id="t_mb">–</span><small>MB / s written</small></div>
   <div class="tile"><span class="big" id="t_gb">–</span><small>this run, GB in files</small></div>
   <div class="tile"><span class="big" id="t_disk">–</span><small>disk free</small></div>
+  <div class="tile cleartile"><button id="btn_clear" class="clear-btn" title="Start the accumulated counts and histograms (every tab) again from now">Clear accumulated</button>
+    <small id="clear_note" class="clear-note"></small></div>
 </div>
 <div class="tabs"><button data-tab="daq" class="on">DAQ channels</button><button data-tab="trk">Tracker (track finder)</button><button data-tab="bvm">Beam vs map</button><button data-tab="rft">RF timing</button></div>
 
@@ -149,8 +158,6 @@
   <div class="toolbar">
     <span>Channel <select id="sel_ch"></select></span>
     <span>Timing reference <select id="sel_ref"></select></span>
-    <button id="btn_clear" title="Start the accumulated counts and histograms (both tabs) again from now">Clear accumulated</button>
-    <span id="clear_note"></span>
   </div>
   <div class="grid" data-grid="daq">
     <div class="card wfull"><h2>Hits per digitizer channel</h2>
@@ -482,19 +489,22 @@ async function applyWindow(){
   catch(e){ winNote.textContent = 'not applied: no answer from the dashboard'; }
   winNote.style.color = r && r.ok ? '' : 'var(--heavy)';
   winIn.dataset.edited = '';
-  if(r && r.ok){ document.getElementById('clear_note').textContent = 'cleared at '+new Date().toLocaleTimeString()+' (bunch window changed)'; await tick(); fetchChannel(); }
+  if(r && r.ok){ clearNote('cleared at '+new Date().toLocaleTimeString()+' (bunch window changed)'); await tick(); fetchChannel(); }
 }
 document.getElementById('win_apply').onclick = applyWindow;
 winIn.oninput = ()=>{ winIn.dataset.edited = '1'; };
 winIn.onkeydown = e=>{ if(e.key==='Enter') applyWindow(); };
-document.getElementById('btn_clear').onclick = async ()=>{
-  const note = document.getElementById('clear_note');
+// the note beside every tab's Clear button: text, or html (a warning)
+function clearNote(text, html){ document.querySelectorAll('.clear-note').forEach(n=>{ if(html) n.innerHTML = html; else n.textContent = text; }); }
+async function clearAccumulated(){
   let res = null; try { res = await fetch('/clear', {cache:'no-store'}); } catch(e){}
   if(!res || !res.ok){   // say so: a refused Clear that said "cleared" looked like a broken one
-    note.innerHTML = warn(res && res.status===403 ? 'not cleared: view only here (Clear works on odin, the counting room PC or through the ssh tunnel, ssh -N FSUDAQ-dash)' : 'not cleared: the dashboard did not answer');
+    clearNote('', warn(res && res.status===403 ? 'not cleared: view only here (Clear works on odin, the counting room PC or through the ssh tunnel, ssh -N FSUDAQ-dash)' : 'not cleared: the dashboard did not answer'));
     return; }
-  note.textContent = 'cleared at '+new Date().toLocaleTimeString()+': counts, histograms and rates start again';
-  await tick(); fetchChannel(); };
+  clearNote('cleared at '+new Date().toLocaleTimeString()+': counts, histograms and rates start again');
+  await tick(); fetchChannel();
+  if(tab==='rft') fetchRft(); else if(tab==='bvm') fetchBvm(); }   // the tab in view, at once rather than at its next poll
+document.querySelectorAll('.clear-btn').forEach(b=>{ b.onclick = clearAccumulated; });
 ['occ_mode','occ_log','q_log','dt_log','spec_which','grid_log','grid_own'].forEach(id=>document.getElementById(id).onchange=()=>{ if(id==='spec_which') fetchChannel(); else draw(); });
 document.getElementById('occ_group').value = store.get('fsudaq-occ-group', 'det');
 document.getElementById('occ_group').onchange = e=>{ store.set('fsudaq-occ-group', e.target.value); draw(); };
@@ -510,11 +520,12 @@ async function tick(){
   if(S && !(r.server_time > S.server_time)) return;   // an older answer that came late: never over a newer one
   if(r.can_control===false && !document.body.classList.contains('viewonly')){   // another machine: look, not steer
     document.body.classList.add('viewonly');
-    ['sel_ref','btn_clear','win_ns','win_apply'].forEach(id=>{ const e=document.getElementById(id); e.disabled=true; e.title='view only: changed on odin, the counting room PC or through the ssh tunnel'; });
-    document.getElementById('clear_note').textContent = 'view only on this machine: Clear and the settings work on odin, the counting room PC (experiment.json control_hosts) or through the ssh tunnel (ssh -N FSUDAQ-dash, then http://localhost:8050)'; }
+    [...['sel_ref','win_ns','win_apply'].map(id=>document.getElementById(id)), ...document.querySelectorAll('.clear-btn')].forEach(e=>{ e.disabled=true; e.title='view only: changed on odin, the counting room PC or through the ssh tunnel'; });
+    clearNote('view only here: Clear works on odin, the counting room PC or through the ssh tunnel');
+    document.querySelector('.cleartile').title = 'view only on this machine: Clear and the settings work on odin, the counting room PC (experiment.json control_hosts) or through the ssh tunnel (ssh -N FSUDAQ-dash, then http://localhost:8050)'; }
   const newRun = S && r.folder!==S.folder;
   if(newRun){   // another run: nothing cleared in it yet, and no histogram of the one before stays up under its name
-    if(!document.body.classList.contains('viewonly')) document.getElementById('clear_note').textContent = '';
+    if(!document.body.classList.contains('viewonly')) clearNote('');
     CH = SPEC_ALL = GRID = CMPD = null; BYTES = []; }
   // MB/s over ~10 s: the size is taken when the analysis reads the files, not when the page asks, so two
   // answers 1 s apart could show the same size (0 MB/s) and then two steps' growth (twice the rate)
