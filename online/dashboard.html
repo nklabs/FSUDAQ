@@ -258,7 +258,6 @@
   <div class="toolbar">
     <span title="One tracker plane or the gas Cherenkov (its two PMTs together), or all four stacked (on one turn of the period, so their times compare)">Plane <select id="rft_plane"><option value="0">T0</option><option value="1">T1</option><option value="2">T2</option><option value="3">Cherenkov</option><option value="all">T0 · T1 · T2 · Cherenkov split</option></select></span>
     <label title="Split: each plane's (and the Cherenkov's) histogram as a share of its own hits, so their shapes compare"><input type="checkbox" id="rft_norm"> each plane to its own total</label>
-    <label title="Shift each tracker channel so its beam peak meets that of its plane's busiest channel, from this reading's own hits (the boards' channels disagree by up to ~9 ns); the two Cherenkov PMTs are not shifted"><input type="checkbox" id="rft_align" checked> align channels on the beam</label>
     <label title="Turn the period so the most-populated time bin is in the middle; the axis then counts from it"><input type="checkbox" id="rft_center" checked> centre on the peak</label>
     <span title="The same period drawn once, or twice side by side, so what lies across its ends is seen whole">Show <select id="rft_np"><option value="1">1 period</option><option value="2">2 periods</option></select></span>
     <label title="Log scale for the time-of-flight histogram (all charges): the floor and the tails"><input type="checkbox" id="rft_log"> log scale</label>
@@ -276,8 +275,8 @@
     <div class="card w2"><h2>Cherenkov timing: t(T1 hit) − t(Cherenkov hit), after this run's LED timing</h2><canvas id="c_rft_cdt"></canvas><div class="legend" id="leg_rft_cdt"></div>
       <table id="t_rft_ctime"></table>
       <div class="note" id="note_rft_cdt">Every T1 hit against every hit of each PMT within ±60 ns. The LED flashes light the T1 strips (not the PMTs): each T1 channel's time in them, and the lit T1 channels on the PMT's own board half, take out the boards' whole 4–16 ns jumps between runs. What remains is the PMT's own delay (cable, transit time, light path), set in the analysis per PMT and measured once from a beam run with LED flashes; it moves with the PMT's HV. Dashed: the coincidence window, −10 to +25 ns about that delay (wide for the leading edge's walk: bigger pulses are earlier). A run without LED flashes, or before they are read, places each T1 board half on its own beam peak instead ("beam").</div></div>
-    <div class="card w2"><h2>Channel alignment on the beam: each board's shift, by plane (and the Cherenkov's PMTs)</h2><table id="t_rft_align"></table>
-      <div class="note" id="note_rft_align">Each tracker channel's beam peak (the mode of its time profile, smoothed over 0.5 ns) is moved onto that of its plane's busiest channel, in 99-ps steps and modulo the RF period, from this reading's own hits. Shift = what was subtracted; shifts near +9.9 and −9.9 ns are close to each other (the period wraps). The gas Cherenkov's two PMTs are summed as recorded, not shifted (much of their rate is dark counts, with no beam peak to align on); their Qlong has its own axis (0–512 ADC: far less charge than the tracker's; overflows in the top bin).</div></div>
+    <div class="card w2"><h2>Channel alignment on the LED: each board's shift, by plane (and the Cherenkov's PMTs)</h2><table id="t_rft_align"></table>
+      <div class="note" id="note_rft_align">Each run's LED flashes (1–3 s after Start) light many T1 channels at once; each lit channel's LED time is the peak of its time in the flashes against each flash's reference (the median on the lower half of the board with the most T1 channels). A board's start differs by 4–16 ns from run to run and moves all its channels alike (the cabling is the same for every channel), so every channel is shifted, in 99-ps steps and modulo the RF period, by an LED time less the median of the lit channels': its own when the LED reaches it, else the median of the lit channels on its board half (its board's start offset), else on the other half of its board (some boards' halves differ by a fixed ~8 ns, then left in: T0 on 15880 ch0–7, T2 on 65316 ch0–7). The real flight time between the planes is kept. Shift = what was subtracted. From this run's flashes; Clear keeps them. The gas Cherenkov's two PMTs are summed; their Qlong has its own axis (0–512 ADC: far less charge than the tracker's; overflows in the top bin).</div></div>
   </div>
 </section>
 
@@ -955,9 +954,9 @@ function drawTrk(){
 let RFT = null, rftSeq = 0;
 async function fetchRft(){
   const my = ++rftSeq; let d = null;
-  try { const r = await fetch('/rftof?align=' + (document.getElementById('rft_align').checked ? 1 : 0), {cache:'no-store'}); if(r.ok) d = await r.json(); } catch(e){}
+  try { const r = await fetch('/rftof?align=1', {cache:'no-store'}); if(r.ok) d = await r.json(); } catch(e){}
   let t = null;
-  try { const r = await fetch('/rftag?align=' + (document.getElementById('rft_align').checked ? 1 : 0), {cache:'no-store'}); if(r.ok) t = await r.json(); } catch(e){}
+  try { const r = await fetch('/rftag?align=1', {cache:'no-store'}); if(r.ok) t = await r.json(); } catch(e){}
   if(my !== rftSeq) return;
   RFT = d || {error:'no answer from the dashboard (an analysis older than this page has no RF timing)'};
   RTAG = t || {error:'no Cherenkov tag fraction from the dashboard (an analysis older than this page)'};
@@ -1023,8 +1022,6 @@ function drawRftTag(){
 document.getElementById('rft_plane').value = String(store.get('fsudaq-rft-plane', 0));
 document.getElementById('rft_plane').onchange = e=>{ store.set('fsudaq-rft-plane', e.target.value); draw(); };
 document.getElementById('rft_norm').checked = store.get('fsudaq-rft-norm', false);
-document.getElementById('rft_align').checked = store.get('fsudaq-rft-align', true);
-document.getElementById('rft_align').onchange = e=>{ store.set('fsudaq-rft-align', e.target.checked); fetchRft(); };
 document.getElementById('rft_norm').onchange = e=>{ store.set('fsudaq-rft-norm', e.target.checked); draw(); };
 document.getElementById('rft_center').checked = store.get('fsudaq-rft-center', true);
 document.getElementById('rft_center').onchange = e=>{ store.set('fsudaq-rft-center', e.target.checked); draw(); };
@@ -1120,28 +1117,27 @@ function drawRft(){
 // the shifts the alignment applied: per plane and board, the median and range of its channels'
 function drawRftAlign(planes){
   const t = document.getElementById('t_rft_align'), A = RFT && RFT.align;
-  if(!A){ t.innerHTML = `<tr><td>${document.getElementById('rft_align').checked ? 'not aligned: this analysis is older than the page' : 'alignment off'}</td></tr>`; return; }
+  if(!A){ t.innerHTML = `<tr><td>not aligned: this analysis is older than the page</td></tr>`; return; }
+  if(A.method !== 'led'){ t.innerHTML = '<tr><td>not aligned on the LED: this analysis is older than the page</td></tr>'; return; }
   const f = v => (v>=0?'+':'') + v.toFixed(2);
-  const rows = [];
+  const rows = [`<tr><th colspan="4">${A.flashes ? `${sinum(A.flashes)} LED flashes in this reading` : 'no LED flashes in this reading yet: nothing shifted (the LED fires 1–3 s after Start, with the LED trigger on)'}</th></tr>`];
   for(const p of planes){
     const C = A.channels.filter(c=>c.plane===p); if(!C.length) continue;
-    if(p===3){   // the Cherenkov: its two PMTs, one row each, summed as recorded
-      rows.push(`<tr><th colspan="4">Cherenkov · its PMTs summed as recorded, not shifted</th></tr>`);
-      for(const c of C) rows.push(`<tr><td>${sw(BOARD_COLOR[boardIndex(c.board)%BOARD_COLOR.length])}Digi-${c.board} ch${c.ch}</td><td>${sinum(c.n)} hits</td><td></td><td></td></tr>`);
-      continue;
-    }
-    const ref = A.ref['T'+p];
-    rows.push(`<tr><th colspan="4">T${p}${ref ? ` · reference Digi-${ref.board} ch${ref.ch} (${esc(ref.role)})` : ' · no channel with enough hits yet'}</th></tr>`);
+    const k = C.filter(c=>c.shift_ns!=null).length, nl = C.filter(c=>c.how==='led').length;
+    rows.push(`<tr><th colspan="4">${RFT_NAME(p)} · ${k} of ${C.length} channel${C.length>1?'s':''} shifted${nl ? ` (${nl} by their own LED time)` : ''}</th></tr>`);
     // by board and half: the upper eight channels of some boards are ~8 ns off their lower eight
     for(const key of [...new Set(C.map(c=>c.board+'|'+(c.ch<8?0:1)))]){
       const [sn, hi] = key.split('|').map(Number);
       const B = C.filter(c=>c.board===sn && (c.ch<8?0:1)===hi), S_ = B.filter(c=>c.shift_ns!=null).map(c=>c.shift_ns).sort((a,b)=>a-b), low = B.length - S_.length;
       const med = S_.length ? S_[Math.floor(S_.length/2)] : null;
+      // how: own LED time, the board half's start offset (its lit T1 channels), or the other half's (half difference left in)
+      const by = h => B.filter(c=>c.how===h).length, src = [[by('led'), 'own LED'], [by('half'), 'this half\'s LED'], [by('board'), 'other half\'s LED (half difference not taken out)']]
+        .filter(x=>x[0]).map(x=>`${x[0]} ${x[1]}`).join(', ');
       rows.push(`<tr><td>${sw(BOARD_COLOR[boardIndex(sn)%BOARD_COLOR.length])}Digi-${sn} ${hi ? 'ch8–15' : 'ch0–7'}</td><td>${B.length} ch</td>`
-        + `<td>${med==null ? '–' : `median ${f(med)} ns`}</td><td>${S_.length ? `${f(S_[0])} … ${f(S_[S_.length-1])} ns` : ''}${low ? ` · ${low} with &lt;${A.min_hits} hits, not shifted` : ''}</td></tr>`);
+        + `<td>${med==null ? '–' : `median ${f(med)} ns`}</td><td>${src}${low ? `${src ? ' · ' : ''}${low} not shifted (no lit channel on this board)` : ''}</td></tr>`);
     }
   }
-  t.innerHTML = rows.join('') || '<tr><td>no tracker or Cherenkov channel has hits with an RF phase yet</td></tr>';
+  t.innerHTML = rows.join('');
 }
 
 // ---------------------------------------------------------------- beam vs map: the floor tool's published expectation (GET /expected)

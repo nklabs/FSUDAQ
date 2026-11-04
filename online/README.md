@@ -79,15 +79,19 @@ cable offsets removed, as in the finder, so zero is the RF reference's own phase
 (higher: the top bin), 100 time bins (198 ps). Counts since the reading began or the last Clear.
 `GET /rftof` (read-only, for anyone) returns them; the tab asks for it every 3 s while it is open.
 
-**align channels on the beam** (on by default): the boards' channels disagree by up to ~9 ns, stable within a
-session (3 Nov 2026: the upper eight channels of 15879, 58918 and 62839 ~8 ns early against their lower eight, seen
-alike in the beam and in the LED flashes; the pulser offsets of 30 Oct no longer describe the boards). The analysis
-keeps each tracker channel's TOF x Qlong at 99 ps, and `GET /rftof?align=1` shifts each channel with at least
-`RFTOF_ALIGN_MIN` (500) hits so its beam peak (the mode of its time profile smoothed over 0.5 ns) meets that of its
-plane's busiest channel, modulo the period, before the plane is summed: from this reading's own hits, so a restart
-that moves the boards is followed. It makes every strip of a plane peak at the same time (a real strip-to-strip
-difference would be hidden) and changes only this tab, not the finder. The table under the plots lists the shifts per
-board and half (ch0-7, ch8-15).
+**Alignment on the LED** (always on): the boards' channels disagree by up to ~20 ns. A board's start differs by
+4-16 ns from run to run (in 4-ns steps) and moves all its channels alike; within a board, the upper eight channels of
+15879, 58918 and 62839 sit a fixed ~8 ns early against their lower eight (the same in every LED run of 3-4 Nov 2026);
+the cabling is the same for every channel; the pulser offsets of 30 Oct no longer describe the boards. FSUDAQ's LED
+trigger fires the LED 1-3 s after each Start, and a flash lights many T1 channels at once; each lit channel's LED time
+is taken from them as for the Cherenkov tag (below: `led_offsets`). `GET /rftof?align=1` (the page always asks for it)
+shifts every channel, modulo the period, by an LED time less the median of the lit channels': its own when the LED
+reaches it (in at least `LED_MIN_FLASHES` flashes); else its board's start offset, the median LED time of the lit
+channels on its board half; else on the other half of its board, the fixed half difference then left in (T0 on 15880
+ch0-7 and T2 on 65316 ch0-7 have no lit channel on their half). Every board has a lit T1 channel. So T0, T2 and the
+PMTs follow their board's start every run, and the real flight time between the planes is kept (no plane is moved
+onto another). From this run's own flashes; Clear keeps them. It changes only this tab, not the finder. The table
+under the plots gives the flashes and, per board and half (ch0-7, ch8-15), the shifts and how each was found.
 
 **Gas Cherenkov tag fraction** (4 Nov 2026): per bin of the T1 hit's RF phase (the same turn of the period as the
 plots above, T1's channels aligned alike), the T1 hits with a hit of either Cherenkov PMT (cabling kind `cherenkov`)

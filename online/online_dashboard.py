@@ -256,11 +256,10 @@ RFTOF_QMAX_C = 512
 RFTOF_GROUPS = ("T0", "T1", "T2", "Cherenkov")
 RFTOF_CHER = 3
 COUNTER_CHER = ff.COUNTERS.index("cherenkov")
-# aligned on the beam: the boards' channels disagree by up to ~9 ns, stable within a session (the upper eight
-# channels of 15879, 58918 and 62839 ~8 ns early; 3 Nov 2026), so each tracker channel is shifted until its beam
-# peak meets that of its plane's busiest channel, from this reading's own hits once it has RFTOF_ALIGN_MIN of them
-RFTOF_ALIGN_MIN = 500
-RFTOF_SMOOTH_NS = 0.5                           # a channel's peak: the mode of its time profile smoothed over this
+# aligned on the LED (GET /rftof?align=1): the boards' channels disagree by up to ~20 ns and move between runs (the
+# upper eight channels of 15879, 58918 and 62839 ~8 ns early; whole boards 4-16 ns). Each channel the run's LED flashes
+# reach (LED_MIN_FLASHES, led_offsets) is shifted by its LED time less the median of those channels': one time frame
+# for all of them, across the boards and planes. The rest (4 Nov 2026: T0, T2, the PMTs) keep their recorded times.
 # The RF timing tab's gas Cherenkov tag fraction (4 Nov 2026): the T1 hits with a hit of either Cherenkov PMT near
 # them, over all T1 hits, against the T1 hit's RF phase. The isobutane radiator fires for electrons only (muons and
 # pions are far below its threshold), so at the electron phase it is the Cherenkov's electron efficiency, at the
@@ -698,6 +697,19 @@ def rftof_hist(tc, slot, e, group, rf_slot, t0, t1):
     qi = np.minimum(np.asarray(e[trk], np.int64) * RFTOF_NQ // qmax, RFTOF_NQ - 1)
     cells, counts = np.unique((np.asarray(slot[trk], np.int64) * ntf + ti) * RFTOF_NQ + qi, return_counts=True)
     return (cells, counts.astype(np.int64)), 0
+
+
+def led_offsets(L):
+    """Each channel's LED time (ns, to the flashes' reference) from its histogram of times in the flashes (rows of
+    L: slots x LED_NB): the peak (smoothed over 5 bins), then the mean within +-1.5 ns of it; for the channels in at
+    least LED_MIN_FLASHES flashes. {slot: ns}. The Cherenkov tag timing (cher_view) takes the same."""
+    dl = (np.arange(LED_NB) + 0.5) * LED_BIN_NS - LED_RANGE_NS
+    off = {}
+    for s in np.flatnonzero(L.sum(axis=1) >= LED_MIN_FLASHES):
+        h = L[s]
+        m = int(np.convolve(h, np.ones(5), "same").argmax()); w = np.abs(dl - dl[m]) < 1.5
+        off[int(s)] = float((h[w] * dl[w]).sum() / max(h[w].sum(), 1))
+    return off
 
 
 def cher_index(chans):
@@ -1905,29 +1917,44 @@ class Online:
     def rftof_view(self, align=False):
         """GET /rftof: the RF timing tab's TOF modulo the RF against Qlong, per group with hits (tracker plane, or the
         gas Cherenkov: RFTOF_GROUPS), since the reading began (or Clear). Apart from /state: it is large and only the
-        tab asks for it. align: each tracker channel with RFTOF_ALIGN_MIN hits shifted (in 99-ps steps, modulo the
-        period) so its beam peak meets that of its plane's busiest channel; the shifts are returned with the planes.
-        The Cherenkov's PMTs are summed as recorded (time offsets removed), never shifted."""
+        tab asks for it. align: every channel shifted (in 99-ps steps, modulo the period) by an LED time less the median
+        of the lit channels' (led_offsets): its own when the run's LED flashes reach it ("led"); else its board's start
+        offset, the median LED time of the lit channels on its board half ("half"), else on the other half of its board
+        ("board": the fixed difference between the halves, ~8 ns on some boards, is then left in). A board start
+        differs by 4-16 ns between runs and moves all its channels alike; the cabling is the same for all channels.
+        Channels on a board with no lit channel are not shifted. The shifts are returned with the groups."""
         with self.lock:
             ch = self.setup.chans
             if ch.rf_slot is None:
                 return dict(rf=None, note="no RF reference in the cabling: give its digitizer channel kind rf")
             H = self.rftof.copy(); none = int(self.rftof_none); rf_hits = int(self.run_counts[ch.rf_slot])
+            L = self.led_hist.reshape(ch.n_slots, LED_NB).copy(); nfl = int(self.led_flashes)
             labels = {sl: self.labels[sl] for sl in self.slots}
         b, c = divmod(ch.rf_slot, ch.board_channels)
         per = 1e9 / RFTOF_HZ; ntf = H.shape[1]
         plane_of = rftof_group(ch).reshape(-1)                  # the group (tracker plane or Cherenkov) of each slot
         prof = H.sum(axis=2); n = prof.sum(axis=1)               # per channel: its time profile, its hits
-        shift = np.zeros(len(n), np.int64); refs = {}
-        if align:
-            k = max(1, int(round(RFTOF_SMOOTH_NS / (per / ntf)))) // 2
-            sm = sum(np.roll(prof, j, axis=1) for j in range(-k, k + 1))
-            peak = sm.argmax(axis=1)
-            for p in range(3):          # the tracker planes; the Cherenkov's PMTs as recorded (much of it dark counts: no beam peak to align on)
-                sl = np.flatnonzero((plane_of == p) & (n >= RFTOF_ALIGN_MIN))
-                if sl.size:
-                    r = int(sl[np.argmax(n[sl])]); refs[p] = r
-                    shift[sl] = (peak[sl] - peak[r] + ntf // 2) % ntf - ntf // 2
+        shift = np.zeros(len(n), np.int64)
+        off = {s: o for s, o in led_offsets(L).items() if plane_of[s] >= 0}     # the channels the LED reaches
+        bc = ch.board_channels
+        halves = {}                                              # (board, upper half): its lit channels' LED times
+        for s, o in off.items():
+            halves.setdefault((s // bc, s % bc >= 8), []).append(o)
+        halves = {k: float(np.median(v)) for k, v in halves.items()}
+        how = {}                                                 # slot: how its shift was found
+        if align and off:
+            ref = float(np.median(list(off.values())))
+            for s in np.flatnonzero(plane_of >= 0):
+                s = int(s); k = (s // bc, s % bc >= 8)
+                if s in off:
+                    o, how[s] = off[s], "led"
+                elif k in halves:
+                    o, how[s] = halves[k], "half"
+                elif (k[0], not k[1]) in halves:
+                    o, how[s] = halves[(k[0], not k[1])], "board"
+                else:
+                    continue
+                shift[s] = int(round((o - ref) / (per / ntf)))
         planes = []
         for p in range(len(RFTOF_GROUPS)):
             sl = np.flatnonzero((plane_of == p) & (n > 0))
@@ -1942,10 +1969,9 @@ class Online:
         out = dict(rf=dict(serial=self.serials[b], ch=int(c)), period_ns=per, nt=RFTOF_NT, nq=RFTOF_NQ,
                    qmax=RFTOF_QMAX, rf_hits=rf_hits, no_phase=none, planes=planes)
         if align:
-            out["align"] = dict(min_hits=RFTOF_ALIGN_MIN, step_ns=per / ntf,
-                                ref={RFTOF_GROUPS[p]: dict(slot=r, **labels[r]) for p, r in refs.items()},
-                                channels=[dict(slot=int(s), **labels[s], plane=int(plane_of[s]), n=int(n[s]),
-                                               shift_ns=round(float(shift[s]) * per / ntf, 3) if n[s] >= RFTOF_ALIGN_MIN and plane_of[s] < RFTOF_CHER else None)
+            out["align"] = dict(method="led", boards=True, flashes=nfl, min_hits=LED_MIN_FLASHES, step_ns=per / ntf,
+                                channels=[dict(slot=int(s), **labels[s], plane=int(plane_of[s]), n=int(n[s]), led=int(L[s].sum()),
+                                               how=how.get(s), shift_ns=round(float(shift[s]) * per / ntf, 3) if s in how else None)
                                           for s in sorted(labels) if plane_of[s] >= 0])
         return out
 
