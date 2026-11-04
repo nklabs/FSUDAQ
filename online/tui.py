@@ -19,6 +19,9 @@ import curses
 import json
 import locale
 import math
+import os
+import re
+import signal
 import sys
 import threading
 import time
@@ -31,6 +34,16 @@ SORTS = ("slot", "rate", "count", "role", "board")
 
 
 # ---------------------------------------------------------------- formatting
+
+_CTRL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def clean(text):
+    """Text safe to put on the terminal: no control bytes. An escape sequence in a server string
+    (a log line with colours, an HTML error page) would otherwise show as ^[[..m junk or, printed raw,
+    change the terminal's modes."""
+    return _CTRL.sub("·", str(text))
+
 
 def si(x, digits=3):
     """1234567 -> '1.23M'; None -> '–'."""
@@ -1185,7 +1198,17 @@ def footer(ui, fetch, width):
 
 def get_json(url):
     with urllib.request.urlopen(url, timeout=5) as r:
-        return json.load(r)
+        body = r.read()
+        kind = r.headers.get("Content-Type", "")
+    try:
+        return json.loads(body)
+    except ValueError:  # an HTML error page or a cut-off reply: say so, never show the body
+        raise ValueError(f"not JSON from {url.split('?')[0].rsplit('/', 1)[-1] or '/'} "
+                         f"({kind or 'no type'}, {len(body)} bytes)") from None
+
+
+def err_text(e, n=80):
+    return clean(getattr(e, "reason", None) or e or type(e).__name__)[:n]
 
 
 class Poller(threading.Thread):
@@ -1207,7 +1230,7 @@ class Poller(threading.Thread):
                 self.state, self.info = st, {"at": time.time(), "ms": 1e3 * (time.time() - t)}
         except Exception as e:  # keep showing the last good state, say why it is stale
             with self.lock:
-                self.info = dict(self.info, error=str(getattr(e, "reason", e))[:80])
+                self.info = dict(self.info, error=err_text(e))
         self.fetch_chan()
         self.fetch_extra()
 
@@ -1228,7 +1251,7 @@ class Poller(threading.Thread):
             else:
                 val = dict(tof=get_json(self.base + "/rftof?align=1"), tag=get_json(self.base + "/rftag?align=1"))
         except Exception as e:
-            val = None if key == "tv" else dict((self.extra.get("rf") or {}), error=f"RF timing: {getattr(e, 'reason', e)}")
+            val = None if key == "tv" else dict((self.extra.get("rf") or {}), error=f"RF timing: {err_text(e)}")
         with self.lock:
             self.extra[key] = val
 
@@ -1303,7 +1326,7 @@ def draw(scr, rows, pairs, width):
         for text, style in segs:
             if x >= width:
                 break
-            text = text[:width - x]
+            text = clean(text)[:width - x]
             try:
                 scr.addstr(y, x, text, pairs.get(style, 0))
             except curses.error:   # the bottom-right cell
@@ -1425,7 +1448,10 @@ def handle_key(ch, ui, poller):
 
 
 def main_curses(scr, url, ui):
-    curses.curs_set(0)
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
     curses.set_escdelay(25) if hasattr(curses, "set_escdelay") else None
     scr.timeout(200)
     pairs = styles()
@@ -1434,7 +1460,14 @@ def main_curses(scr, url, ui):
     while True:
         h, w = scr.getmaxyx()
         state, info, ch, extra = poller.snapshot()
-        draw(scr, render(state, ui, url, w, h, info, ch, extra), pairs, w)
+        try:
+            rows = render(state, ui, url, w, h, info, ch, extra)
+        except Exception as e:  # odd data from the server (a run starting, a restart): keep running, say why
+            rows = [row(("FSUDAQ online ", "title"), (url, "dim")), row(""),
+                    row((f"cannot draw this view: {type(e).__name__}: {err_text(e, max(20, w - 40))}", "bad")),
+                    row(("still polling; another view (1-6) or q to quit", "dim"))]
+            rows += [row("")] * max(0, h - len(rows) - 1) + [footer(ui, info, w)]
+        draw(scr, rows, pairs, w)
         key = scr.getch()
         if key in (-1, curses.KEY_RESIZE):
             continue
@@ -1464,13 +1497,45 @@ def main():
         st, info, ch, extra = p.snapshot()
         w = a.width or shutil.get_terminal_size((140, 50)).columns
         for segs in render(st, ui, a.url, w, a.height or 50, info, ch, extra):
-            print("".join(t for t, _ in segs)[:w].rstrip())
+            print(clean("".join(t for t, _ in segs))[:w].rstrip())
         return 1 if st is None else 0
+
+    hung = []
+
+    def hangup(signum, frame):  # ssh dropped, window closed, kill: leave through curses.wrapper's cleanup
+        hung.append(signum)
+        raise SystemExit(128 + signum)
+    for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGQUIT):
+        signal.signal(sig, hangup)
     try:
         curses.wrapper(main_curses, a.url, ui)
     except KeyboardInterrupt:
         pass
+    except BaseException:
+        if not hung:
+            restore_terminal()
+            raise                                # a real bug: show the traceback on the restored terminal
+    restore_terminal()
+    if hung:                                     # the tty may be gone: no traceback, no flush, just go
+        os._exit(128 + hung[0])
     return 0
+
+
+def restore_terminal():
+    """After curses' own endwin: put back what a full-screen program can leave behind if its exit is cut
+    short (hidden cursor, application keypad, mouse reporting, bracketed paste), so the
+    shell does not echo escape codes. Harmless if all is already back."""
+    try:
+        fd = os.open("/dev/tty", os.O_WRONLY | os.O_NOCTTY)
+    except OSError:
+        return                                   # no terminal any more (ssh gone): nothing to restore
+    try:
+        os.write(fd, b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l"
+                     b"\x1b[?1l\x1b>\x1b[0m\x1b[?25h")
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 if __name__ == "__main__":
