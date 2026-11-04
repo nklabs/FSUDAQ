@@ -209,6 +209,15 @@ def q_edges(lo, hi, nb, log):
     return e
 
 
+def q_edges_view(lo, hi, nb, log):
+    """The bins a zoomed view shows: nb bins over the whole Qlong range (0-65536; on the log axis 1-65536), of
+    which those that overlap [lo, hi). Zooming shows fewer of the same bins; it does not rebin."""
+    full = q_edges(1 if log else 0, 65536, nb, log)
+    i0 = max(0, int(np.searchsorted(full, lo, side="right")) - 1)
+    i1 = min(len(full) - 1, max(i0 + 1, int(np.searchsorted(full, hi, side="left"))))
+    return full[i0:i1 + 1]
+
+
 def rebin(q, edges):
     """Counts of q (slots x 65536, or one row) in the bins [edges[i], edges[i+1]), leaving out
     Q = 0 and Q = 65535 (the page reports those apart)."""

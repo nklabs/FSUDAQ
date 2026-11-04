@@ -79,6 +79,16 @@ cable offsets removed, as in the finder, so zero is the RF reference's own phase
 (higher: the top bin), 100 time bins (198 ps). Counts since the reading began or the last Clear.
 `GET /rftof` (read-only, for anyone) returns them; the tab asks for it every 3 s while it is open.
 
+**align channels on the beam** (on by default): the boards' channels disagree by up to ~9 ns, stable within a
+session (3 Nov 2026: the upper eight channels of 15879, 58918 and 62839 ~8 ns early against their lower eight, seen
+alike in the beam and in the LED flashes; the pulser offsets of 30 Oct no longer describe the boards). The analysis
+keeps each tracker channel's TOF x Qlong at 99 ps, and `GET /rftof?align=1` shifts each channel with at least
+`RFTOF_ALIGN_MIN` (500) hits so its beam peak (the mode of its time profile smoothed over 0.5 ns) meets that of its
+plane's busiest channel, modulo the period, before the plane is summed: from this reading's own hits, so a restart
+that moves the boards is followed. It makes every strip of a plane peak at the same time (a real strip-to-strip
+difference would be hidden) and changes only this tab, not the finder. The table under the plots lists the shifts per
+board and half (ch0-7, ch8-15).
+
 ### Analysis files
 
 A run read while it is taken keeps what its analysis reads, in `<run>/<run>_analysis/`: read-only copies of

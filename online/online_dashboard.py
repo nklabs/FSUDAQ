@@ -246,8 +246,14 @@ EXPECTED_DEFAULT = os.path.expanduser("~/pion-spectrometer-simulations/tool/publ
 # 2 Nov 2026: 50,633,194 Hz). Only the cycle count between two RF triggers uses it: right while the triggers are
 # less than 1 / (2 x the error) apart (0.5 s for 1 Hz); the period itself is measured between each pair.
 RFTOF_HZ = 50.633194e6
-RFTOF_NT = 100                                  # TOF bins over one RF period (198 ps)
+RFTOF_NT = 100                                  # TOF bins over one RF period on the page (198 ps)
+RFTOF_FINE = 2                                  # kept per channel this much finer (99 ps): the steps a channel is shifted by
 RFTOF_NQ, RFTOF_QMAX = 128, 8192                # Qlong bins (64 ADC each; above: the top bin)
+# aligned on the beam: the boards' channels disagree by up to ~9 ns, stable within a session (the upper eight
+# channels of 15879, 58918 and 62839 ~8 ns early; 3 Nov 2026), so each tracker channel is shifted until its beam
+# peak meets that of its plane's busiest channel, from this reading's own hits once it has RFTOF_ALIGN_MIN of them
+RFTOF_ALIGN_MIN = 500
+RFTOF_SMOOTH_NS = 0.5                           # a channel's peak: the mode of its time profile smoothed over this
 EXPECTED_MAX_BYTES = 50 << 20
 CHERENKOV_E_EFF = 1.0                         # share of electrons whose bunch the gas Cherenkov marks "electron" (assumed:
                                               # all; muons and pions below its threshold never fire it)
@@ -618,7 +624,7 @@ def slice_task(task: dict) -> dict:
         owned = int(np.count_nonzero(fin & (tc >= t0) & (tc < t1)))   # the finder's hits whose own time (offset removed) is in the slice
         rft = rft_none = None
         if chans.rf_slot is not None:
-            rft, rft_none = rftof_hist(tc, slot, e, chans.plane[bd, ch], chans.rf_slot, t0, t1)
+            rft, rft_none = rftof_hist(tc, slot, e, chans.plane[bd, ch], chans.rf_slot, t0, t1)   # (cells, counts)
     else:
         res = ff.Result(chans.n_slots, tables.map_n)
         daq = dh.DaqResult(chans.n_slots, np.uint32)
@@ -629,11 +635,12 @@ def slice_task(task: dict) -> dict:
 
 
 def rftof_hist(tc, slot, e, plane, rf_slot, t0, t1):
-    """TOF modulo the RF of the tracker hits the slice owns ([t0, t1), offsets removed), against Qlong:
-    counts (plane, TOF bin, Qlong bin), and the number of those hits without an RF phase (fewer than two RF
-    triggers in the slice). A hit's phase is taken between the RF triggers on either side of it, with the local
-    period from their spacing; before the first or after the last RF trigger of the slice, from the nearest pair."""
-    H = np.zeros((3, RFTOF_NT, RFTOF_NQ), np.uint32)
+    """TOF modulo the RF of the tracker hits the slice owns ([t0, t1), offsets removed), against Qlong, per channel:
+    the cells (slot, fine TOF bin, Qlong bin) hit, as flat indices, with their counts; and the number of those hits
+    without an RF phase (fewer than two RF triggers in the slice). A hit's phase is taken between the RF triggers on
+    either side of it, with the local period from their spacing; before the first or after the last RF trigger of
+    the slice, from the nearest pair."""
+    none = (np.zeros(0, np.int64), np.zeros(0, np.int64))
     trk = (plane >= 0) & (tc >= t0) & (tc < t1)
     n = int(np.count_nonzero(trk))
     T = 1e12 / RFTOF_HZ
@@ -641,16 +648,17 @@ def rftof_hist(tc, slot, e, plane, rf_slot, t0, t1):
     if t_rf.size:
         t_rf = t_rf[np.r_[True, np.diff(t_rf) > T / 2]]    # one trigger per RF cycle
     if n == 0 or t_rf.size < 2:
-        return H, n
+        return none, n
     d = np.diff(t_rf).astype(np.float64)
     period = d / np.rint(d / T)
     th = tc[trk]
     i = np.clip(np.searchsorted(t_rf, th, side="right") - 1, 0, t_rf.size - 2)
     ph = ((th - t_rf[i]) / period[i]) % 1.0
-    ti = np.minimum((ph * RFTOF_NT).astype(np.int64), RFTOF_NT - 1)
+    ntf = RFTOF_NT * RFTOF_FINE
+    ti = np.minimum((ph * ntf).astype(np.int64), ntf - 1)
     qi = np.minimum(np.asarray(e[trk], np.int64) * RFTOF_NQ // RFTOF_QMAX, RFTOF_NQ - 1)
-    np.add.at(H, (plane[trk], ti, qi), 1)
-    return H, 0
+    cells, counts = np.unique((np.asarray(slot[trk], np.int64) * ntf + ti) * RFTOF_NQ + qi, return_counts=True)
+    return (cells, counts.astype(np.int64)), 0
 
 
 class _Done:
@@ -960,7 +968,7 @@ class Online:
         self.skip_marks = None                  # live start: each file's size (words) when the dashboard started
         self.since = None                       # live start: the time from which data are read
         self.acc = ff.Result(S.chans.n_slots, S.tables.map_n)   # the finder's histograms and counters
-        self.rftof = np.zeros((3, RFTOF_NT, RFTOF_NQ), np.int64)  # RF timing tab: TOF modulo RF x Qlong, per plane
+        self.rftof = np.zeros((S.chans.n_slots, RFTOF_NT * RFTOF_FINE, RFTOF_NQ), np.int64)  # RF timing tab: TOF modulo RF x Qlong, per channel
         self.rftof_none = 0                     # tracker hits without an RF phase
         self.trip_skipped = 0                   # slices whose track counts did not fit the map (Beam vs map)
         self.daq = dh.DaqResult(S.chans.n_slots)
@@ -1548,7 +1556,8 @@ class Online:
                     self.daq.add(d)
                     self.owned += r["owned"]
                     if r.get("rft") is not None:
-                        self.rftof += r["rft"]; self.rftof_none += r["rft_none"]
+                        cells, counts = r["rft"]
+                        np.add.at(self.rftof.reshape(-1), cells, counts); self.rftof_none += r["rft_none"]
                 n_trk = int((res["h_ntrk"] * np.arange(ff.NTRK)).sum())
                 status = {ff.STATUS[i]: int(c) for i, c in enumerate(res["h_status"]) if c}
                 k = int(r["t0"] // (RUN_BIN_S * PS))      # by the slice's start: a slice (<= --max-slice-s) is not split
@@ -1627,18 +1636,50 @@ class Online:
             return 404, dict(note=err or "the publish has no top view (written by an older floor tool: Publish again)")
         return 200, dict(published_at=doc.get("published_at"), top_view=tv)
 
-    def rftof_view(self):
+    def rftof_view(self, align=False):
         """GET /rftof: the RF timing tab's TOF modulo the RF against Qlong, per tracker plane with hits, since the
-        reading began (or Clear). Apart from /state: it is large and only the tab asks for it."""
+        reading began (or Clear). Apart from /state: it is large and only the tab asks for it.
+        align: each tracker channel with RFTOF_ALIGN_MIN hits shifted (in 99-ps steps, modulo the period) so its
+        beam peak meets that of its plane's busiest channel; the shifts are returned with the planes."""
         with self.lock:
             ch = self.setup.chans
             if ch.rf_slot is None:
                 return dict(rf=None, note="no RF reference in the cabling: give its digitizer channel kind rf")
-            b, c = divmod(ch.rf_slot, ch.board_channels)
-            return dict(rf=dict(serial=self.serials[b], ch=int(c)), period_ns=1e9 / RFTOF_HZ, nt=RFTOF_NT, nq=RFTOF_NQ,
-                        qmax=RFTOF_QMAX, rf_hits=int(self.run_counts[ch.rf_slot]), no_phase=int(self.rftof_none),
-                        planes=[dict(plane=p, n=int(self.rftof[p].sum()), counts=self.rftof[p].tolist())
-                                for p in range(3) if self.rftof[p].any()])
+            H = self.rftof.copy(); none = int(self.rftof_none); rf_hits = int(self.run_counts[ch.rf_slot])
+            labels = {sl: self.labels[sl] for sl in self.slots}
+        b, c = divmod(ch.rf_slot, ch.board_channels)
+        per = 1e9 / RFTOF_HZ; ntf = H.shape[1]
+        plane_of = ch.plane.reshape(-1)
+        prof = H.sum(axis=2); n = prof.sum(axis=1)               # per channel: its time profile, its hits
+        shift = np.zeros(len(n), np.int64); refs = {}
+        if align:
+            k = max(1, int(round(RFTOF_SMOOTH_NS / (per / ntf)))) // 2
+            sm = sum(np.roll(prof, j, axis=1) for j in range(-k, k + 1))
+            peak = sm.argmax(axis=1)
+            for p in range(3):
+                sl = np.flatnonzero((plane_of == p) & (n >= RFTOF_ALIGN_MIN))
+                if sl.size:
+                    r = int(sl[np.argmax(n[sl])]); refs[p] = r
+                    shift[sl] = (peak[sl] - peak[r] + ntf // 2) % ntf - ntf // 2
+        planes = []
+        for p in range(3):
+            sl = np.flatnonzero((plane_of == p) & (n > 0))
+            if not sl.size:
+                continue
+            A = np.zeros(H.shape[1:], np.int64)
+            for s in sl:
+                A += np.roll(H[s], -int(shift[s]), axis=0) if shift[s] else H[s]
+            A = A.reshape(RFTOF_NT, RFTOF_FINE, RFTOF_NQ).sum(axis=1)
+            planes.append(dict(plane=p, n=int(A.sum()), counts=A.tolist()))
+        out = dict(rf=dict(serial=self.serials[b], ch=int(c)), period_ns=per, nt=RFTOF_NT, nq=RFTOF_NQ,
+                   qmax=RFTOF_QMAX, rf_hits=rf_hits, no_phase=none, planes=planes)
+        if align:
+            out["align"] = dict(min_hits=RFTOF_ALIGN_MIN, step_ns=per / ntf,
+                                ref={f"T{p}": dict(slot=r, **labels[r]) for p, r in refs.items()},
+                                channels=[dict(slot=int(s), **labels[s], plane=int(plane_of[s]), n=int(n[s]),
+                                               shift_ns=round(float(shift[s]) * per / ntf, 3) if n[s] >= RFTOF_ALIGN_MIN else None)
+                                          for s in sorted(labels) if plane_of[s] >= 0])
+        return out
 
     def _board_rows(self, now):
         """Per board: files, what is read, late and early hits, and the live checks (state()["boards"])."""
@@ -1924,7 +1965,7 @@ class Online:
                 known = -(1 << 62)              # its pair has written nothing yet: a first buffer may be filling, no rate known
             rates = [[s - t0s, int(self.secs[s][sl])] for s in secs if s < known]
             lo, hi, nb, log = view or (0, 65536, 4096, False)
-            e = dh.q_edges(lo, hi, nb, log)
+            e = dh.q_edges_view(lo, hi, nb, log)          # nb bins over the whole range: a zoom shows fewer of them
             row = D.q[sl]
             tot = int(row.sum())
             inside = dh.rebin(row, np.array([0, 65536]))[0]          # all but Q = 0 and 65535
@@ -1961,7 +2002,7 @@ class Online:
     def grid(self, view):
         """Every channel's Qlong spectrum over the shown range, coarsely binned, for the overview grid."""
         lo, hi, nb, log = view
-        e = dh.q_edges(lo, hi, nb, log)
+        e = dh.q_edges_view(lo, hi, nb, log)
         with self.lock:
             C = dh.rebin(self.daq.q, e)[self.slots]                  # no copy of the full array
             return dict(edges=e.tolist(), log=bool(log),
@@ -1982,7 +2023,7 @@ class Online:
             if why == "Clear":
                 self._agg_event("clear", "the page's Clear: the finder's results and the late and early counts start again")
             self.acc = ff.Result(self.setup.chans.n_slots, self.setup.tables.map_n)
-            self.rftof = np.zeros((3, RFTOF_NT, RFTOF_NQ), np.int64); self.rftof_none = 0
+            self.rftof = np.zeros_like(self.rftof); self.rftof_none = 0
             self.trip_skipped = 0
             self.daq = dh.DaqResult(self.setup.chans.n_slots)
             self.owned = 0
@@ -3194,7 +3235,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/expected_view":   # the publish's top view (large, changes only with a new publish), for anyone
             return self.reply(*self.online.expected_view())
         if path == "/rftof":       # the RF timing tab: TOF modulo the RF against Qlong, for anyone: read-only
-            return self.reply(200, self.online.rftof_view())
+            return self.reply(200, self.online.rftof_view(q.get("align", ["0"])[0] == "1"))
         if path == "/summary":     # a recorded run's summary, for anyone: read-only, nothing changes for the others
             code, d = self.online.summary_reply(q.get("run", [""])[0])
             return self.reply(code, d)

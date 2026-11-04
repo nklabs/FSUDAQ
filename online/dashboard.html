@@ -155,6 +155,7 @@
   <div class="grid" data-grid="daq">
     <div class="card wfull"><h2>Hits per digitizer channel</h2>
       <div class="ctl"><label>show <select id="occ_mode"><option value="rate">rate (Hz), last update</option><option value="count">hits since Clear</option></select></label>
+        <label title="By detector: tracker strips in plane order (T0, T1, T2), then the counters, the RF reference and channels not cabled; the colour still says the digitizer">group <select id="occ_group"><option value="det">by detector (T0 · T1 · T2)</option><option value="digi">by digitizer</option></select></label>
         <label><input type="checkbox" id="occ_log" checked> log scale</label><span>click a bar to pick that channel</span></div>
       <canvas id="c_chan"></canvas><div class="legend" id="leg_chan"></div><div class="note" id="note_chan"></div></div>
     <div class="card"><h2>Total hit rate, all channels and per board (Hz, by second of data time)</h2><canvas id="c_total"></canvas><div class="legend" id="leg_total"></div></div>
@@ -248,7 +249,9 @@
 
 <section id="tab_rft" hidden>
   <div class="toolbar">
-    <span>Plane <select id="rft_plane"><option value="0">T0</option><option value="1">T1</option><option value="2">T2</option></select></span>
+    <span title="One tracker plane, or the three side by side (on one turn of the period, so their times compare)">Plane <select id="rft_plane"><option value="0">T0</option><option value="1">T1</option><option value="2">T2</option><option value="all">T0 · T1 · T2 split</option></select></span>
+    <label title="With the planes split: each plane's histogram as a share of its own hits, so their shapes compare"><input type="checkbox" id="rft_norm"> each plane to its own total</label>
+    <label title="Shift each tracker channel so its beam peak meets that of its plane's busiest channel, from this reading's own hits (the boards' channels disagree by up to ~9 ns)"><input type="checkbox" id="rft_align" checked> align channels on the beam</label>
     <label title="Turn the period so the most-populated time bin is in the middle; the axis then counts from it"><input type="checkbox" id="rft_center" checked> centre on the peak</label>
     <span title="The same period drawn once, or twice side by side, so what lies across its ends is seen whole">Show <select id="rft_np"><option value="1">1 period</option><option value="2">2 periods</option></select></span>
     <label title="Log scale for the time-of-flight histogram (all charges): the floor and the tails"><input type="checkbox" id="rft_log"> log scale</label>
@@ -257,7 +260,9 @@
   <div class="grid" data-grid="rft">
     <div class="card w2 tall1"><h2>Time of flight modulo the RF against Qlong</h2><canvas id="c_rft_q"></canvas>
       <div class="note">Each tracker hit's time after the RF reference, modulo the accelerator period, its phase taken between the RF triggers on either side of it. Shade: log of the count. Zero is the RF reference's own phase (or the peak), not the production time.</div></div>
-    <div class="card w2"><h2>Time of flight modulo the RF, all charges</h2><canvas id="c_rft_t"></canvas></div>
+    <div class="card w2"><h2>Time of flight modulo the RF, all charges</h2><canvas id="c_rft_t"></canvas><div class="legend" id="leg_rft_t"></div></div>
+    <div class="card w2"><h2>Channel alignment on the beam: each board's shift, by plane</h2><table id="t_rft_align"></table>
+      <div class="note" id="note_rft_align">Each tracker channel's beam peak (the mode of its time profile, smoothed over 0.5 ns) is moved onto that of its plane's busiest channel, in 99-ps steps and modulo the RF period, from this reading's own hits. Shift = what was subtracted; shifts near +9.9 and −9.9 ns are close to each other (the period wraps).</div></div>
   </div>
 </section>
 
@@ -491,6 +496,8 @@ document.getElementById('btn_clear').onclick = async ()=>{
   note.textContent = 'cleared at '+new Date().toLocaleTimeString()+': counts, histograms and rates start again';
   await tick(); fetchChannel(); };
 ['occ_mode','occ_log','q_log','dt_log','spec_which','grid_log','grid_own'].forEach(id=>document.getElementById(id).onchange=()=>{ if(id==='spec_which') fetchChannel(); else draw(); });
+document.getElementById('occ_group').value = store.get('fsudaq-occ-group', 'det');
+document.getElementById('occ_group').onchange = e=>{ store.set('fsudaq-occ-group', e.target.value); draw(); };
 
 let lastOK = null, MBPS = null, BYTES = [];   // when /state last answered; the MB/s, from (server time, run bytes) of the last ~10 s
 async function tick(){
@@ -561,7 +568,7 @@ async function fetchChannel(){
         if(tab==='daq' && CMP.length && !cc.classList.contains('collapsed')){   // on its own: an analysis older than the page has no /compare
           try { const r = await fetch(`/compare?slots=${CMP.join(',')}&${viewQuery()}`); cmp = r.ok ? await r.json() : null; } catch(e){ cmp = null; } }
         const gc = document.getElementById('c_grid').closest('.card');
-        if(tab==='daq' && !gc.classList.contains('collapsed')) grid = await (await fetch('/grid?'+viewQuery(64))).json(); } catch(e){ return; }
+        if(tab==='daq' && !gc.classList.contains('collapsed')) grid = await (await fetch('/grid?'+viewQuery(gridNb()))).json(); } catch(e){ return; }
   if(my !== chSeq || !S || S.folder !== folder) return;
   CH = ch; SPEC_ALL = spec; CMPD = cmp; GRID = grid; chOK = Date.now();
   draw();
@@ -595,30 +602,53 @@ function draw(){
 
 // MB/s with the decimals a slow run needs (0.042, not 0.0): two significant figures below 1 MB/s
 function mbText(v){ return v==null ? '–' : v >= 1 ? v.toFixed(1) : v > 0 ? (v >= 0.01 ? v.toFixed(3) : v.toPrecision(2)) : '0.000'; }
+// channels by detector: tracker strips by plane and strip, then counters, the RF reference, channels not cabled
+const detKey = s => { const m = /^T(\d):(\d+)$/.exec(s.role||''); return m ? [+m[1], +m[2]] : s.role==='RF' ? [4, 0] : s.role ? [3, 0] : [5, 0]; };
+const detGroup = s => { const m = /^T(\d):/.exec(s.role||''); return m ? 'T'+m[1] : s.role==='RF' ? 'RF' : s.role ? 'counters' : 'not cabled'; };
+function detOrder(slots){
+  return slots.map(s=>[detKey(s), boardIndex(s.board), s.ch, s])
+    .sort((a,b)=>a[0][0]-b[0][0] || a[0][1]-b[0][1] || a[1]-b[1] || a[2]-b[2]).map(x=>x[3]);
+}
 function drawDaq(){
   const D=S.daq, slots=D.slots;
   document.querySelectorAll('.chname').forEach(e=>e.textContent = slotName(slots.find(s=>s.slot===selSlot)));
-  // hits per channel: one bar per digitizer channel, coloured by board
+  // hits per channel: one bar per digitizer channel, coloured by board; in board order, or grouped by detector
   const mode=document.getElementById('occ_mode').value, ylog=document.getElementById('occ_log').checked;
-  const vals = slots.map(s=>mode==='rate' ? (s.rate??0) : s.count);
-  const edges = slots.map((_,i)=>i).concat([slots.length]);
-  const colors = slots.map(s=>s.slot===selSlot ? css('--sel') : s.slot===D.rf ? css('--muted') : BOARD_COLOR[boardIndex(s.board)%BOARD_COLOR.length]);
-  const A = plot('c_chan', {x0:0, x1:slots.length, ylog, xticks:false, series:[{kind:'bars', edges, y:vals, colors, gap:1}],
+  const byDet = document.getElementById('occ_group').value === 'det';
+  const bars = byDet ? detOrder(slots) : slots, grp = byDet ? detGroup : (s => 'Digi-'+s.board);
+  const vals = bars.map(s=>mode==='rate' ? (s.rate??0) : s.count);
+  const edges = bars.map((_,i)=>i).concat([bars.length]);
+  const colors = bars.map(s=>s.slot===selSlot ? css('--sel') : s.slot===D.rf ? css('--muted') : BOARD_COLOR[boardIndex(s.board)%BOARD_COLOR.length]);
+  const A = plot('c_chan', {x0:0, x1:bars.length, ylog, xticks:false, series:[{kind:'bars', edges, y:vals, colors, gap:1}],
                             empty: mode==='rate' && D.total_rate==null ? (S.mode==='running' ? 'no complete second yet' : 'no rate: no data are being written now (show "hits since Clear" for the counts)') : 'no hits yet',
                             ylabel: mode==='rate'?'Hz':'hits'});
-  if(A){ const g=document.getElementById('c_chan').getContext('2d'); g.fillStyle=css('--muted'); g.font=cfont(10); g.textAlign='center';
-    let start=0; for(let i=1;i<=slots.length;i++){ if(i===slots.length || slots[i].board!==slots[start].board){
-        const a=Math.max(start, A.x0), b=Math.min(i, A.x1);   // the board's part in view (the axis may be zoomed)
-        if(b-a >= 1) g.fillText(`Digi-${slots[start].board} ch${slots[Math.ceil(a)].ch}–${slots[Math.floor(b)-1].ch}`, (A.X(a)+A.X(b))/2, A.h-7); start=i; } } }
+  if(A){ const g=document.getElementById('c_chan').getContext('2d'); g.textAlign='center';
+    let start=0; for(let i=1;i<=bars.length;i++){ if(i===bars.length || grp(bars[i])!==grp(bars[start])){
+        const a=Math.max(start, A.x0), b=Math.min(i, A.x1);   // the group's part in view (the axis may be zoomed)
+        if(b-a >= 1){ const sa=bars[Math.ceil(a)], sb=bars[Math.floor(b)-1], name=grp(sa), xm=(A.X(a)+A.X(b))/2;
+          if(byDet){
+            const pl = /^T(\d)$/.exec(name), strip = s => (s.role||'').split(':')[1];
+            if(pl){ g.fillStyle=css(+pl[1] % 2 ? '--muted' : '--fg'); g.globalAlpha=.5;   // the plane's band under its strips: grey, not a board colour
+              g.fillRect(A.X(a), A.h-A.B+1, A.X(b)-A.X(a), 4); g.globalAlpha=1; }
+            const txt = pl ? `${name} · strips ${strip(sa)}–${strip(sb)}` : name;
+            g.font = pl ? `bold ${cfont(11)}` : cfont(10); g.fillStyle = pl ? css('--fg') : css('--muted');
+            const fit = g.measureText(txt).width < A.X(b)-A.X(a)-4 ? txt : g.measureText(name).width < A.X(b)-A.X(a)-2 ? name : '';
+            if(fit) g.fillText(fit, xm, A.h-6);
+            if(i<bars.length && i>A.x0 && i<A.x1){   // a line between detectors
+              g.strokeStyle=css('--fg'); g.globalAlpha=.55; g.lineWidth=1.5; g.beginPath(); g.moveTo(A.X(i), A.T); g.lineTo(A.X(i), A.h-A.B+5); g.stroke(); g.globalAlpha=1; }
+          } else { g.font=cfont(10); g.fillStyle=css('--muted'); g.fillText(`Digi-${sa.board} ch${sa.ch}–${sb.ch}`, xm, A.h-7); } }
+        start=i; } } }
   document.getElementById('c_chan').onclick = ev=>{ if(!A) return; const r=ev.target.getBoundingClientRect(); const x=ev.clientX-r.left;
     if(x < A.L || x > A.w-A.R) return;
-    const i=Math.floor(A.inv(x)); if(i>=0 && i<slots.length && (ev.ctrlKey || ev.metaKey)){ toggleCmp(slots[i].slot); return; }
-    if(i>=0 && i<slots.length){ selSlot=slots[i].slot; store.set('fsudaq-sel-slot', selSlot); fillSelects(); fetchChannel(); } };
+    const i=Math.floor(A.inv(x)); if(i>=0 && i<bars.length && (ev.ctrlKey || ev.metaKey)){ toggleCmp(bars[i].slot); return; }
+    if(i>=0 && i<bars.length){ selSlot=bars[i].slot; store.set('fsudaq-sel-slot', selSlot); fillSelects(); fetchChannel(); } };
   legend('leg_chan', S.boards.map((b,i)=>({name:'Digi-'+b.serial, color:BOARD_COLOR[i%BOARD_COLOR.length]})).concat([{name:'selected channel', color:css('--sel')}])
     .concat(D.rf!=null ? [{name:'RF reference (not a particle)', color:css('--muted')}] : []));
   const slowCh = D.total_rate==null ? [] : slots.filter(s=>s.rate==null && s.written);
   const pauseLate = S.pause_flush_s!=null;
-  document.getElementById('note_chan').innerHTML = (mode==='rate' && D.rate_second!=null ? `Rate: second ${D.rate_second} of the run, the newest whose hits are all counted. ` : '') +
+  document.getElementById('note_chan').innerHTML = (byDet ? (slots.some(s=>/^T\d:/.test(s.role||'')) ? 'Grouped by detector: tracker strips in plane order, then counters, the RF reference and channels not cabled; colour: digitizer. '
+      : warn('Grouped by detector, but the cabling is a placeholder: no channel is known to be a tracker strip. ')) : '') +
+    (mode==='rate' && D.rate_second!=null ? `Rate: second ${D.rate_second} of the run, the newest whose hits are all counted. ` : '') +
     (mode==='rate' && slowCh.length ? `Not shown: ${slowCh.map(slotName).join(', ')} (their channel pair has not written for over ${S.hold_s} s: its buffer fills slowly, the count is not known yet). ` : '') +
     (S.late ? warn(`${S.late.toLocaleString()} hits reached the disk after the track finder had passed their time`) +
       (S.late_recent ? ` (${S.late_recent.toLocaleString()} in the last minute)` : ' (none in the last minute)') +
@@ -798,11 +828,16 @@ function drawCompare(){
 
 // every channel's Qlong spectrum over the shown range: one row per board, one panel per channel
 let GRID_BOXES = [];
+// the overview grid's bins over the whole Qlong range: the pulse-height plot's divided by 16 (as fine as a small
+// panel shows), 64 to 256; like the pulse-height plot's, fixed: a zoom shows fewer of them
+const gridNb = () => Math.min(256, Math.max(64, Math.round(VIEW.nb / 16)));
 function drawGrid(){
   const gc = document.getElementById('c_grid'); if(gc.closest('.card').classList.contains('collapsed')) return;
   if(!GRID){ message('c_grid','loading…'); return; }
   const {g,w,h}=setupCanvas('c_grid'), ylog=document.getElementById('grid_log').checked, own=document.getElementById('grid_own').checked;
-  const mxAll = Math.max(0, ...GRID.slots.map(sl=>Math.max(0, ...sl.counts)));   // one scale for every panel (unticked)
+  // on the log Qlong axis hits per Qlong count (the bins widen with Q, and rounding to whole counts makes them uneven)
+  const ge = GRID.edges, dens = sl => GRID.log ? sl.counts.map((c,k)=>c/(ge[k+1]-ge[k])) : sl.counts;
+  const mxAll = Math.max(0, ...GRID.slots.map(sl=>Math.max(0, ...dens(sl))));   // one scale for every panel (unticked)
   const boards = S.boards.map(b=>b.serial), L=Math.round(84*K), T=2, ncol=16, rowH=(h-T)/Math.max(1,boards.length), cw=(w-L)/ncol;
   const e=GRID.edges, tx = GRID.log ? (v=>Math.log10(Math.max(v,1))) : (v=>v), xa=tx(e[0]), xb=tx(e[e.length-1]);
   GRID_BOXES = [];
@@ -813,15 +848,15 @@ function drawGrid(){
     const x=L+sl.ch*cw, y=T+i*rowH, bw=cw-4, bh=rowH-4, top=13, col=BOARD_COLOR[i%BOARD_COLOR.length];
     GRID_BOXES.push({x, y, w:cw, h:rowH, slot:sl.slot});
     g.strokeStyle = sl.slot===selSlot ? css('--sel') : css('--line'); g.lineWidth = sl.slot===selSlot ? 2 : 1; g.strokeRect(x+1.5, y+1.5, bw, bh);
-    const tot = sl.counts.reduce((a,b)=>a+b,0), mx = own ? Math.max(...sl.counts) : mxAll;
+    const yv = dens(sl), tot = sl.counts.reduce((a,b)=>a+b,0), mx = own ? Math.max(...yv) : mxAll;
     g.fillStyle=css('--muted'); g.textAlign='left'; g.fillText('ch'+sl.ch, x+5, y+12); g.textAlign='right'; g.fillText(tot?sinum(tot):'', x+bw-2, y+12);
     if(!mx) continue;
     const py0=y+bh, ph=bh-top-2, lm=Math.log10(1+mx);
     g.fillStyle=col; g.globalAlpha=.85; g.beginPath(); g.moveTo(x+2, py0);
-    sl.counts.forEach((c,k)=>{ const v = ylog ? Math.log10(1+c)/lm : c/mx, yy=py0-v*ph;
+    yv.forEach((c,k)=>{ const v = ylog ? Math.log10(1+c)/lm : c/mx, yy=py0-v*ph;
       const xl=x+2+(tx(e[k])-xa)/(xb-xa)*(bw-2), xr=x+2+(tx(e[k+1])-xa)/(xb-xa)*(bw-2); g.lineTo(xl, yy); g.lineTo(xr, yy); });
     g.lineTo(x+bw, py0); g.closePath(); g.fill(); g.globalAlpha=1; }
-  document.getElementById('grid_note').textContent = `Q ${VIEW.lo}–${VIEW.hi} (${GRID.log?'log':'linear'} x, ${e.length-1} bins), the range of the pulse-height plot · ${own ? 'each panel scaled to its own peak' : `one y scale for all panels (peak ${sinum(mxAll)})`} · number: hits in range · click a panel to pick that channel`;
+  document.getElementById('grid_note').textContent = `Q ${VIEW.lo}–${VIEW.hi} (${GRID.log?'log':'linear'} x, ${e.length-1} of ${gridNb()} bins over the whole range${GRID.log ? ', hits per Qlong count' : `, ${e[1]-e[0]} counts each`}), the range of the pulse-height plot · ${own ? 'each panel scaled to its own peak' : `one y scale for all panels (peak ${sinum(mxAll)})`} · number: hits in range · click a panel to pick that channel`;
 }
 document.getElementById('c_grid').onclick = ev=>{ const r=ev.target.getBoundingClientRect(), x=ev.clientX-r.left, y=ev.clientY-r.top;
   const b=GRID_BOXES.find(b=>x>=b.x && x<b.x+b.w && y>=b.y && y<b.y+b.h);
@@ -895,13 +930,17 @@ function drawTrk(){
 let RFT = null, rftSeq = 0;
 async function fetchRft(){
   const my = ++rftSeq; let d = null;
-  try { const r = await fetch('/rftof', {cache:'no-store'}); if(r.ok) d = await r.json(); } catch(e){}
+  try { const r = await fetch('/rftof?align=' + (document.getElementById('rft_align').checked ? 1 : 0), {cache:'no-store'}); if(r.ok) d = await r.json(); } catch(e){}
   if(my !== rftSeq) return;
   RFT = d || {error:'no answer from the dashboard (an analysis older than this page has no RF timing)'};
   if(tab==='rft') draw();
 }
-document.getElementById('rft_plane').value = store.get('fsudaq-rft-plane', 0);
-document.getElementById('rft_plane').onchange = e=>{ store.set('fsudaq-rft-plane', +e.target.value); draw(); };
+document.getElementById('rft_plane').value = String(store.get('fsudaq-rft-plane', 0));
+document.getElementById('rft_plane').onchange = e=>{ store.set('fsudaq-rft-plane', e.target.value); draw(); };
+document.getElementById('rft_norm').checked = store.get('fsudaq-rft-norm', false);
+document.getElementById('rft_align').checked = store.get('fsudaq-rft-align', true);
+document.getElementById('rft_align').onchange = e=>{ store.set('fsudaq-rft-align', e.target.checked); fetchRft(); };
+document.getElementById('rft_norm').onchange = e=>{ store.set('fsudaq-rft-norm', e.target.checked); draw(); };
 document.getElementById('rft_center').checked = store.get('fsudaq-rft-center', true);
 document.getElementById('rft_center').onchange = e=>{ store.set('fsudaq-rft-center', e.target.checked); draw(); };
 document.getElementById('rft_np').value = store.get('fsudaq-rft-np', 2);
@@ -909,52 +948,103 @@ document.getElementById('rft_np').onchange = e=>{ store.set('fsudaq-rft-np', +e.
 document.getElementById('rft_log').checked = store.get('fsudaq-rft-log', false);
 document.getElementById('rft_log').onchange = e=>{ store.set('fsudaq-rft-log', e.target.checked); draw(); };
 // 2-D histogram with a real y axis: counts[ix][iy], equal bins over x0..x1 and y0..y1; shade = log of the count
-function plotHeat(id, spec){
-  const {g,w,h}=setupCanvas(id); const L=Math.round(50*K),B=Math.round(24*K),T=8,R=10;
+// one heat map in the band [top, top + hb) of a canvas; the time labels only where xlab (the lowest band)
+function heatBand(g, w, top, hb, spec, xlab){
+  const L=Math.round(50*K), B=xlab ? Math.round(24*K) : 6, T=top+8, R=10, bot=top+hb-B;
   let mx=0; for(const col of spec.counts) for(const v of col) if(v>mx) mx=v;
-  if(!mx){ message(id, spec.empty || 'no entries yet'); PLOTS[id]=null; return null; }
   const {x0, x1, y0, y1} = spec, nx = spec.counts.length, ny = spec.counts[0].length;
-  const X = v => L + (v-x0)/(x1-x0) * (w-L-R), Y = v => h-B - (v-y0)/(y1-y0) * (h-B-T);
+  const X = v => L + (v-x0)/(x1-x0) * (w-L-R), Y = v => bot - (v-y0)/(y1-y0) * (bot-T);
   g.font=cfont(10); g.lineWidth=1;
-  for(const v of niceTicks(y0,y1,4)){ g.strokeStyle=css('--line'); g.globalAlpha=.6; g.beginPath(); g.moveTo(L,Y(v)); g.lineTo(w-R,Y(v)); g.stroke(); g.globalAlpha=1;
+  for(const v of niceTicks(y0,y1,hb > 160*K ? 4 : 2)){ g.strokeStyle=css('--line'); g.globalAlpha=.6; g.beginPath(); g.moveTo(L,Y(v)); g.lineTo(w-R,Y(v)); g.stroke(); g.globalAlpha=1;
     g.fillStyle=css('--muted'); g.textAlign='right'; g.fillText((spec.yfmt||sinum)(v), L-4, Y(v)+3); }
-  g.textAlign='center'; for(const v of niceTicks(x0,x1,spec.nxt||6)) g.fillText((spec.xfmt||sinum)(v), X(v), h-7);
-  g.strokeStyle=css('--line'); g.beginPath(); g.moveTo(L,T); g.lineTo(L,h-B); g.lineTo(w-R,h-B); g.stroke();
-  g.save(); g.beginPath(); g.rect(L, T, w-L-R, h-B-T); g.clip(); g.fillStyle=spec.color;
+  if(xlab){ g.textAlign='center'; for(const v of niceTicks(x0,x1,spec.nxt||6)) g.fillText((spec.xfmt||sinum)(v), X(v), top+hb-7); }
+  g.strokeStyle=css('--line'); g.beginPath(); g.moveTo(L,T); g.lineTo(L,bot); g.lineTo(w-R,bot); g.stroke();
+  g.save(); g.beginPath(); g.rect(L, T, w-L-R, bot-T); g.clip(); g.fillStyle=spec.color;
   const lm = Math.log(1+mx), dx = (x1-x0)/nx, dy = (y1-y0)/ny;
-  spec.counts.forEach((col,i)=>{ const xa=X(x0+i*dx), xb=X(x0+(i+1)*dx);
+  if(mx) spec.counts.forEach((col,i)=>{ const xa=X(x0+i*dx), xb=X(x0+(i+1)*dx);
     col.forEach((v,j)=>{ if(!v) return; g.globalAlpha = 0.12 + 0.88*Math.log(1+v)/lm;
       const ya=Y(y0+(j+1)*dy), yb=Y(y0+j*dy); g.fillRect(xa, ya, Math.max(1, xb-xa), Math.max(1, yb-ya)); }); });
   g.restore(); g.globalAlpha=1;
   for(const m of (spec.marks||[])){ if(!(m.x>=x0 && m.x<=x1)) continue;
-    g.strokeStyle=m.color||css('--muted'); g.setLineDash([4,3]); g.lineWidth=1; g.beginPath(); g.moveTo(X(m.x),T); g.lineTo(X(m.x),h-B); g.stroke(); g.setLineDash([]);
+    g.strokeStyle=m.color||css('--muted'); g.setLineDash([4,3]); g.lineWidth=1; g.beginPath(); g.moveTo(X(m.x),T); g.lineTo(X(m.x),bot); g.stroke(); g.setLineDash([]);
     if(m.label){ g.fillStyle=m.color||css('--muted'); g.textAlign='left'; g.fillText(m.label, X(m.x)+3, T+22); } }
   if(spec.ylabel){ g.fillStyle=css('--muted'); g.textAlign='left'; g.fillText(spec.ylabel, L+4, T+10); }
-  return (PLOTS[id] = {X, Y, L, B, T, R, w, h, max:mx});
+  if(!mx && spec.empty){ g.fillStyle=css('--muted'); g.font=cfont(11); g.textAlign='center'; g.fillText(spec.empty, (L+w-R)/2, (T+bot)/2); }
+  return {X, Y, L, B, T, R, w, h:top+hb, max:mx};
+}
+function plotHeat(id, spec){
+  const {g,w,h}=setupCanvas(id);
+  let mx=0; for(const col of spec.counts) for(const v of col) if(v>mx) mx=v;
+  if(!mx){ message(id, spec.empty || 'no entries yet'); PLOTS[id]=null; return null; }
+  return (PLOTS[id] = heatBand(g, w, 0, h, spec, true));
+}
+// several heat maps on one time axis, stacked: panels [{label, counts (null: none), color}], spec: the common axes
+function plotHeatStack(id, panels, spec){
+  const {g,w,h}=setupCanvas(id), xb=Math.round(24*K), hb=(h-xb)/panels.length;
+  panels.forEach((pn,i)=>{ const last = i===panels.length-1;
+    heatBand(g, w, i*hb, last ? hb+xb : hb, Object.assign({}, spec, {counts: pn.counts || spec.blank, color:pn.color, ylabel:`${pn.label} · Qlong (ADC)`,
+      empty:`${pn.label}: no hits with an RF phase yet`, marks:(spec.marks||[]).map(m=>i===0 ? m : {x:m.x, color:m.color})}), last); });
+  PLOTS[id]=null;
 }
 function drawRft(){
   const note = document.getElementById('rft_note'), none = t=>{ message('c_rft_q', t); message('c_rft_t', t); };
   if(!RFT){ note.textContent = 'reading…'; return; }
   if(RFT.error){ note.innerHTML = warn(esc(RFT.error)); none('–'); return; }
   if(!RFT.rf){ note.innerHTML = warn(esc(RFT.note)); none('no RF reference'); return; }
-  const p = +document.getElementById('rft_plane').value, P = RFT.planes.find(x=>x.plane===p), per = RFT.period_ns;
+  const sel = document.getElementById('rft_plane').value, split = sel === 'all', per = RFT.period_ns;
+  const Ps = (split ? [0,1,2] : [+sel]).map(p=>({p, P:RFT.planes.find(x=>x.plane===p)})), have = Ps.filter(x=>x.P);
+  const norm = split && document.getElementById('rft_norm').checked;
+  document.getElementById('rft_norm').disabled = !split;
   note.textContent = `RF: Digi-${RFT.rf.serial} ch${RFT.rf.ch} · period ${per.toFixed(3)} ns · ${sinum(RFT.rf_hits)} RF triggers · `
-    + (P ? `T${p}: ${sinum(P.n)} hits with an RF phase` : `T${p}: none yet`) + (RFT.no_phase ? ` · ${sinum(RFT.no_phase)} without (no RF trigger near them)` : '');
-  if(!P){ none(`no T${p} hits with an RF phase yet`); return; }
-  let counts = P.counts, x0 = 0, x1 = per;
-  const tsum0 = counts.map(col=>col.reduce((a,b)=>a+b,0));
-  if(document.getElementById('rft_center').checked){   // the peak bin to the middle, the axis counted from it
-    const n = counts.length, k = tsum0.indexOf(Math.max(...tsum0)), sh = (k - Math.floor(n/2) + n) % n;
-    counts = counts.map((_,i)=>P.counts[(i + sh) % n]); x0 = -(Math.floor(n/2) + 0.5) * per / n; x1 = x0 + per;
+    + Ps.map(({p,P})=>P ? `T${p}: ${sinum(P.n)} hits with an RF phase` : `T${p}: none yet`).join(' · ')
+    + (RFT.no_phase ? ` · ${sinum(RFT.no_phase)} without (no RF trigger near them)` : '');
+  // the split heat maps need room: taller than the card's own height while split
+  const qc = document.getElementById('c_rft_q'), tall2 = qc.closest('.card').classList.contains('tall2');
+  qc.style.height = split ? `calc(${tall2 ? 900 : 620}px * var(--k, 1))` : '';
+  if(!have.length){ none(split ? 'no tracker hits with an RF phase yet' : `no T${sel} hits with an RF phase yet`); legend('leg_rft_t', []); return; }
+  // one turn of the period for every plane shown: the peak of their sum to the middle, the axis counted from it
+  const n = have[0].P.counts.length, colSum = col=>col.reduce((a,b)=>a+b,0);
+  let sh = 0, x0 = 0;
+  if(document.getElementById('rft_center').checked){
+    const tot = new Array(n).fill(0); for(const {P} of have) P.counts.forEach((col,i)=>{ tot[i] += colSum(col); });
+    const k = tot.indexOf(Math.max(...tot)); sh = (k - Math.floor(n/2) + n) % n; x0 = -(Math.floor(n/2) + 0.5) * per / n;
   }
   const np_ = +document.getElementById('rft_np').value === 1 ? 1 : 2;   // the period drawn once or twice side by side
-  if(np_ === 2){ counts = counts.concat(counts); x1 = x0 + 2*per; }
+  const x1 = x0 + np_*per, turn = c => { const r = c.map((_,i)=>c[(i + sh) % n]); return np_ === 2 ? r.concat(r) : r; };
   const marks = np_ === 2 ? [{x:x0 + per, label:`+${per.toFixed(2)} ns: the same period again`}] : [];
-  const tsum = counts.map(col=>col.reduce((a,b)=>a+b,0)), edges = tsum.map((_,i)=>x0 + i*per/P.counts.length).concat([x1]);
+  const edges = Array.from({length:n*np_ + 1}, (_,i)=>x0 + i*per/n);
   const nxt = np_ === 2 ? 16 : 10;   // ticks every 2.5 ns over two periods, 1-2 ns over one
-  plotHeat('c_rft_q', {counts, x0, x1, y0:0, y1:RFT.qmax, color:PLANE_COLOR[p], ylabel:'Qlong (ADC)', xfmt:v=>sinum(v)+' ns', nxt, marks});
-  plot('c_rft_t', {x0, x1, series:[{kind:'step', edges, y:tsum, color:PLANE_COLOR[p]}], ylabel:'hits / bin', xfmt:v=>sinum(v)+' ns', nxt, marks,
+  const axes = {x0, x1, y0:0, y1:RFT.qmax, xfmt:v=>sinum(v)+' ns', nxt, marks};
+  if(split) plotHeatStack('c_rft_q', Ps.map(({p,P})=>({label:'T'+p, counts:P ? turn(P.counts) : null, color:PLANE_COLOR[p]})),
+                          Object.assign({blank:turn(have[0].P.counts).map(col=>col.map(()=>0))}, axes));
+  else plotHeat('c_rft_q', Object.assign({counts:turn(have[0].P.counts), color:PLANE_COLOR[have[0].p], ylabel:'Qlong (ADC)'}, axes));
+  const series = have.map(({p,P})=>{ const y = turn(P.counts).map(colSum), tot = P.n || 1;
+    return {kind:'step', edges, y: norm ? y.map(v=>v/tot) : y, color:PLANE_COLOR[p]}; });
+  plot('c_rft_t', {x0, x1, series, ylabel: norm ? 'share of the plane\'s hits / bin' : 'hits / bin', xfmt:v=>sinum(v)+' ns', nxt, marks,
                    ylog:document.getElementById('rft_log').checked});
+  legend('leg_rft_t', split ? have.map(({p})=>({name:'T'+p, color:PLANE_COLOR[p]})) : []);
+  drawRftAlign(split ? [0,1,2] : [+sel]);
+}
+// the shifts the alignment applied: per plane and board, the median and range of its channels'
+function drawRftAlign(planes){
+  const t = document.getElementById('t_rft_align'), A = RFT && RFT.align;
+  if(!A){ t.innerHTML = `<tr><td>${document.getElementById('rft_align').checked ? 'not aligned: this analysis is older than the page' : 'alignment off'}</td></tr>`; return; }
+  const f = v => (v>=0?'+':'') + v.toFixed(2);
+  const rows = [];
+  for(const p of planes){
+    const C = A.channels.filter(c=>c.plane===p); if(!C.length) continue;
+    const ref = A.ref['T'+p];
+    rows.push(`<tr><th colspan="4">T${p}${ref ? ` · reference Digi-${ref.board} ch${ref.ch} (${esc(ref.role)})` : ' · no channel with enough hits yet'}</th></tr>`);
+    // by board and half: the upper eight channels of some boards are ~8 ns off their lower eight
+    for(const key of [...new Set(C.map(c=>c.board+'|'+(c.ch<8?0:1)))]){
+      const [sn, hi] = key.split('|').map(Number);
+      const B = C.filter(c=>c.board===sn && (c.ch<8?0:1)===hi), S_ = B.filter(c=>c.shift_ns!=null).map(c=>c.shift_ns).sort((a,b)=>a-b), low = B.length - S_.length;
+      const med = S_.length ? S_[Math.floor(S_.length/2)] : null;
+      rows.push(`<tr><td>${sw(BOARD_COLOR[boardIndex(sn)%BOARD_COLOR.length])}Digi-${sn} ${hi ? 'ch8–15' : 'ch0–7'}</td><td>${B.length} ch</td>`
+        + `<td>${med==null ? '–' : `median ${f(med)} ns`}</td><td>${S_.length ? `${f(S_[0])} … ${f(S_[S_.length-1])} ns` : ''}${low ? ` · ${low} with &lt;${A.min_hits} hits, not shifted` : ''}</td></tr>`);
+    }
+  }
+  t.innerHTML = rows.join('') || '<tr><td>no tracker channel has hits with an RF phase yet</td></tr>';
 }
 
 // ---------------------------------------------------------------- beam vs map: the floor tool's published expectation (GET /expected)
