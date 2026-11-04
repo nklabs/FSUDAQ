@@ -261,6 +261,27 @@ COUNTER_CHER = ff.COUNTERS.index("cherenkov")
 # peak meets that of its plane's busiest channel, from this reading's own hits once it has RFTOF_ALIGN_MIN of them
 RFTOF_ALIGN_MIN = 500
 RFTOF_SMOOTH_NS = 0.5                           # a channel's peak: the mode of its time profile smoothed over this
+# The RF timing tab's gas Cherenkov tag fraction (4 Nov 2026): the T1 hits with a hit of either Cherenkov PMT near
+# them, over all T1 hits, against the T1 hit's RF phase. The isobutane radiator fires for electrons only (muons and
+# pions are far below its threshold), so at the electron phase it is the Cherenkov's electron efficiency, at the
+# pion phase its pion-associated light. Timing between the T1 boards and the PMTs' boards from this run's LED flashes:
+# they light the T1 strips (not the PMTs), so each T1 channel's time in the flashes takes out its board's whole 4-16 ns
+# jumps between runs, and a PMT takes the LED offset of the lit T1 channels on its own board half. CHER_DELAY_NS is
+# what remains: the PMT's own delay (cable, transit time, light path; the peak of t(T1) - t(PMT) for electrons after
+# the LED timing), measured once from a beam run with LED flashes; it moves with the PMT's HV and cabling. A run
+# without LED flashes (or a PMT whose board half has no lit T1 channel) places it on its own beam peak instead.
+CHER_DT_NS = 60                    # pairs kept for t(T1) - t(PMT) within +-60 ns (offsets file removed)
+CHER_DT_BIN_NS = 0.5
+CHER_NDT = int(round(2 * CHER_DT_NS / CHER_DT_BIN_NS))
+CHER_WIN_NS = (-10.0, 25.0)        # the coincidence window about the PMT's delay: wide for the leading edge's walk
+CHER_DELAY_NS = {(15880, 15): 9.0, (1443, 6): 9.25}   # (serial, channel): the PMT's beam peak after the LED timing (1200 V; 1200PMT_waves_016, test_led_017)
+CHER_SIDE_NS = 30.0                # pairs further than this from the delay: the random level
+CHER_PEAK_MIN = 200                # a beam peak to place the window on: at least this many pairs in it
+LED_MIN_CH = 8                     # a flash: at least this many T1 channels with no gap over LED_SPAN_NS between hits
+LED_SPAN_NS = 40.0
+LED_RANGE_NS, LED_BIN_NS = 40.0, 0.25   # a T1 channel's time to the flash's reference, within +-40 ns
+LED_NB = int(round(2 * LED_RANGE_NS / LED_BIN_NS))
+LED_MIN_FLASHES = 50               # a T1 channel's LED offset from at least this many flashes
 EXPECTED_MAX_BYTES = 50 << 20
 CHERENKOV_E_EFF = 1.0                         # share of electrons whose bunch the gas Cherenkov marks "electron" (assumed:
                                               # all; muons and pions below its threshold never fire it)
@@ -632,13 +653,14 @@ def slice_task(task: dict) -> dict:
         rft = rft_none = None
         if chans.rf_slot is not None:
             rft, rft_none = rftof_hist(tc, slot, e, rftof_group(chans)[bd, ch], chans.rf_slot, t0, t1)   # (cells, counts)
+        chk = cher_coinc(tc, slot, chans, t0, t1)
     else:
         res = ff.Result(chans.n_slots, tables.map_n)
         daq = dh.DaqResult(chans.n_slots, np.uint32)
         owned = 0
-        rft = rft_none = None
+        rft = rft_none = chk = None
     return dict(t0=t0, t1=t1, res=res.to_dict(), daq=daq.to_dict(), ref=task["ref"], owned=owned, rft=rft, rft_none=rft_none,
-                dt=time.perf_counter() - t_start)
+                chk=chk, dt=time.perf_counter() - t_start)
 
 
 def rftof_group(chans):
@@ -676,6 +698,100 @@ def rftof_hist(tc, slot, e, group, rf_slot, t0, t1):
     qi = np.minimum(np.asarray(e[trk], np.int64) * RFTOF_NQ // qmax, RFTOF_NQ - 1)
     cells, counts = np.unique((np.asarray(slot[trk], np.int64) * ntf + ti) * RFTOF_NQ + qi, return_counts=True)
     return (cells, counts.astype(np.int64)), 0
+
+
+def cher_index(chans):
+    """The RF timing tab's Cherenkov tag fraction: the T1 channels (slots, in order) and the gas Cherenkov's PMTs
+    (slots), and per slot its T1 index (-1: not T1)."""
+    t1_slots = np.flatnonzero(chans.plane.reshape(-1) == 1)
+    pmt_slots = np.flatnonzero(chans.counter.reshape(-1) == COUNTER_CHER)
+    t1_of = np.full(chans.n_slots, -1, np.int64)
+    t1_of[t1_slots] = np.arange(t1_slots.size)
+    return t1_slots, pmt_slots, t1_of
+
+
+def _rf_bins(tc, slot, rf_slot, th, nbins):
+    """Phase bins (of nbins over one RF period) of the times th, as rftof_hist takes them; None without two RF
+    triggers."""
+    T = 1e12 / RFTOF_HZ
+    t_rf = np.sort(tc[slot == rf_slot])
+    if t_rf.size:
+        t_rf = t_rf[np.r_[True, np.diff(t_rf) > T / 2]]
+    if t_rf.size < 2:
+        return None
+    d = np.diff(t_rf).astype(np.float64)
+    period = d / np.rint(d / T)
+    i = np.clip(np.searchsorted(t_rf, th, side="right") - 1, 0, t_rf.size - 2)
+    ph = ((th - t_rf[i]) / period[i]) % 1.0
+    return np.minimum((ph * nbins).astype(np.int64), nbins - 1)
+
+
+def cher_coinc(tc, slot, chans, t0, t1):
+    """The slice's part of the Cherenkov tag fraction (offsets removed, T1 hits the slice owns, [t0, t1)):
+    led: the LED flashes' cells (slot, time to the flash's reference) and the number of flashes; den: T1 hits outside
+    the flashes per (T1 index, RF phase bin); pair: per (PMT, T1 index, t(T1) - t(PMT) bin, RF phase bin) the pairs
+    within +-CHER_DT_NS. Each as (cells, counts); None when there is nothing to count."""
+    out = dict(led=None, flashes=0, den=None, pair=None)
+    t1_slots, pmt_slots, t1_of = cher_index(chans)
+    if not t1_slots.size:
+        return out
+    bc = chans.board_channels
+    i1 = np.flatnonzero((t1_of[slot] >= 0) & (tc >= t0) & (tc < t1))
+    if not i1.size:
+        return out
+    i1 = i1[np.argsort(tc[i1], kind="stable")]
+    th, sh = tc[i1], np.asarray(slot[i1], np.int64)
+    # LED flashes: many T1 channels at once (one particle fires one to three neighbours)
+    gid = np.cumsum(np.r_[True, np.diff(th) > LED_SPAN_NS * 1000]) - 1
+    u = np.unique(gid * chans.n_slots + sh)
+    big = np.bincount(u // chans.n_slots, minlength=int(gid[-1]) + 1) >= LED_MIN_CH
+    flash = big[gid]
+    if flash.any():
+        # each flash's reference: the median time of its hits on the lower half of the T1 board with the most T1
+        # channels (a board's halves can be ~8 ns apart)
+        bref = int(np.bincount(t1_slots // bc).argmax())
+        isref = (sh // bc == bref) & (sh % bc < 8)
+        if not np.any(isref & flash):
+            isref = sh // bc == bref
+        cells = []
+        for g in np.flatnonzero(big):
+            m = gid == g
+            r = m & isref
+            if not r.any():
+                continue
+            d = (th[m] - np.median(th[r])) / 1000.0
+            k = np.floor((d + LED_RANGE_NS) / LED_BIN_NS).astype(np.int64)
+            ok = (k >= 0) & (k < LED_NB)
+            cells.append(sh[m][ok] * LED_NB + k[ok]); out["flashes"] += 1
+        if cells:
+            c, n = np.unique(np.concatenate(cells), return_counts=True)
+            out["led"] = (c, n.astype(np.int64))
+    if chans.rf_slot is None or not pmt_slots.size:
+        return out
+    keep = ~flash
+    th, sh = th[keep], sh[keep]
+    ti = _rf_bins(tc, slot, chans.rf_slot, th, RFTOF_NT) if th.size else None
+    if ti is None:
+        return out
+    k1 = t1_of[sh]
+    c, n = np.unique(k1 * RFTOF_NT + ti, return_counts=True)
+    out["den"] = (c, n.astype(np.int64))
+    n1, W = t1_slots.size, CHER_DT_NS * 1000
+    cells = []
+    for pi, ps in enumerate(pmt_slots):
+        tp = np.sort(tc[slot == ps])
+        if not tp.size:
+            continue
+        lo = np.searchsorted(tp, th - W); hi = np.searchsorted(tp, th + W, side="right")
+        for kk in range(int((hi - lo).max())):
+            j = lo + kk; ok = j < hi
+            dt = (th[ok] - tp[j[ok]]) / 1000.0
+            di = np.clip(np.floor((dt + CHER_DT_NS) / CHER_DT_BIN_NS).astype(np.int64), 0, CHER_NDT - 1)
+            cells.append(((pi * n1 + k1[ok]) * CHER_NDT + di) * RFTOF_NT + ti[ok])
+    if cells:
+        c, n = np.unique(np.concatenate(cells), return_counts=True)
+        out["pair"] = (c, n.astype(np.int64))
+    return out
 
 
 class _Done:
@@ -987,6 +1103,7 @@ class Online:
         self.acc = ff.Result(S.chans.n_slots, S.tables.map_n)   # the finder's histograms and counters
         self.rftof = np.zeros((S.chans.n_slots, RFTOF_NT * RFTOF_FINE, RFTOF_NQ), np.int64)  # RF timing tab: TOF modulo RF x Qlong, per channel
         self.rftof_none = 0                     # tracker hits without an RF phase
+        self._cher_new(S.chans)                 # RF timing tab: the Cherenkov tag fraction, and this run's LED timing
         self.trip_skipped = 0                   # slices whose track counts did not fit the map (Beam vs map)
         self.daq = dh.DaqResult(S.chans.n_slots)
         self.secs = {}                          # second of data time -> hits per slot
@@ -1576,6 +1693,8 @@ class Online:
                     if r.get("rft") is not None:
                         cells, counts = r["rft"]
                         np.add.at(self.rftof.reshape(-1), cells, counts); self.rftof_none += r["rft_none"]
+                    if r.get("chk"):
+                        self._cher_add(r["chk"])
                 n_trk = int((res["h_ntrk"] * np.arange(ff.NTRK)).sum())
                 status = {ff.STATUS[i]: int(c) for i, c in enumerate(res["h_status"]) if c}
                 k = int(r["t0"] // (RUN_BIN_S * PS))      # by the slice's start: a slice (<= --max-slice-s) is not split
@@ -1653,6 +1772,135 @@ class Online:
         if not isinstance(tv, dict):
             return 404, dict(note=err or "the publish has no top view (written by an older floor tool: Publish again)")
         return 200, dict(published_at=doc.get("published_at"), top_view=tv)
+
+    def _cher_new(self, chans):
+        """The Cherenkov tag fraction's histograms and the LED timing, empty (a new run or setup)."""
+        t1s, pms, _ = cher_index(chans)
+        self.cher_t1, self.cher_pmt = t1s, pms
+        self.cher_den = np.zeros(t1s.size * RFTOF_NT, np.int64)                     # T1 hits (not LED) per (T1, phase)
+        self.cher_pair = np.zeros(pms.size * t1s.size * CHER_NDT * RFTOF_NT, np.int32)   # pairs per (PMT, T1, dt, phase)
+        self.led_hist = np.zeros(chans.n_slots * LED_NB, np.int64)                  # per slot: time to the flash
+        self.led_flashes = 0
+
+    def _cher_add(self, c):
+        for key, arr in (("den", self.cher_den), ("pair", self.cher_pair), ("led", self.led_hist)):
+            if c.get(key) is not None:
+                cells, counts = c[key]
+                if cells.size and cells.max() < arr.size:     # made for this setup
+                    np.add.at(arr, cells, counts.astype(arr.dtype))
+        self.led_flashes += int(c.get("flashes") or 0)
+
+    def cher_view(self, align=False):
+        """GET /rftag: the RF timing tab's Cherenkov tag fraction: per RF phase bin (page bins), the T1 hits outside
+        the LED flashes (den), those with a hit of either PMT in its window (num: pairs, so a T1 hit both PMTs saw counts
+        twice; rare, the mirrors are apart) and the random level from the pairs far from the window (rnd); per PMT,
+        t(T1) - t(PMT) after the timing, its window and how it was timed (README "RF timing"). align: the T1 channels
+        shifted in phase as GET /rftof?align=1 shifts them."""
+        rv = self.rftof_view(True) if align else None
+        with self.lock:
+            ch = self.setup.chans
+            if ch.rf_slot is None:
+                return dict(rf=None, note="no RF reference in the cabling: give its digitizer channel kind rf")
+            t1s, pms = self.cher_t1, self.cher_pmt
+            b, c = divmod(ch.rf_slot, ch.board_channels)
+            rf = dict(serial=self.serials[b], ch=int(c))
+            if not t1s.size or not pms.size:
+                return dict(rf=rf, note="the cabling has no " + ("T1 channel" if not t1s.size else "gas Cherenkov PMT (kind cherenkov)"))
+            D = self.cher_den.reshape(t1s.size, RFTOF_NT).copy()
+            P = self.cher_pair.reshape(pms.size, t1s.size, CHER_NDT, RFTOF_NT).astype(np.int64)
+            L = self.led_hist.reshape(ch.n_slots, LED_NB).copy(); nfl = int(self.led_flashes)
+        bc, nt, per = ch.board_channels, RFTOF_NT, 1e9 / RFTOF_HZ
+        if rv and rv.get("align"):           # the T1 channels' phase shifts, as the tab's own histograms
+            shf = {c_["slot"]: c_["shift_ns"] for c_ in rv["align"]["channels"] if c_["plane"] == 1 and c_["shift_ns"] is not None}
+            for i, s in enumerate(t1s):
+                k = int(round(shf.get(int(s), 0.0) / (per / nt)))
+                if k:
+                    D[i] = np.roll(D[i], -k); P[:, i] = np.roll(P[:, i], -k, axis=-1)
+        # the LED timing: each lit T1 channel's time in the flashes (to the flash's reference)
+        dl = (np.arange(LED_NB) + 0.5) * LED_BIN_NS - LED_RANGE_NS
+        off = {}
+        for s in t1s:
+            h = L[s]
+            if h.sum() < LED_MIN_FLASHES:
+                continue
+            m = int(np.convolve(h, np.ones(5), "same").argmax()); w = np.abs(dl - dl[m]) < 1.5
+            off[int(s)] = float((h[w] * dl[w]).sum() / max(h[w].sum(), 1))
+
+        def led_of(bd, half=None):          # the median LED offset of a board's (half's) lit T1 channels
+            v = [o for s, o in off.items() if s // bc == bd and (half is None or (s % bc >= 8) == half)]
+            return float(np.median(v)) if v else None
+        t1_off = []
+        for s in t1s:
+            o = off.get(int(s))
+            if o is None:
+                o = led_of(s // bc, s % bc >= 8)
+            if o is None:
+                o = led_of(s // bc)
+            t1_off.append(o)
+        halves = sorted({(int(s) // bc, int(s) % bc >= 8) for s in t1s})
+        led_rows = [dict(board=self.serials[bd], half="ch8-15" if hi else "ch0-7",
+                         lit=sum(1 for s in off if s // bc == bd and (s % bc >= 8) == hi),
+                         channels=sum(1 for s in t1s if s // bc == bd and (s % bc >= 8) == hi),
+                         led_ns=None if led_of(bd, hi) is None else round(led_of(bd, hi), 2)) for bd, hi in halves]
+        dtc = (np.arange(CHER_NDT) + 0.5) * CHER_DT_BIN_NS - CHER_DT_NS
+        lo_w, hi_w = CHER_WIN_NS
+        num = np.zeros(nt); rnd = np.zeros(nt); pm_out = []
+
+        def peak_of(h):                     # the beam peak of t(T1) - t(PMT): (ns, pairs within +-3 ns) or None
+            sm = np.convolve(h, np.ones(5), "same"); m = int(sm.argmax())
+            near = np.abs(dtc - dtc[m]) < 3; side = np.abs(dtc - dtc[m]) > 20
+            n_in = float(h[near].sum()); bg = float(h[side].mean()) * near.sum() if side.any() else 0.0
+            return (float(dtc[m]), n_in) if n_in >= CHER_PEAK_MIN and n_in > 3 * bg else None
+
+        def moved(a, k):                     # a (dt, phase) histogram moved by k dt bins, emptied at the ends
+            if k == 0:
+                return a
+            r = np.zeros_like(a)
+            if k > 0:
+                r[k:] = a[:-k]
+            else:
+                r[:k] = a[-k:]
+            return r
+        for pi, ps in enumerate(pms):
+            bd, c = divmod(int(ps), bc); key = (self.serials[bd], c)
+            K = CHER_DELAY_NS.get(key, 8.0)
+            cp = led_of(bd, c >= 8)
+            cp_src = "LED, its board half" if cp is not None else None
+            if cp is None:
+                cp = led_of(bd); cp_src = "LED, its board" if cp is not None else None
+            shift = np.zeros(t1s.size, np.int64); how = np.full(t1s.size, "none", object)
+            for i in range(t1s.size):
+                if cp is not None and t1_off[i] is not None:
+                    shift[i] = int(round((cp - t1_off[i]) / CHER_DT_BIN_NS)); how[i] = "LED"
+            # the rest: on their board half's own beam peak (a run without LED flashes, or before they are read)
+            groups = []
+            for bd2, hi in halves:
+                sel = [i for i, s in enumerate(t1s) if how[i] == "none" and s // bc == bd2 and (s % bc >= 8) == hi]
+                if not sel:
+                    continue
+                pk = peak_of(P[pi, sel].sum(axis=(0, 2)))
+                if pk is not None:
+                    for i in sel:
+                        shift[i] = int(round((K - pk[0]) / CHER_DT_BIN_NS)); how[i] = "beam"
+                groups.append(dict(board=self.serials[bd2], half="ch8-15" if hi else "ch0-7", timing="beam peak" if pk else "untimed",
+                                   peak_ns=None if pk is None else round(pk[0], 2)))
+            A = np.zeros((CHER_NDT, nt), np.int64)
+            for i in range(t1s.size):
+                A += moved(P[pi, i], int(shift[i]))
+            win = (dtc >= K + lo_w) & (dtc < K + hi_w); side = np.abs(dtc - K) >= CHER_SIDE_NS
+            num += A[win].sum(axis=0)
+            if side.any():
+                rnd += A[side].sum(axis=0) / (side.sum() * CHER_DT_BIN_NS) * (hi_w - lo_w)
+            hdt = A.sum(axis=1); pk = peak_of(hdt)
+            used = {h for i, h in enumerate(how) if P[pi, i].any()}
+            pm_out.append(dict(board=key[0], ch=key[1], delay_ns=K, window_ns=[K + lo_w, K + hi_w], led_ns=None if cp is None else round(cp, 2),
+                               led_src=cp_src, timing=" + ".join(sorted(used)) if used else "no pairs yet",
+                               channels={h: int(sum(1 for i in range(t1s.size) if how[i] == h and P[pi, i].any())) for h in ("LED", "beam", "none")},
+                               peak_ns=None if pk is None else round(pk[0], 2), pairs=int(hdt.sum()), in_window=int(A[win].sum()),
+                               groups=groups, dt=hdt.tolist()))
+        return dict(rf=rf, period_ns=per, nt=nt, aligned=bool(rv and rv.get("align")), den=D.sum(axis=0).tolist(),
+                    num=num.tolist(), rnd=rnd.tolist(), win_ns=list(CHER_WIN_NS), dt_bin_ns=CHER_DT_BIN_NS, dt0_ns=-CHER_DT_NS,
+                    side_ns=CHER_SIDE_NS, led=dict(flashes=nfl, lit=len(off), t1=int(t1s.size), halves=led_rows), pmts=pm_out)
 
     def rftof_view(self, align=False):
         """GET /rftof: the RF timing tab's TOF modulo the RF against Qlong, per group with hits (tracker plane, or the
@@ -2052,6 +2300,7 @@ class Online:
                 self._agg_event("clear", "the page's Clear: the finder's results and the late and early counts start again")
             self.acc = ff.Result(self.setup.chans.n_slots, self.setup.tables.map_n)
             self.rftof = np.zeros_like(self.rftof); self.rftof_none = 0
+            self.cher_den[:] = 0; self.cher_pair[:] = 0      # the LED timing is kept: it describes this run's boards
             self.trip_skipped = 0
             self.daq = dh.DaqResult(self.setup.chans.n_slots)
             self.owned = 0
@@ -3265,6 +3514,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(*self.online.expected_view())
         if path == "/rftof":       # the RF timing tab: TOF modulo the RF against Qlong, for anyone: read-only
             return self.reply(200, self.online.rftof_view(q.get("align", ["0"])[0] == "1"))
+        if path == "/rftag":       # the RF timing tab: the Cherenkov tag fraction of T1 hits, for anyone: read-only
+            return self.reply(200, self.online.cher_view(q.get("align", ["0"])[0] == "1"))
         if path == "/summary":     # a recorded run's summary, for anyone: read-only, nothing changes for the others
             code, d = self.online.summary_reply(q.get("run", [""])[0])
             return self.reply(code, d)

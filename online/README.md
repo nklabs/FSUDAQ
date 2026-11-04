@@ -89,6 +89,27 @@ that moves the boards is followed. It makes every strip of a plane peak at the s
 difference would be hidden) and changes only this tab, not the finder. The table under the plots lists the shifts per
 board and half (ch0-7, ch8-15).
 
+**Gas Cherenkov tag fraction** (4 Nov 2026): per bin of the T1 hit's RF phase (the same turn of the period as the
+plots above, T1's channels aligned alike), the T1 hits with a hit of either Cherenkov PMT (cabling kind `cherenkov`)
+in the coincidence window, over all T1 hits; T1 hits in LED flashes are left out. The radiator fires for electrons
+only, so at the electron phase it reads the Cherenkov's electron efficiency, at the pion phase its pion-associated
+light. **p** (kept in the browser) marks where muons and pions arrive after the electron phase (the bin most often
+tagged), for a 24.3 m flight path. Counted as pairs: a T1 hit both PMTs saw counts twice. The random level is the
+pairs 30-60 ns from the window, scaled to its width. `GET /rftag` (read-only, for anyone) returns it.
+
+Timing between T1 and the PMTs from this run's LED flashes: a flash is at least `LED_MIN_CH` (8) T1 channels with no
+gap over 40 ns between their hits; its reference is the median time of its hits on the lower half of the T1 board with
+the most T1 channels. Each lit T1 channel's mean time to the reference (from at least 50 flashes) is subtracted from
+its hits, an unlit one takes its board half's; a PMT takes the LED offset of the lit T1 channels on its own board half
+(15880 ch8-10 for 15880 ch15, 1443 ch7 for 1443 ch6). That takes out the boards' whole 4-16 ns jumps between runs.
+What is left is each PMT's own delay, `CHER_DELAY_NS` (cable, transit time, light path: the beam peak of t(T1) -
+t(PMT) after the LED timing, 1200 V, 1200PMT_waves_016 and test_led_017: 15880 ch15 +9.0 ns, 1443 ch6 +9.25 ns);
+the window is -10 to +25 ns about it (the leading edge's walk: bigger pulses are earlier, electron-dominated
+peaks sit ~3 ns later). It moves with the PMTs' HV and cabling: the table warns when the beam peak is more than 4 ns
+from it. Without LED flashes (or before they are read), each T1 board half is placed on its own beam peak (at least
+200 pairs in it); board halves with fewer stay untimed and are listed. The LED timing survives Clear (it describes
+the run's boards).
+
 ### Analysis files
 
 A run read while it is taken keeps what its analysis reads, in `<run>/<run>_analysis/`: read-only copies of
