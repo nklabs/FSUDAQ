@@ -19,6 +19,11 @@ the link sets it.
 
     python3 status/status_server.py          # on odin; standard library only
 
+The same page in a terminal, htop-style: `python3 status/tui.py` (`--url http://odin.psi.ch:8060` from
+elsewhere). A lamp per card, the cards with a dot per item in the page's colours (greyed when the server
+stops answering), Enter for an item's details, and the past hour of every PLC reading as a sparkline: from
+pion-ros's topic plots on romulus (`--plots`), since the status server keeps only the latest value. Read-only.
+
 Anyone on the beamline network can look: http://odin.psi.ch:8060/ (status) and
 http://odin.psi.ch:8060/limits (limits and names, view only). Limits are saved only from odin
 itself or through an ssh tunnel (a quiet window, as for the online dashboard):
