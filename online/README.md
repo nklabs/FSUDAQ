@@ -227,7 +227,9 @@ time). A failed LED command is shown at the top, an "off" with the warning that 
 still be on.
 
 What the finder needs that is not in the data comes from `experiment.json` (copy
-`experiment.example.json`), read again for every run: `setting` (high|low, the T1/T2 position),
+`experiment.example.json`), read again for every run: `setting` (high|mid|low|ultralow, the T1/T2 position,
+equally spaced; mid and ultralow since 5 Nov 2026, in maps built since; a setting the finder's files lack is a problem
+on the page and the high map is used),
 `cabling` (CSV serial,channel,kind,plane,ch; kind trk/veto/cherenkov/lucite), `gains` (CSV
 serial,channel,mevee_per_count), `time_offsets` (CSV serial,channel,offset_ns) and optionally
 `map`. The command-line options of the same names override it. Anything missing is a

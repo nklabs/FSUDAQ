@@ -112,6 +112,12 @@ class Tables:
 
 
 # ---------------------------------------------------------------- cabling, gains, offsets
+def finder_settings():
+    """The settings the map in finder/ holds (its handoff_meta.json), e.g. ('high', 'mid', 'low', 'ultralow')."""
+    meta = json.load(open(os.path.join(FINDER_DIR, "handoff_meta.json")))
+    return tuple(meta["planes_s_mm"])
+
+
 def plane_counts(setting="high"):
     """Channels per tracker plane (T0, T1, T2) of the map in finder/ (its handoff_meta.json)."""
     meta = json.load(open(os.path.join(FINDER_DIR, "handoff_meta.json")))
@@ -701,7 +707,7 @@ def _synthetic_bunches(T, n, rng, calibrated):
 def selftest(n=200000, seed=1):
     rng = np.random.default_rng(seed)
     bad = 0
-    for setting in ("high", "low"):
+    for setting in finder_settings():
         for calibrated in (False, True):
             tb = Tables(setting, calibrated=calibrated)
             T = tb.T

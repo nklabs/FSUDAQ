@@ -119,6 +119,7 @@ PRODUCTION_PORT = 8050                        # FSUDAQ's dashboard: the one that
 DEFAULT_BOARDS = "15880,15879,58918,62839,65316,30508,1443,1399,30505"   # odin's rack order (FSUDAQ passes its boardOrder)
 EIGHT_CHANNEL_BOARDS = "30508,1443,1399,30505"   # the desktop boards
 CONFIG = os.path.join(HERE, "experiment.json")
+FINDER_SETTINGS = ("high", "mid", "low", "ultralow")   # T1/T2 positions, equally spaced (mid, ultralow: 5 Nov 2026)
 HISTORY_S = 600                               # seconds of rate history kept
 PS = 1_000_000_000_000                        # ps per second
 FILE_RE = re.compile(r"_(\d+)_(PSD|PHA|QDC)_\d+_(\d+)\.fsu$")   # <prefix>_<run>_<serial>_<DPP>_<tick>_<index>.fsu
@@ -526,8 +527,8 @@ def load_config(a):
                 if key != "setting" and not os.path.isabs(str(v)):
                     v = os.path.join(base, str(v))
         out[key] = v
-    if out["setting"] not in (None, "high", "low"):
-        problems.append(f"setting '{out['setting']}' is neither high nor low")
+    if out["setting"] not in (None,) + FINDER_SETTINGS:
+        problems.append(f"setting '{out['setting']}' is none of {', '.join(FINDER_SETTINGS)}")
         out["setting"] = None; src["setting"] = None
     for key in ("cabling", "gains", "time_offsets", "map"):
         if out[key] and not os.path.exists(out[key]):
@@ -554,6 +555,11 @@ class Setup:
         self.setting = cfg["setting"] or "high"
         if cfg["setting"] is None:
             warnings.append("beam setting not given (experiment.json \"setting\"): the HIGH map is used")
+        held = ff.finder_settings()
+        if self.setting not in held:          # e.g. mid or ultralow with a map built before them
+            problems.append(f"setting '{self.setting}' is not in the finder's files (finder/handoff_meta.json holds "
+                            f"{', '.join(held)}): the HIGH map is used, its momenta are wrong for this setting")
+            self.setting = "high"
         rows = None
         if cfg["cabling"]:
             try:
@@ -3677,7 +3683,7 @@ def parse_args(argv=None):
     p.add_argument("--eight-channel-boards", default=EIGHT_CHANNEL_BOARDS, help="serials of 8-channel boards")
     p.add_argument("--config", default=CONFIG, help="the run's setting, cabling, gains, time offsets and map (JSON, "
                                                      "re-read for each run); the options below override it")
-    p.add_argument("--setting", choices=("high", "low"), default=None, help="T1/T2 position installed for this run")
+    p.add_argument("--setting", choices=FINDER_SETTINGS, default=None, help="T1/T2 position installed for this run")
     p.add_argument("--map", default=None, help="momentum map (default finder/momentum_map.csv); columns per finder/INTERFACE.md")
     p.add_argument("--cabling", default=None, help="CSV serial,channel,kind,plane,ch (kind trk/veto/cherenkov/lucite)")
     p.add_argument("--gains", default=None, help="CSV serial,channel,mevee_per_count; without it the light tests are off")
