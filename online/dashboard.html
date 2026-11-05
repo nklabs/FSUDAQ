@@ -85,6 +85,7 @@
   .bar button, h1 button, .toolbar button, .ctl button { font:calc(11px * var(--k, 1))/calc(18px * var(--k, 1)) system-ui, sans-serif; padding:0 6px; border:1px solid var(--line);
                            background:transparent; color:var(--muted); border-radius:4px; cursor:pointer; }
   .bar button:hover, h1 button:hover, .toolbar button:hover, .ctl button:hover { color:var(--fg); border-color:var(--muted); }
+  .toolbar button[aria-pressed="true"] { color:var(--fg); border-color:var(--fg); font-weight:600; }
   .card.w2 { grid-column:span 2; }
   .card.wfull { grid-column:1 / -1; }
   .card.tall1 canvas { height:calc(330px * var(--k, 1)); }
@@ -261,20 +262,21 @@
     <label title="Turn the period so the most-populated time bin is in the middle; the axis then counts from it"><input type="checkbox" id="rft_center" checked> centre on the peak</label>
     <span title="The same period drawn once, or twice side by side, so what lies across its ends is seen whole">Show <select id="rft_np"><option value="1">1 period</option><option value="2">2 periods</option></select></span>
     <label title="Log scale for the time-of-flight histogram (all charges): the floor and the tails"><input type="checkbox" id="rft_log"> log scale</label>
+    <label title="The beam momentum, to mark where muons and pions arrive after the electrons on the heat maps and the tag fraction (flight path 24.3 m, from the π–e separation at 150 and 350 MeV/c, 4 Nov 2026). Kept in this browser; empty: electrons only">p <input type="number" id="rft_p" min="10" max="2000" step="10" style="width:5em"> MeV/c</label>
+    <button id="rft_peaks" aria-pressed="false" title="Turn T0's, T2's and the Cherenkov's histograms, both time-of-flight plots, so each one's highest peak (smoothed over 3 bins) sits on T1's; T1 stays on the tag fraction's axis. What the shift was is in the note. Again: back to the times as aligned on the LED">line up the peaks</button>
     <span id="rft_note"></span>
   </div>
   <div class="grid" data-grid="rft">
     <div class="card w2 tall1"><h2>Time of flight modulo the RF against Qlong</h2><canvas id="c_rft_q"></canvas>
-      <div class="note">Each tracker hit's time after the RF reference, modulo the accelerator period, its phase taken between the RF triggers on either side of it. Shade: log of the count. Zero is the RF reference's own phase (or the peak), not the production time.</div></div>
+      <div class="note">Each tracker hit's time after the RF reference, modulo the accelerator period, its phase taken between the RF triggers on either side of it. Shade: log of the count. Zero is the RF reference's own phase (or, centred, T1's busiest bin: the axis of the tag fraction below), not the production time. Dashed e⁻ μ⁻ π⁻: from the tag fraction's electron phase (its own e⁻ mark, the bin most often tagged), muons and pions after it for the momentum p (24.3 m), on T1; on the Cherenkov at the same time: its hits are put on T1's time, each PMT's moved (after the LED timing) by its measured t(T1) − t(PMT) beam peak (the timing card); before that peak is known, e⁻ of each PMT at T1's electron phase less it. None on T0 and T2: their times are not locked to T1's (their board halves have no lit LED channel, the halves' fixed difference is left in) and nothing tags their electrons. None before 50 tagged T1 hits.</div></div>
     <div class="card w2"><h2>Time of flight modulo the RF, all charges</h2><canvas id="c_rft_t"></canvas><div class="legend" id="leg_rft_t"></div></div>
     <div class="card w2"><h2>Gas Cherenkov tag fraction: T1 hits with a Cherenkov hit ÷ all T1 hits, against T1's time of flight</h2>
-      <div class="ctl"><label title="The beam momentum, to mark where muons and pions arrive after the electrons (flight path 24.3 m, from the π–e separation at 150 and 350 MeV/c, 4 Nov 2026). Kept in this browser; empty: electrons only">p <input type="number" id="rft_p" min="10" max="2000" step="10" style="width:5em"> MeV/c</label>
-        <label title="Log scale for the tag fraction"><input type="checkbox" id="rft_tlog" checked> log scale</label></div>
+      <div class="ctl"><label title="Log scale for the tag fraction"><input type="checkbox" id="rft_tlog" checked> log scale</label></div>
       <canvas id="c_rft_tag"></canvas><div class="legend" id="leg_rft_tag"></div>
       <div class="note" id="note_rft_tag">Per bin of the T1 hit's RF phase (the same axis as above, T1's channels aligned alike): the share of T1 hits with a hit of either Cherenkov PMT in the coincidence window. The radiator (isobutane) fires for electrons only, so at the electron phase it is the Cherenkov's electron efficiency, at the pion phase its pion-associated light. LED flashes are left out. Grey: the random level over the period, from the pairs far from the window. Counted as pairs: a T1 hit both PMTs saw counts twice (rare, their mirrors are apart). Since the reading began or the last Clear.</div></div>
     <div class="card w2"><h2>Cherenkov timing: t(T1 hit) − t(Cherenkov hit), after this run's LED timing</h2><canvas id="c_rft_cdt"></canvas><div class="legend" id="leg_rft_cdt"></div>
       <table id="t_rft_ctime"></table>
-      <div class="note" id="note_rft_cdt">Every T1 hit against every hit of each PMT within ±60 ns. The LED flashes light the T1 strips (not the PMTs): each T1 channel's time in them, and the lit T1 channels on the PMT's own board half, take out the boards' whole 4–16 ns jumps between runs. What remains is the PMT's own delay (cable, transit time, light path), set in the analysis per PMT and measured once from a beam run with LED flashes; it moves with the PMT's HV. Dashed: the coincidence window, −10 to +25 ns about that delay (wide for the leading edge's walk: bigger pulses are earlier). A run without LED flashes, or before they are read, places each T1 board half on its own beam peak instead ("beam").</div></div>
+      <div class="note" id="note_rft_cdt">Every T1 hit against every hit of each PMT within ±60 ns. The LED flashes light the T1 strips (not the PMTs): each T1 channel's time in them, and the lit T1 channels on the PMT's own board half, take out the boards' whole 4–16 ns jumps between runs. What remains is the PMT's own delay (cable, transit time, light path), set in the analysis per PMT and measured once from a beam run with LED flashes; it moves with the PMT's HV. Dashed: the coincidence window, on each PMT's own beam peak once it has one (at least 200 pairs within ±3 ns, over 3× the level far from it): its edges where the pairs (smoothed over 2.5 ns) fall to twice that level, plus 1 ns, 5–25 ns from the peak; the random level from the pairs over 10 ns outside it. Before that, −10 to +25 ns about the set delay. A run without LED flashes, or before they are read, places each T1 board half on its own beam peak instead ("beam").</div></div>
     <div class="card w2"><h2>Channel alignment on the LED: each board's shift, by plane (and the Cherenkov's PMTs)</h2><table id="t_rft_align"></table>
       <div class="note" id="note_rft_align">Each run's LED flashes (1–3 s after Start) light many T1 channels at once; each lit channel's LED time is the peak of its time in the flashes against each flash's reference (the median on the lower half of the board with the most T1 channels). A board's start differs by 4–16 ns from run to run and moves all its channels alike (the cabling is the same for every channel), so every channel is shifted, in 99-ps steps and modulo the RF period, by an LED time less the median of the lit channels': its own when the LED reaches it, else the median of the lit channels on its board half (its board's start offset), else on the other half of its board (some boards' halves differ by a fixed ~8 ns, then left in: T0 on 15880 ch0–7, T2 on 65316 ch0–7). The real flight time between the planes is kept. Shift = what was subtracted. From this run's flashes; Clear keeps them. The gas Cherenkov's two PMTs are summed; their Qlong has its own axis (0–512 ADC: far less charge than the tracker's; overflows in the top bin).</div></div>
   </div>
@@ -993,8 +995,8 @@ function drawRftTag(){
     for(let k=0;k<np_;k++){
       marks.push({x:xe + k*per, color:'#2ca02c', label:k ? '' : 'e⁻'});
       if(p > 0){ marks.push({x:at(after(105.66)) + k*per, color:'#9467bd', label:k ? '' : 'μ⁻'}); marks.push({x:at(after(139.57)) + k*per, color:'#d62728', label:k ? '' : 'π⁻'}); } } }
-  const ylog = document.getElementById('rft_tlog').checked;
-  plot('c_rft_tag', {x0, x1, series:[{kind:'step', edges, y:frac.map(v=>v ?? 0), color:'#2ca02c', width:1.8},
+  const ylog = document.getElementById('rft_tlog').checked, VT = VW.c_rft_tag || {};   // y only, as the plot above
+  plot('c_rft_tag', {x0, x1, view:{y0:VT.y0, y1:VT.y1}, series:[{kind:'step', edges, y:frac.map(v=>v ?? 0), color:'#2ca02c', width:1.8},
                                      {kind:'step', edges, y:rfr.map(v=>v ?? 0), color:css('--muted'), width:1}],
                      ylabel:'% of T1 hits with a Cherenkov hit', xfmt:v=>sinum(v)+' ns', nxt, marks, ylog,
                      empty:'no T1 hits with an RF phase yet'});
@@ -1010,9 +1012,10 @@ function drawRftTag(){
   const rows = [`<tr><th colspan="5">LED timing: ${T.led.flashes ? `${sinum(T.led.flashes)} flashes read, ${T.led.lit} of ${T.led.t1} T1 channels lit` : warn('no LED flashes read in this run (yet): placed on the beam peak')}</th></tr>`];
   for(const p of T.pmts){
     const off = p.peak_ns==null ? null : p.peak_ns - p.delay_ns;
+    const onPeak = p.window_src === 'beam peak';
     rows.push(`<tr><td>Digi-${p.board} ch${p.ch}</td><td>timing: ${esc(p.timing)}${p.led_src ? ` (${esc(p.led_src)} ${f(p.led_ns)})` : ''}</td>`
-      + `<td>delay ${f(p.delay_ns)} · window ${f(p.window_ns[0])} … ${f(p.window_ns[1])}</td>`
-      + `<td>beam peak ${f(p.peak_ns)}${off!=null && Math.abs(off) > 4 ? ' ' + warn(`${f(off)} off its delay: has its HV or cabling changed?`) : ''}</td>`
+      + `<td>window ${f(p.window_ns[0])} … ${f(p.window_ns[1])} ${onPeak ? '(on the peak)' : `(set delay ${f(p.delay_ns)})`}</td>`
+      + `<td>beam peak ${f(p.peak_ns)}${!onPeak && off!=null && Math.abs(off) > 4 ? ' ' + warn(`${f(off)} off the set delay: has its HV or cabling changed?`) : ''}</td>`
       + `<td>T1 channels: ${p.channels.LED} LED${p.channels.beam ? `, ${p.channels.beam} beam` : ''}${p.channels.none ? ', ' + warn(`${p.channels.none} untimed`) : ''}</td></tr>`);
   }
   rows.push(`<tr><th colspan="5">LED offsets of the T1 board halves (to the flash's reference)</th></tr>`);
@@ -1029,6 +1032,13 @@ document.getElementById('rft_np').value = store.get('fsudaq-rft-np', 2);
 document.getElementById('rft_np').onchange = e=>{ store.set('fsudaq-rft-np', +e.target.value); draw(); };
 document.getElementById('rft_log').checked = store.get('fsudaq-rft-log', false);
 document.getElementById('rft_log').onchange = e=>{ store.set('fsudaq-rft-log', e.target.checked); draw(); };
+const rftPeaksBtn = document.getElementById('rft_peaks');
+rftPeaksBtn.setAttribute('aria-pressed', String(!!store.get('fsudaq-rft-peaks', false)));
+rftPeaksBtn.onclick = ()=>{ const on = rftPeaksBtn.getAttribute('aria-pressed') !== 'true';
+  rftPeaksBtn.setAttribute('aria-pressed', String(on)); store.set('fsudaq-rft-peaks', on); draw(); };
+// the highest peak of a time profile over one period (circular, smoothed over 3 bins): its bin
+function rftPeakBin(y){ const n = y.length; let k = 0, b = -1;
+  for(let i=0;i<n;i++){ const v = y[(i-1+n)%n] + y[i] + y[(i+1)%n]; if(v > b){ b = v; k = i; } } return k; }
 // 2-D histogram with a real y axis: counts[ix][iy], equal bins over x0..x1 and y0..y1; shade = log of the count
 // one heat map in the band [top, top + hb) of a canvas; the time labels only where xlab (the lowest band)
 function heatBand(g, w, top, hb, spec, xlab){
@@ -1065,11 +1075,30 @@ function plotHeatStack(id, panels, spec){
   const {g,w,h}=setupCanvas(id), xb=Math.round(24*K), hb=(h-xb)/panels.length;
   panels.forEach((pn,i)=>{ const last = i===panels.length-1;
     heatBand(g, w, i*hb, last ? hb+xb : hb, Object.assign({}, spec, {counts: pn.counts || spec.blank, color:pn.color, ylabel:`${pn.label} · Qlong (ADC)`,
-      empty:`${pn.label}: no hits with an RF phase yet`, marks:(spec.marks||[]).map(m=>i===0 ? m : {x:m.x, color:m.color})}, pn.y1 != null ? {y1:pn.y1} : {}), last); });
+      empty:`${pn.label}: no hits with an RF phase yet`, marks:(spec.marks||[]).concat(pn.marks||[]).map(m=>i===0 || m.species ? m : {x:m.x, color:m.color})}, pn.y1 != null ? {y1:pn.y1} : {}), last); });
   PLOTS[id]=null;
 }
 // the RF timing tab's groups: the tracker planes 0-2 and the gas Cherenkov (3, its two PMTs summed)
 const RFT_NAME = p => p===3 ? 'Cherenkov' : 'T'+p, RFT_COLOR = p => p===3 ? '#9467bd' : PLANE_COLOR[p];
+// the tag fraction's electron phase, as its own e- mark takes it: the raw bin of /rftag most often tagged (the fraction,
+// smoothed over 3 bins), or null (50 tagged T1 hits at least)
+function rftElectronBin(T){
+  if(!T || !T.den || !T.num || T.num.reduce((a,b)=>a+b,0) <= 50) return null;
+  const n = T.den.length, fr = T.den.map((d,i)=>d >= 20 ? 100*T.num[i]/d : 0);
+  let k = 0, b = -1; for(let i=0;i<n;i++){ const v = fr[(i-1+n)%n] + fr[i] + fr[(i+1)%n]; if(v > b){ b = v; k = i; } } return k; }
+// a raw bin's centre on a turn of the period (s: the raw bin drawn first)
+const rftBinX = (b, s, x0, per, n) => x0 + (((b - s) % n + n) % n + 0.5) * per / n;
+// e (at xe), and muons and pions after it for the momentum given (heavy), on every period drawn
+function rftSpeciesMarks(xe, x0, per, np_, heavy, elabel){
+  const p = +document.getElementById('rft_p').value, out = [];
+  const after = m => 24.3/0.299792458 * (Math.sqrt(1 + (m/p)**2) - 1);
+  const at = dx => { let x = xe + dx; while(x >= x0 + per) x -= per; return x; };
+  for(let k=0;k<np_;k++){
+    out.push({x:xe + k*per, color:css('--fg'), label:k ? '' : (elabel || 'e⁻'), species:true});
+    if(heavy && p > 0){ out.push({x:at(after(105.66)) + k*per, color:'#bcbd22', label:k ? '' : 'μ⁻', species:true});
+                        out.push({x:at(after(139.57)) + k*per, color:'#d62728', label:k ? '' : 'π⁻', species:true}); } }
+  return out;
+}
 function drawRft(){
   drawRftTag();
   const note = document.getElementById('rft_note'), none = t=>{ message('c_rft_q', t); message('c_rft_t', t); };
@@ -1089,24 +1118,43 @@ function drawRft(){
   if(!have.length){ none(split ? 'no tracker or Cherenkov hits with an RF phase yet' : `no ${RFT_NAME(+sel)} hits with an RF phase yet`); legend('leg_rft_t', []); return; }
   // one turn of the period for every plane shown: the peak of their sum to the middle, the axis counted from it
   const n = have[0].P.counts.length, colSum = col=>col.reduce((a,b)=>a+b,0);
+  // the tracker's peak (the Cherenkov, much of it dark counts, does not move the view), else the Cherenkov's
+  const tot = new Array(n).fill(0), by = have.some(x=>x.p<3) ? have.filter(x=>x.p<3) : have;
+  for(const {P} of by) P.counts.forEach((col,i)=>{ tot[i] += colSum(col); });
+  // centred: on the tag fraction's own turn (T1's busiest bin in the middle), so T1 here and there share one axis;
+  // without the tag fraction, the tracker's busiest bin
+  const TG = RTAG && RTAG.den && RTAG.nt === n ? RTAG : null, P1 = RFT.planes.find(x=>x.plane===1);
+  const kRef = TG ? TG.den.indexOf(Math.max(...TG.den)) : tot.indexOf(Math.max(...tot)), centre = document.getElementById('rft_center').checked;
   let sh = 0, x0 = 0;
-  if(document.getElementById('rft_center').checked){
-    // on the tracker's peak when it is shown (the Cherenkov, much of it dark counts, does not move the view), else the Cherenkov's
-    const tot = new Array(n).fill(0), by = have.some(x=>x.p<3) ? have.filter(x=>x.p<3) : have;
-    for(const {P} of by) P.counts.forEach((col,i)=>{ tot[i] += colSum(col); });
-    const k = tot.indexOf(Math.max(...tot)); sh = (k - Math.floor(n/2) + n) % n; x0 = -(Math.floor(n/2) + 0.5) * per / n;
-  }
+  if(centre){ sh = (kRef - Math.floor(n/2) + n) % n; x0 = -(Math.floor(n/2) + 0.5) * per / n; }
+  // line up the peaks: T0, T2 and the Cherenkov each turned by its highest peak's distance from T1's (T1 never moves)
+  const peaks = rftPeaksBtn.getAttribute('aria-pressed') === 'true', ref = rftPeakBin(P1 ? P1.counts.map(colSum) : tot), dk = {};
+  for(const {p,P} of have) dk[p] = peaks && p !== 1 ? ((rftPeakBin(P.counts.map(colSum)) - ref + n + Math.floor(n/2)) % n) - Math.floor(n/2) : 0;
   const np_ = +document.getElementById('rft_np').value === 1 ? 1 : 2;   // the period drawn once or twice side by side
-  const x1 = x0 + np_*per, turn = c => { const r = c.map((_,i)=>c[(i + sh) % n]); return np_ === 2 ? r.concat(r) : r; };
+  const x1 = x0 + np_*per, turnBy = (c, p) => { const s = (sh + (dk[p] || 0) + n) % n, r = c.map((_,i)=>c[(i + s) % n]); return np_ === 2 ? r.concat(r) : r; };
+  const turn = c => turnBy(c, -1);
+  // e, mu, pi from the tag fraction's electron phase on T1; the Cherenkov's electrons at that phase less each PMT's
+  // t(T1) - t(PMT) peak (moved with its data when the peaks are lined up); none on T0, T2 (not locked to T1's times)
+  const eb = rftElectronBin(TG), bin = per / n;
+  const speciesOf = p => { if(eb == null) return []; const s = (sh + (dk[p] || 0) + n) % n;
+    const C3 = ((RFT.align && RFT.align.channels) || []).filter(c=>c.plane===3);
+    if(p === 3 && C3.length && C3.every(c=>c.coinc_ns != null))   // on T1's time (each PMT by its coincidence peak): T1's electrons
+      return rftSpeciesMarks(rftBinX(eb, s, x0, per, n), x0, per, np_, false);
+    if(p === 3) return (TG.pmts || []).filter(q=>q.peak_ns != null)
+      .flatMap(q=>rftSpeciesMarks(rftBinX(eb - Math.round(q.peak_ns / bin), s, x0, per, n), x0, per, np_, false, `e⁻ ${q.board}`));
+    return p === 1 ? rftSpeciesMarks(rftBinX(eb, s, x0, per, n), x0, per, np_, true) : []; };
   const marks = np_ === 2 ? [{x:x0 + per, label:`+${per.toFixed(2)} ns: the same period again`}] : [];
   const edges = Array.from({length:n*np_ + 1}, (_,i)=>x0 + i*per/n);
   const nxt = np_ === 2 ? 16 : 10;   // ticks every 2.5 ns over two periods, 1-2 ns over one
   const axes = {x0, x1, y0:0, y1:RFT.qmax, xfmt:v=>sinum(v)+' ns', nxt, marks};
   // each its own Qlong axis (the Cherenkov's 0-512 ADC; an older analysis gives one for all)
-  if(split) plotHeatStack('c_rft_q', Ps.map(({p,P})=>({label:RFT_NAME(p), counts:P ? turn(P.counts) : null, color:RFT_COLOR(p), y1:P && P.qmax})),
+  if(split) plotHeatStack('c_rft_q', Ps.map(({p,P})=>({label:RFT_NAME(p), counts:P ? turnBy(P.counts, p) : null, color:RFT_COLOR(p), y1:P && P.qmax, marks:P ? speciesOf(p) : []})),
                           Object.assign({blank:turn(have[0].P.counts).map(col=>col.map(()=>0))}, axes));
-  else plotHeat('c_rft_q', Object.assign({counts:turn(have[0].P.counts), color:RFT_COLOR(have[0].p), ylabel:'Qlong (ADC)'}, axes, {y1:have[0].P.qmax || RFT.qmax}));
-  const series = have.map(({p,P})=>{ const y = turn(P.counts).map(colSum), tot = P.n || 1;
+  else plotHeat('c_rft_q', Object.assign({counts:turnBy(have[0].P.counts, have[0].p), color:RFT_COLOR(have[0].p), ylabel:'Qlong (ADC)'}, axes,
+                                         {y1:have[0].P.qmax || RFT.qmax, marks:marks.concat(speciesOf(have[0].p))}));
+  if(peaks) note.textContent += ' · peaks lined up on T1\'s (moved by): '
+    + have.map(({p})=>`${RFT_NAME(p)} ${dk[p] > 0 ? '−' : dk[p] < 0 ? '+' : ''}${Math.abs(dk[p]*per/n).toFixed(2)} ns`).join(', ');
+  const series = have.map(({p,P})=>{ const y = turnBy(P.counts, p).map(colSum), tot = P.n || 1;
     return {kind:'step', edges, y: norm ? y.map(v=>v/tot) : y, color:RFT_COLOR(p)}; });
   const VT = VW.c_rft_t || {};   // y only: an x set by hand earlier (kept in the browser) would not follow the heat map
   plot('c_rft_t', {x0, x1, view:{y0:VT.y0, y1:VT.y1}, series, ylabel: norm ? 'share of the plane\'s hits / bin' : 'hits / bin', xfmt:v=>sinum(v)+' ns', nxt, marks,
@@ -1451,11 +1499,12 @@ applyLayout(store.get(LAYOUT_KEY, {}));
 // the card's bar: the ranges as numbers. The wheel zooms a plot only once it was clicked, until the pointer leaves it (the
 // page scrolls otherwise). Not the pulse height on every channel or the side-by-side panels; the pulse height's x is its
 // Qlong range (zoomed by its own drag), only its y here.
-const VW_PLOTS = ['c_chan','c_total','c_q','c_iat','c_dt','c_crate','c_spec','c_status','c_p','c_res','c_r','c_occ','c_cl','c_ncand','c_nh','c_rft_t',
+const VW_PLOTS = ['c_chan','c_total','c_q','c_iat','c_dt','c_crate','c_spec','c_status','c_p','c_res','c_r','c_occ','c_cl','c_ncand','c_nh','c_rft_t','c_rft_tag',
   'c_sum_chan','c_sum_rate','c_sum_status','c_sum_p','c_sum_res','c_sum_r','c_sum_occ','c_sum_cl','c_sum_ncand','c_sum_nh'];
 const VW_FOLLOW = new Set(['c_total','c_crate','c_status']);   // live time charts: the wheel changes how much of the newest they show
-// the RF time-of-flight marginal: its x is the heat map's (one or two periods, centred as it is), only its y here
-const VW_YONLY = new Set(['c_q', 'c_rft_t']);
+// the RF time-of-flight marginal and the Cherenkov tag fraction: their x is the heat map's (one or two periods, centred
+// as it is), only their y here
+const VW_YONLY = new Set(['c_q', 'c_rft_t', 'c_rft_tag']);
 const VW_HELP = 'click the plot, then: wheel zooms x · shift+wheel zooms y · drag across zooms into that span · over an axis, ' +
   'the wheel zooms it and dragging moves it · double-click: automatic again';
 function vwSet(id, r){

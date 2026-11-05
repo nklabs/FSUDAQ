@@ -75,7 +75,10 @@ with the local period from their spacing (the cycle count between them uses `RFT
 digitizers' clock); a hit before the first or after the last RF trigger of its slice uses the nearest pair,
 and with fewer than two RF triggers in a slice its hits are counted as "without an RF phase". Times have the
 cable offsets removed, as in the finder, so zero is the RF reference's own phase, not the production time;
-**centre on the peak** turns the period so the fullest bin is in the middle. Qlong 0-8192 in 64-ADC bins
+**centre on the peak** turns the period so T1's busiest bin is in the middle (the tag fraction's own turn; without
+it, the tracker's), the same for every plot of the tab, so T1 above and the tag fraction below share one axis.
+**line up the peaks** moves T0, T2 and the Cherenkov so each one's highest peak (smoothed over 3 bins) sits on T1's;
+T1 never moves. It is a display shift only: the tallest peak need not be the same particle on every plane. Qlong 0-8192 in 64-ADC bins
 (higher: the top bin), 100 time bins (198 ps). Counts since the reading began or the last Clear.
 `GET /rftof` (read-only, for anyone) returns them; the tab asks for it every 3 s while it is open.
 
@@ -97,8 +100,10 @@ under the plots gives the flashes and, per board and half (ch0-7, ch8-15), the s
 plots above, T1's channels aligned alike), the T1 hits with a hit of either Cherenkov PMT (cabling kind `cherenkov`)
 in the coincidence window, over all T1 hits; T1 hits in LED flashes are left out. The radiator fires for electrons
 only, so at the electron phase it reads the Cherenkov's electron efficiency, at the pion phase its pion-associated
-light. **p** (kept in the browser) marks where muons and pions arrive after the electron phase (the bin most often
-tagged), for a 24.3 m flight path. Counted as pairs: a T1 hit both PMTs saw counts twice. The random level is the
+light. **p** (toolbar, kept in the browser) marks where muons and pions arrive after the electron phase (the bin most
+often tagged), for a 24.3 m flight path, here and on the T1 and Cherenkov heat maps (the same phase: e-, mu-, pi- at
+the same time of flight in all of them). None on T0 and T2: nothing tags their electrons, and their times are not
+locked to T1's (T0's board half has no lit LED channel, the halves' fixed difference is left in). Counted as pairs: a T1 hit both PMTs saw counts twice. The random level is the
 pairs 30-60 ns from the window, scaled to its width. `GET /rftag` (read-only, for anyone) returns it.
 
 Timing between T1 and the PMTs from this run's LED flashes: a flash is at least `LED_MIN_CH` (8) T1 channels with no
@@ -106,11 +111,15 @@ gap over 40 ns between their hits; its reference is the median time of its hits 
 the most T1 channels. Each lit T1 channel's mean time to the reference (from at least 50 flashes) is subtracted from
 its hits, an unlit one takes its board half's; a PMT takes the LED offset of the lit T1 channels on its own board half
 (15880 ch8-10 for 15880 ch15, 1443 ch7 for 1443 ch6). That takes out the boards' whole 4-16 ns jumps between runs.
-What is left is each PMT's own delay, `CHER_DELAY_NS` (cable, transit time, light path: the beam peak of t(T1) -
-t(PMT) after the LED timing, 1200 V, 1200PMT_waves_016 and test_led_017: 15880 ch15 +9.0 ns, 1443 ch6 +9.25 ns);
-the window is -10 to +25 ns about it (the leading edge's walk: bigger pulses are earlier, electron-dominated
-peaks sit ~3 ns later). It moves with the PMTs' HV and cabling: the table warns when the beam peak is more than 4 ns
-from it. Without LED flashes (or before they are read), each T1 board half is placed on its own beam peak (at least
+What is left is each PMT's own delay (cable, transit time, light path), which moves with its HV and cabling: the
+RG213 cables of 5 Nov 2026 moved it from about +9 ns to about -30 ns. So the coincidence window sits on each PMT's
+own beam peak of t(T1) - t(PMT), measured in the run (at least `CHER_PEAK_MIN` pairs within +-3 ns, over 3x the
+level far from it): its edges where the pairs (smoothed over 2.5 ns) fall to twice that level, plus 1 ns, 5-25 ns
+from the peak (the walk tail of small pulses runs ~18 ns to negative t(T1) - t(PMT)); the random level from the
+pairs over 10 ns outside it. Until a run has that peak, the window is -10 to +25 ns about `CHER_DELAY_NS` (the
+peaks of 5 Nov, Production run 016: 15880 ch15 -30.25 ns, 1443 ch6 -25.25 ns). With `align=1`, `GET /rftof` puts
+the Cherenkov's hits on T1's time: each LED-timed PMT is moved further by its measured peak (`coinc_ns` in the
+shifts), t(T1) = t(PMT) + peak, so its electrons sit at T1's electrons' time of flight. Without LED flashes (or before they are read), each T1 board half is placed on its own beam peak (at least
 200 pairs in it); board halves with fewer stay untimed and are listed. The LED timing survives Clear (it describes
 the run's boards).
 
